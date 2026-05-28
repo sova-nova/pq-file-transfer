@@ -1,0 +1,8 @@
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-server.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-client.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/edit_cache.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/rebuild_cache.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-server_autogen_timestamp_deps.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-server_autogen.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-client_autogen_timestamp_deps.dir
+/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-client_autogen.dir

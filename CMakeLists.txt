@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# This is the fix — tells CMake to auto-run moc on Q_OBJECT classes
+set(CMAKE_AUTOMOC ON)
+
 # --- Protocol library (header-only, shared by server and client) ---
 add_library(protocol INTERFACE)
 target_include_directories(protocol INTERFACE ${CMAKE_SOURCE_DIR}/protocol)
@@ -18,6 +21,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
 add_executable(pq-client
     client/main.cpp
+    client/main_window.h
     client/main_window.cpp
     client/transfer_engine.cpp
     client/crypto_engine.cpp
