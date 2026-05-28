@@ -10,6 +10,7 @@
  mmc:Q_OBJECT
  mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/moc_predefs.h
  mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h
+ mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h
  mdp:/usr/include/alloca.h
  mdp:/usr/include/asm-generic/bitsperlong.h
  mdp:/usr/include/asm-generic/errno-base.h
@@ -148,6 +149,7 @@
  mdp:/usr/include/c++/16/bits/specfun.h
  mdp:/usr/include/c++/16/bits/std_abs.h
  mdp:/usr/include/c++/16/bits/std_function.h
+ mdp:/usr/include/c++/16/bits/std_thread.h
  mdp:/usr/include/c++/16/bits/stdexcept_except.h
  mdp:/usr/include/c++/16/bits/stdexcept_throw.h
  mdp:/usr/include/c++/16/bits/stdexcept_throwfwd.h
@@ -178,6 +180,7 @@
  mdp:/usr/include/c++/16/bits/streambuf_iterator.h
  mdp:/usr/include/c++/16/bits/string_view.tcc
  mdp:/usr/include/c++/16/bits/stringfwd.h
+ mdp:/usr/include/c++/16/bits/this_thread_sleep.h
  mdp:/usr/include/c++/16/bits/uniform_int_dist.h
  mdp:/usr/include/c++/16/bits/unique_ptr.h
  mdp:/usr/include/c++/16/bits/unordered_map.h
@@ -234,6 +237,7 @@
  mdp:/usr/include/c++/16/string
  mdp:/usr/include/c++/16/string_view
  mdp:/usr/include/c++/16/system_error
+ mdp:/usr/include/c++/16/thread
  mdp:/usr/include/c++/16/tr1/bessel_function.tcc
  mdp:/usr/include/c++/16/tr1/beta_function.tcc
  mdp:/usr/include/c++/16/tr1/ell_integral.tcc
@@ -440,11 +444,13 @@
  mdp:/usr/include/qt6/QtGui/qwindowdefs.h
  mdp:/usr/include/qt6/QtWidgets/QLabel
  mdp:/usr/include/qt6/QtWidgets/QMainWindow
+ mdp:/usr/include/qt6/QtWidgets/QProgressBar
  mdp:/usr/include/qt6/QtWidgets/QPushButton
  mdp:/usr/include/qt6/QtWidgets/qabstractbutton.h
  mdp:/usr/include/qt6/QtWidgets/qframe.h
  mdp:/usr/include/qt6/QtWidgets/qlabel.h
  mdp:/usr/include/qt6/QtWidgets/qmainwindow.h
+ mdp:/usr/include/qt6/QtWidgets/qprogressbar.h
  mdp:/usr/include/qt6/QtWidgets/qpushbutton.h
  mdp:/usr/include/qt6/QtWidgets/qsizepolicy.h
  mdp:/usr/include/qt6/QtWidgets/qtabwidget.h

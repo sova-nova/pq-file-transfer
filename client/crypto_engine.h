@@ -15,19 +15,22 @@ public:
         std::vector<uint8_t> private_key;
     };
 
+    struct EncapResult {
+        std::vector<uint8_t> ciphertext;
+        std::vector<uint8_t> shared_secret;
+    };
+
     CryptoEngine() = default;
 
     KEMKeyPair generate_kem_keypair();
     SigKeyPair generate_sig_keypair();
 
-    // Returns ciphertext (shared secret stored internally or returned separately later)
-    std::vector<uint8_t> encapsulate(const std::vector<uint8_t>& public_key);
+    EncapResult encapsulate(const std::vector<uint8_t>& public_key);
     std::vector<uint8_t> decapsulate(const std::vector<uint8_t>& ciphertext,
                                       const std::vector<uint8_t>& private_key);
 
     std::vector<uint8_t> generate_aes_key(const std::vector<uint8_t>& shared_secret);
 
-    // Encrypt returns ciphertext; nonce is an output parameter
     std::vector<uint8_t> encrypt_chunk(const std::vector<uint8_t>& aes_key,
                                         const std::vector<uint8_t>& plaintext,
                                         std::vector<uint8_t>& nonce);

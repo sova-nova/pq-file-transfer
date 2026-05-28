@@ -1,5 +1,6 @@
 /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/7EM65HM6UG/moc_main_window.cpp: /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h \
   /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/moc_predefs.h \
+  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h \
   /usr/include/alloca.h \
   /usr/include/asm-generic/bitsperlong.h \
   /usr/include/asm-generic/errno-base.h \
@@ -138,6 +139,7 @@
   /usr/include/c++/16/bits/specfun.h \
   /usr/include/c++/16/bits/std_abs.h \
   /usr/include/c++/16/bits/std_function.h \
+  /usr/include/c++/16/bits/std_thread.h \
   /usr/include/c++/16/bits/stdexcept_except.h \
   /usr/include/c++/16/bits/stdexcept_throw.h \
   /usr/include/c++/16/bits/stdexcept_throwfwd.h \
@@ -168,6 +170,7 @@
   /usr/include/c++/16/bits/streambuf_iterator.h \
   /usr/include/c++/16/bits/string_view.tcc \
   /usr/include/c++/16/bits/stringfwd.h \
+  /usr/include/c++/16/bits/this_thread_sleep.h \
   /usr/include/c++/16/bits/uniform_int_dist.h \
   /usr/include/c++/16/bits/unique_ptr.h \
   /usr/include/c++/16/bits/unordered_map.h \
@@ -224,6 +227,7 @@
   /usr/include/c++/16/string \
   /usr/include/c++/16/string_view \
   /usr/include/c++/16/system_error \
+  /usr/include/c++/16/thread \
   /usr/include/c++/16/tr1/bessel_function.tcc \
   /usr/include/c++/16/tr1/beta_function.tcc \
   /usr/include/c++/16/tr1/ell_integral.tcc \
@@ -430,11 +434,13 @@
   /usr/include/qt6/QtGui/qwindowdefs.h \
   /usr/include/qt6/QtWidgets/QLabel \
   /usr/include/qt6/QtWidgets/QMainWindow \
+  /usr/include/qt6/QtWidgets/QProgressBar \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
   /usr/include/qt6/QtWidgets/qframe.h \
   /usr/include/qt6/QtWidgets/qlabel.h \
   /usr/include/qt6/QtWidgets/qmainwindow.h \
+  /usr/include/qt6/QtWidgets/qprogressbar.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
   /usr/include/qt6/QtWidgets/qtabwidget.h \

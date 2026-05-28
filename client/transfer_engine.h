@@ -3,10 +3,11 @@
 #include <string>
 #include <functional>
 #include <cstdint>
+#include <atomic>
 
 class TransferEngine {
 public:
-    TransferEngine() = default;
+    TransferEngine();
 
     void upload_file(const std::string& filepath,
                      const std::string& server_addr,
@@ -17,9 +18,17 @@ public:
                        uint16_t server_port,
                        const std::string& output_dir);
 
-    // Callbacks — the GUI will hook into these
+    void cancel();
+
+    // Callbacks — the GUI hooks into these
     std::function<void(double percent)> on_progress;
     std::function<void(const std::string& msg)> on_status;
     std::function<void(const std::string& error)> on_error;
     std::function<void(const std::string& filepath)> on_complete;
+    std::function<void(const std::string& transfer_id)> on_transfer_id;  // sender gets this back
+
+private:
+    std::atomic<bool> cancel_flag_{false};
+
+    int connect_to_server(const std::string& addr, uint16_t port);
 };

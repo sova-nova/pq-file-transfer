@@ -184,6 +184,7 @@ pq-client: CMakeFiles/pq-client.dir/build.make
 pq-client: CMakeFiles/pq-client.dir/compiler_depend.ts
 pq-client: libprotocol.a
 pq-client: /usr/lib64/libQt6Widgets.so.6.11.1
+pq-client: /usr/local/lib64/liboqs.so
 pq-client: /usr/lib64/libQt6Gui.so.6.11.1
 pq-client: /usr/lib64/libGLX.so
 pq-client: /usr/lib64/libOpenGL.so

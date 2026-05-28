@@ -101,6 +101,13 @@
 		"/usr/share/cmake/Modules/Platform/Linker/GNU.cmake",
 		"/usr/share/cmake/Modules/Internal/CMakeInspectCXXLinker.cmake",
 		"/usr/share/cmake/Modules/CMakeCXXCompiler.cmake.in",
+		"/usr/share/cmake/Modules/FindThreads.cmake",
+		"/usr/share/cmake/Modules/CheckLibraryExists.cmake",
+		"/usr/share/cmake/Modules/CheckIncludeFileCXX.cmake",
+		"/usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake",
+		"/usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake",
+		"/usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake",
+		"/usr/share/cmake/Modules/FindPackageMessage.cmake",
 		"/usr/lib64/cmake/Qt6/Qt6ConfigVersion.cmake",
 		"/usr/lib64/cmake/Qt6/Qt6ConfigVersionImpl.cmake",
 		"/usr/lib64/cmake/Qt6/Qt6Config.cmake",
@@ -119,7 +126,6 @@
 		"/usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake",
 		"/usr/share/cmake/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake",
 		"/usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake",
-		"/usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake",
 		"/usr/lib64/cmake/Qt6/QtFeatureCommon.cmake",
 		"/usr/lib64/cmake/Qt6/QtPublicAndroidHelpers.cmake",
 		"/usr/lib64/cmake/Qt6/QtPublicAppleHelpers.cmake",
@@ -619,12 +625,12 @@
 		"/usr/lib64/qt6/mkspecs/linux-g++",
 		"/usr/include/qt6/QtGui",
 		"/usr/include/qt6/QtWidgets",
+		"/usr/local/include",
 		"/usr/include",
 		"/usr/include/c++/16",
 		"/usr/include/c++/16/x86_64-redhat-linux",
 		"/usr/include/c++/16/backward",
-		"/usr/lib/gcc/x86_64-redhat-linux/16/include",
-		"/usr/local/include"
+		"/usr/lib/gcc/x86_64-redhat-linux/16/include"
 	],
 	"MOC_MACRO_NAMES" : 
 	[

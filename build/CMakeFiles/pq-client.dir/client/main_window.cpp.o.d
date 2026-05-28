@@ -337,8 +337,55 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/qt6/QtWidgets/QPushButton \
  /usr/include/qt6/QtWidgets/qpushbutton.h \
  /usr/include/qt6/QtWidgets/qabstractbutton.h \
+ /usr/include/qt6/QtWidgets/QProgressBar \
+ /usr/include/qt6/QtWidgets/qprogressbar.h /usr/include/c++/16/thread \
+ /usr/include/c++/16/bits/std_thread.h \
+ /usr/include/c++/16/bits/this_thread_sleep.h \
+ /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h \
+ /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/key_store.h \
  /usr/include/qt6/QtWidgets/QVBoxLayout \
  /usr/include/qt6/QtWidgets/qboxlayout.h \
  /usr/include/qt6/QtWidgets/qlayout.h \
  /usr/include/qt6/QtWidgets/qlayoutitem.h \
- /usr/include/qt6/QtWidgets/qgridlayout.h
+ /usr/include/qt6/QtWidgets/qgridlayout.h \
+ /usr/include/qt6/QtWidgets/QFileDialog \
+ /usr/include/qt6/QtWidgets/qfiledialog.h /usr/include/qt6/QtCore/qdir.h \
+ /usr/include/qt6/QtCore/qdirlisting.h \
+ /usr/include/qt6/QtCore/qfiledevice.h /usr/include/c++/16/filesystem \
+ /usr/include/c++/16/bits/fs_fwd.h /usr/include/c++/16/bits/fs_path.h \
+ /usr/include/c++/16/locale /usr/include/c++/16/bits/locale_facets.h \
+ /usr/include/c++/16/cwctype /usr/include/wctype.h \
+ /usr/include/bits/wctype-wchar.h \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/ctype_base.h \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/ctype_inline.h \
+ /usr/include/c++/16/bits/locale_facets.tcc \
+ /usr/include/c++/16/bits/locale_facets_nonio.h \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/time_members.h \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/messages_members.h \
+ /usr/include/libintl.h /usr/include/c++/16/bits/codecvt.h \
+ /usr/include/c++/16/bits/locale_facets_nonio.tcc \
+ /usr/include/c++/16/bits/locale_conv.h /usr/include/c++/16/iomanip \
+ /usr/include/c++/16/bits/quoted_string.h /usr/include/c++/16/sstream \
+ /usr/include/c++/16/istream /usr/include/c++/16/ios \
+ /usr/include/c++/16/bits/basic_ios.h \
+ /usr/include/c++/16/bits/basic_ios.tcc /usr/include/c++/16/ostream \
+ /usr/include/c++/16/bits/ostream.h \
+ /usr/include/c++/16/bits/ostream_print.h \
+ /usr/include/c++/16/bits/ostream.tcc \
+ /usr/include/c++/16/bits/istream.tcc \
+ /usr/include/c++/16/bits/sstream.tcc /usr/include/c++/16/codecvt \
+ /usr/include/c++/16/bits/fs_dir.h /usr/include/c++/16/bits/fs_ops.h \
+ /usr/include/qt6/QtCore/qdatetime.h /usr/include/qt6/QtCore/qcalendar.h \
+ /usr/include/qt6/QtCore/qlocale.h /usr/include/qt6/QtCore/qfile.h \
+ /usr/include/qt6/QtCore/qfileinfo.h /usr/include/qt6/QtCore/qtimezone.h \
+ /usr/include/qt6/QtWidgets/qdialog.h \
+ /usr/include/qt6/QtWidgets/QInputDialog \
+ /usr/include/qt6/QtWidgets/qinputdialog.h \
+ /usr/include/qt6/QtWidgets/qlineedit.h \
+ /usr/include/qt6/QtGui/qtextcursor.h \
+ /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
+ /usr/include/qt6/QtGui/qtextoption.h \
+ /usr/include/qt6/QtWidgets/QMessageBox \
+ /usr/include/qt6/QtWidgets/qmessagebox.h \
+ /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
+ /usr/include/qt6/QtCore/QMetaObject
