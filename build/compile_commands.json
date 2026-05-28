@@ -1,6 +1,18 @@
 [
 {
   "directory": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build",
+  "command": "/usr/lib64/ccache/c++  -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/protocol_autogen/include -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol -std=gnu++17 -o CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/protocol_autogen/mocs_compilation.cpp",
+  "file": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/protocol_autogen/mocs_compilation.cpp",
+  "output": "CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.o"
+},
+{
+  "directory": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build",
+  "command": "/usr/lib64/ccache/c++  -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/protocol_autogen/include -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol -std=gnu++17 -o CMakeFiles/protocol.dir/protocol/protocol.cpp.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/protocol.cpp",
+  "file": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/protocol.cpp",
+  "output": "CMakeFiles/protocol.dir/protocol/protocol.cpp.o"
+},
+{
+  "directory": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build",
   "command": "/usr/lib64/ccache/c++  -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-server_autogen/include -I/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol -std=gnu++17 -o CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-server_autogen/mocs_compilation.cpp",
   "file": "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-server_autogen/mocs_compilation.cpp",
   "output": "CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o"

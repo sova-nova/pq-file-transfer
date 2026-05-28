@@ -609,7 +609,10 @@
 	],
 	"MOC_PREDEFS_FILE" : "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-server_autogen/moc_predefs.h",
 	"MOC_RELAXED_MODE" : false,
-	"MOC_SKIP" : [],
+	"MOC_SKIP" : 
+	[
+		"/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/protocol_autogen/mocs_compilation.cpp"
+	],
 	"MULTI_CONFIG" : false,
 	"PARALLEL" : 8,
 	"PARSE_CACHE_FILE" : "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/pq-server_autogen.dir/ParseCache.txt",

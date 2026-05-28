@@ -1,0 +1,2 @@
+/usr/bin/ar qc libprotocol.a CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.o CMakeFiles/protocol.dir/protocol/protocol.cpp.o
+/usr/bin/ranlib libprotocol.a

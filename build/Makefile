@@ -117,6 +117,19 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named protocol
+
+# Build rule for target.
+protocol: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 protocol
+.PHONY : protocol
+
+# fast build rule for target.
+protocol/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/build
+.PHONY : protocol/fast
+
+#=============================================================================
 # Target rules for targets named pq-server
 
 # Build rule for target.
@@ -141,6 +154,32 @@ pq-client: cmake_check_build_system
 pq-client/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pq-client.dir/build.make CMakeFiles/pq-client.dir/build
 .PHONY : pq-client/fast
+
+#=============================================================================
+# Target rules for targets named protocol_autogen_timestamp_deps
+
+# Build rule for target.
+protocol_autogen_timestamp_deps: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 protocol_autogen_timestamp_deps
+.PHONY : protocol_autogen_timestamp_deps
+
+# fast build rule for target.
+protocol_autogen_timestamp_deps/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol_autogen_timestamp_deps.dir/build.make CMakeFiles/protocol_autogen_timestamp_deps.dir/build
+.PHONY : protocol_autogen_timestamp_deps/fast
+
+#=============================================================================
+# Target rules for targets named protocol_autogen
+
+# Build rule for target.
+protocol_autogen: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 protocol_autogen
+.PHONY : protocol_autogen
+
+# fast build rule for target.
+protocol_autogen/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol_autogen.dir/build.make CMakeFiles/protocol_autogen.dir/build
+.PHONY : protocol_autogen/fast
 
 #=============================================================================
 # Target rules for targets named pq-server_autogen_timestamp_deps
@@ -362,6 +401,54 @@ pq-server_autogen/mocs_compilation.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/pq-server.dir/build.make CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.s
 .PHONY : pq-server_autogen/mocs_compilation.cpp.s
 
+protocol/protocol.o: protocol/protocol.cpp.o
+.PHONY : protocol/protocol.o
+
+# target to build an object file
+protocol/protocol.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol/protocol.cpp.o
+.PHONY : protocol/protocol.cpp.o
+
+protocol/protocol.i: protocol/protocol.cpp.i
+.PHONY : protocol/protocol.i
+
+# target to preprocess a source file
+protocol/protocol.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol/protocol.cpp.i
+.PHONY : protocol/protocol.cpp.i
+
+protocol/protocol.s: protocol/protocol.cpp.s
+.PHONY : protocol/protocol.s
+
+# target to generate assembly for a file
+protocol/protocol.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol/protocol.cpp.s
+.PHONY : protocol/protocol.cpp.s
+
+protocol_autogen/mocs_compilation.o: protocol_autogen/mocs_compilation.cpp.o
+.PHONY : protocol_autogen/mocs_compilation.o
+
+# target to build an object file
+protocol_autogen/mocs_compilation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.o
+.PHONY : protocol_autogen/mocs_compilation.cpp.o
+
+protocol_autogen/mocs_compilation.i: protocol_autogen/mocs_compilation.cpp.i
+.PHONY : protocol_autogen/mocs_compilation.i
+
+# target to preprocess a source file
+protocol_autogen/mocs_compilation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.i
+.PHONY : protocol_autogen/mocs_compilation.cpp.i
+
+protocol_autogen/mocs_compilation.s: protocol_autogen/mocs_compilation.cpp.s
+.PHONY : protocol_autogen/mocs_compilation.s
+
+# target to generate assembly for a file
+protocol_autogen/mocs_compilation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/protocol.dir/build.make CMakeFiles/protocol.dir/protocol_autogen/mocs_compilation.cpp.s
+.PHONY : protocol_autogen/mocs_compilation.cpp.s
+
 server/main.o: server/main.cpp.o
 .PHONY : server/main.o
 
@@ -398,8 +485,11 @@ help:
 	@echo "... pq-client_autogen_timestamp_deps"
 	@echo "... pq-server_autogen"
 	@echo "... pq-server_autogen_timestamp_deps"
+	@echo "... protocol_autogen"
+	@echo "... protocol_autogen_timestamp_deps"
 	@echo "... pq-client"
 	@echo "... pq-server"
+	@echo "... protocol"
 	@echo "... client/crypto_engine.o"
 	@echo "... client/crypto_engine.i"
 	@echo "... client/crypto_engine.s"
@@ -421,6 +511,12 @@ help:
 	@echo "... pq-server_autogen/mocs_compilation.o"
 	@echo "... pq-server_autogen/mocs_compilation.i"
 	@echo "... pq-server_autogen/mocs_compilation.s"
+	@echo "... protocol/protocol.o"
+	@echo "... protocol/protocol.i"
+	@echo "... protocol/protocol.s"
+	@echo "... protocol_autogen/mocs_compilation.o"
+	@echo "... protocol_autogen/mocs_compilation.i"
+	@echo "... protocol_autogen/mocs_compilation.s"
 	@echo "... server/main.o"
 	@echo "... server/main.i"
 	@echo "... server/main.s"

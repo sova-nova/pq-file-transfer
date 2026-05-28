@@ -8,6 +8,7 @@ pq-client: \
   CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o \
   CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o \
   CMakeFiles/pq-client.dir/client/key_store.cpp.o \
+  libprotocol.a \
   /usr/lib64/libQt6Widgets.so.6.11.1 \
   /usr/lib64/libQt6Gui.so.6.11.1 \
   /usr/lib64/libGLX.so \
@@ -97,6 +98,8 @@ CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o:
 CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o:
 
 CMakeFiles/pq-client.dir/client/key_store.cpp.o:
+
+libprotocol.a:
 
 /usr/lib64/libQt6Widgets.so.6.11.1:
 

@@ -4,6 +4,7 @@ pq-server: \
   /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o \
   CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o \
   CMakeFiles/pq-server.dir/server/main.cpp.o \
+  libprotocol.a \
   /usr/lib/gcc/x86_64-redhat-linux/16/libstdc++.so \
   /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/libm.so \
   /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/libm.so \
@@ -48,6 +49,8 @@ pq-server: \
 CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o:
 
 CMakeFiles/pq-server.dir/server/main.cpp.o:
+
+libprotocol.a:
 
 /usr/lib/gcc/x86_64-redhat-linux/16/libstdc++.so:
 

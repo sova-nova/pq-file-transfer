@@ -118,6 +118,7 @@ pq-server: CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o
 pq-server: CMakeFiles/pq-server.dir/server/main.cpp.o
 pq-server: CMakeFiles/pq-server.dir/build.make
 pq-server: CMakeFiles/pq-server.dir/compiler_depend.ts
+pq-server: libprotocol.a
 pq-server: CMakeFiles/pq-server.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX executable pq-server"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/pq-server.dir/link.txt --verbose=$(VERBOSE)

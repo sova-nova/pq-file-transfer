@@ -182,6 +182,7 @@ pq-client: CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o
 pq-client: CMakeFiles/pq-client.dir/client/key_store.cpp.o
 pq-client: CMakeFiles/pq-client.dir/build.make
 pq-client: CMakeFiles/pq-client.dir/compiler_depend.ts
+pq-client: libprotocol.a
 pq-client: /usr/lib64/libQt6Widgets.so.6.11.1
 pq-client: /usr/lib64/libQt6Gui.so.6.11.1
 pq-client: /usr/lib64/libGLX.so

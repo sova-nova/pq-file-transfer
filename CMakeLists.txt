@@ -4,13 +4,13 @@ project(pq-file-transfer VERSION 0.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# This is the fix — tells CMake to auto-run moc on Q_OBJECT classes
 set(CMAKE_AUTOMOC ON)
 
-# --- Protocol library (header-only, shared by server and client) ---
-add_library(protocol INTERFACE)
-target_include_directories(protocol INTERFACE ${CMAKE_SOURCE_DIR}/protocol)
+# --- Protocol library (now compiled, shared by server and client) ---
+add_library(protocol
+    protocol/protocol.cpp
+)
+target_include_directories(protocol PUBLIC ${CMAKE_SOURCE_DIR}/protocol)
 
 # --- Relay Server ---
 add_executable(pq-server server/main.cpp)

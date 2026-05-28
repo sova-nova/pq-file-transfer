@@ -478,6 +478,7 @@ set(CMAKE_MAKEFILE_PRODUCTS
   "CMakeFiles/4.3.0/CMakeCXXCompiler.cmake"
   "CMakeFiles/4.3.0/CMakeCXXCompiler.cmake"
   "CMakeFiles/4.3.0/CMakeCXXCompiler.cmake"
+  "CMakeFiles/protocol_autogen.dir/AutogenInfo.json"
   "CMakeFiles/pq-server_autogen.dir/AutogenInfo.json"
   "CMakeFiles/pq-client_autogen.dir/AutogenInfo.json"
   ".qt/QtDeploySupport.cmake"
@@ -487,8 +488,11 @@ set(CMAKE_MAKEFILE_PRODUCTS
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
+  "CMakeFiles/protocol.dir/DependInfo.cmake"
   "CMakeFiles/pq-server.dir/DependInfo.cmake"
   "CMakeFiles/pq-client.dir/DependInfo.cmake"
+  "CMakeFiles/protocol_autogen_timestamp_deps.dir/DependInfo.cmake"
+  "CMakeFiles/protocol_autogen.dir/DependInfo.cmake"
   "CMakeFiles/pq-server_autogen_timestamp_deps.dir/DependInfo.cmake"
   "CMakeFiles/pq-server_autogen.dir/DependInfo.cmake"
   "CMakeFiles/pq-client_autogen_timestamp_deps.dir/DependInfo.cmake"
