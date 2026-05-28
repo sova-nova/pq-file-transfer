@@ -343,6 +343,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: \
  /usr/include/c++/16/bits/std_thread.h \
  /usr/include/c++/16/bits/this_thread_sleep.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/7EM65HM6UG/../../../client/transfer_engine.h \
+ /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/messages.h \
  /usr/include/qt6/QtGui/qtextcursor.h \
  /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
  /usr/include/qt6/QtGui/qtextoption.h \

@@ -433,8 +433,10 @@ protocol_autogen/timestamp: \
 	/usr/share/cmake/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake \
 	/usr/share/cmake/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake \
 	/usr/share/cmake/Modules/FindOpenGL.cmake \
+	/usr/share/cmake/Modules/FindOpenSSL.cmake \
 	/usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake \
 	/usr/share/cmake/Modules/FindPackageMessage.cmake \
+	/usr/share/cmake/Modules/FindPkgConfig.cmake \
 	/usr/share/cmake/Modules/FindThreads.cmake \
 	/usr/share/cmake/Modules/FindVulkan.cmake \
 	/usr/share/cmake/Modules/GNUInstallDirs.cmake \

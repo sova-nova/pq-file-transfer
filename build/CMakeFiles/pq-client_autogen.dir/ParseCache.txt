@@ -11,6 +11,7 @@
  mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/moc_predefs.h
  mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h
  mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h
+ mdp:/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/messages.h
  mdp:/usr/include/alloca.h
  mdp:/usr/include/asm-generic/bitsperlong.h
  mdp:/usr/include/asm-generic/errno-base.h

@@ -1,6 +1,7 @@
 /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/7EM65HM6UG/moc_main_window.cpp: /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h \
   /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/moc_predefs.h \
   /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h \
+  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/messages.h \
   /usr/include/alloca.h \
   /usr/include/asm-generic/bitsperlong.h \
   /usr/include/asm-generic/errno-base.h \

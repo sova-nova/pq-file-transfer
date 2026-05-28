@@ -920,8 +920,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK"
-      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK"
+      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7"
+      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -932,13 +932,13 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: true
       stdout: |
-        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK'
+        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_fe3b0/fast
-        /usr/bin/gmake  -f CMakeFiles/cmTC_fe3b0.dir/build.make CMakeFiles/cmTC_fe3b0.dir/build
-        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK'
-        Building CXX object CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o
-        /usr/lib64/ccache/c++   -v -o CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_e194c/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_e194c.dir/build.make CMakeFiles/cmTC_e194c.dir/build
+        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7'
+        Building CXX object CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o
+        /usr/lib64/ccache/c++   -v -o CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp
         Using built-in specs.
         COLLECT_GCC=/usr/bin/c++
         OFFLOAD_TARGET_NAMES=nvptx-none:amdgcn-amdhsa
@@ -972,8 +972,8 @@ events:
         COMPILER_PATH=/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/:/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../:/lib/:/usr/lib/
         COLLECT_GCC_OPTIONS='-fdiagnostics-color=always' '-v' '-c' '-o' 'CMakeFiles/cmTC_28b5d.dir/CMakeCXXCompilerABI.cpp.o' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'CMakeFiles/cmTC_28b5d.dir/CMakeCXXCompilerABI.cpp.'
-        Linking CXX executable cmTC_fe3b0
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_fe3b0.dir/link.txt --verbose=1
+        Linking CXX executable cmTC_e194c
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_e194c.dir/link.txt --verbose=1
         Using built-in specs.
         COLLECT_GCC=/usr/bin/c++
         COLLECT_LTO_WRAPPER=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper
@@ -986,14 +986,14 @@ events:
         gcc version 16.1.1 20260515 (Red Hat 16.1.1-2) (GCC) 
         COMPILER_PATH=/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/:/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/
         LIBRARY_PATH=/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../:/lib/:/usr/lib/
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_fe3b0' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_fe3b0.'
-         /usr/libexec/gcc/x86_64-redhat-linux/16/collect2 -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccfSlXTx.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_fe3b0 /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_e194c' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_e194c.'
+         /usr/libexec/gcc/x86_64-redhat-linux/16/collect2 -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cczjDJmO.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_e194c /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o
         collect2 version 16.1.1 20260515 (Red Hat 16.1.1-2)
-        /usr/bin/ld -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccfSlXTx.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_fe3b0 /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o
+        /usr/bin/ld -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cczjDJmO.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_e194c /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o
         GNU ld version 2.46-3.fc44
-        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_fe3b0' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_fe3b0.'
-        /usr/lib64/ccache/c++  -v -Wl,-v CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_fe3b0
-        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK'
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_e194c' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_e194c.'
+        /usr/lib64/ccache/c++  -v -Wl,-v CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_e194c
+        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7'
         
       exitCode: 0
   -
@@ -1032,13 +1032,13 @@ events:
       Parsed CXX implicit link information:
         link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
         linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)))("|,| |$)]
-        ignore line: [Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK']
+        ignore line: [Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7']
         ignore line: []
-        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_fe3b0/fast]
-        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_fe3b0.dir/build.make CMakeFiles/cmTC_fe3b0.dir/build]
-        ignore line: [gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-JcUXHK']
-        ignore line: [Building CXX object CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o]
-        ignore line: [/usr/lib64/ccache/c++   -v -o CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_e194c/fast]
+        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_e194c.dir/build.make CMakeFiles/cmTC_e194c.dir/build]
+        ignore line: [gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-hJbss7']
+        ignore line: [Building CXX object CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o]
+        ignore line: [/usr/lib64/ccache/c++   -v -o CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -c /usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/usr/bin/c++]
         ignore line: [OFFLOAD_TARGET_NAMES=nvptx-none:amdgcn-amdhsa]
@@ -1072,8 +1072,8 @@ events:
         ignore line: [COMPILER_PATH=/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/:/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../:/lib/:/usr/lib/]
         ignore line: [COLLECT_GCC_OPTIONS='-fdiagnostics-color=always' '-v' '-c' '-o' 'CMakeFiles/cmTC_28b5d.dir/CMakeCXXCompilerABI.cpp.o' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'CMakeFiles/cmTC_28b5d.dir/CMakeCXXCompilerABI.cpp.']
-        ignore line: [Linking CXX executable cmTC_fe3b0]
-        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_fe3b0.dir/link.txt --verbose=1]
+        ignore line: [Linking CXX executable cmTC_e194c]
+        ignore line: [/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_e194c.dir/link.txt --verbose=1]
         ignore line: [Using built-in specs.]
         ignore line: [COLLECT_GCC=/usr/bin/c++]
         ignore line: [COLLECT_LTO_WRAPPER=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper]
@@ -1086,13 +1086,13 @@ events:
         ignore line: [gcc version 16.1.1 20260515 (Red Hat 16.1.1-2) (GCC) ]
         ignore line: [COMPILER_PATH=/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/16/:/usr/libexec/gcc/x86_64-redhat-linux/:/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/]
         ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-redhat-linux/16/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/x86_64-redhat-linux/16/../../../:/lib/:/usr/lib/]
-        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_fe3b0' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_fe3b0.']
-        link line: [ /usr/libexec/gcc/x86_64-redhat-linux/16/collect2 -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccfSlXTx.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_fe3b0 /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_e194c' '-foffload-options=-l_GCC_stdc++' '-foffload-options=-l_GCC_m' '-shared-libgcc' '-mtune=generic' '-march=x86-64' '-mtls-dialect=gnu2' '-dumpdir' 'cmTC_e194c.']
+        link line: [ /usr/libexec/gcc/x86_64-redhat-linux/16/collect2 -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cczjDJmO.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_e194c /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o]
           arg [/usr/libexec/gcc/x86_64-redhat-linux/16/collect2] ==> ignore
           arg [-plugin] ==> ignore
           arg [/usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so] ==> ignore
           arg [-plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper] ==> ignore
-          arg [-plugin-opt=-fresolution=/tmp/ccfSlXTx.res] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/cczjDJmO.res] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
           arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
           arg [-plugin-opt=-pass-through=-latomic_asneeded] ==> ignore
@@ -1108,7 +1108,7 @@ events:
           arg [-dynamic-linker] ==> ignore
           arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
           arg [-o] ==> ignore
-          arg [cmTC_fe3b0] ==> ignore
+          arg [cmTC_e194c] ==> ignore
           arg [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o] ==> obj [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o]
           arg [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o] ==> obj [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o]
           arg [/usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o] ==> obj [/usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o]
@@ -1120,7 +1120,7 @@ events:
           arg [-L/lib] ==> dir [/lib]
           arg [-L/usr/lib] ==> dir [/usr/lib]
           arg [-v] ==> ignore
-          arg [CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
           arg [-lstdc++] ==> lib [stdc++]
           arg [-lm] ==> lib [m]
           arg [-lgcc_s] ==> lib [gcc_s]
@@ -1132,7 +1132,7 @@ events:
           arg [/usr/lib/gcc/x86_64-redhat-linux/16/crtend.o] ==> obj [/usr/lib/gcc/x86_64-redhat-linux/16/crtend.o]
           arg [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o] ==> obj [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o]
         ignore line: [collect2 version 16.1.1 20260515 (Red Hat 16.1.1-2)]
-        ignore line: [/usr/bin/ld -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/ccfSlXTx.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_fe3b0 /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_fe3b0.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o]
+        ignore line: [/usr/bin/ld -plugin /usr/libexec/gcc/x86_64-redhat-linux/16/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/x86_64-redhat-linux/16/lto-wrapper -plugin-opt=-fresolution=/tmp/cczjDJmO.res -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-latomic_asneeded -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lgcc --build-id --no-add-needed --eh-frame-hdr --hash-style=gnu -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_e194c /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o /usr/lib/gcc/x86_64-redhat-linux/16/crtbegin.o -L/usr/lib/gcc/x86_64-redhat-linux/16 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64 -L/lib/../lib64 -L/usr/lib/../lib64 -L/usr/lib/gcc/x86_64-redhat-linux/16/../../.. -L/lib -L/usr/lib -v CMakeFiles/cmTC_e194c.dir/CMakeCXXCompilerABI.cpp.o -lstdc++ -lm -lgcc_s -lgcc -latomic_asneeded -lc -lgcc_s -lgcc /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o]
         linker tool for 'CXX': /usr/bin/ld
         collapse obj [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crt1.o] ==> [/usr/lib64/crt1.o]
         collapse obj [/usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crti.o] ==> [/usr/lib64/crti.o]
@@ -1171,8 +1171,8 @@ events:
     checks:
       - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
     directories:
-      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J"
-      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J"
+      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E"
+      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -1182,19 +1182,434 @@ events:
       variable: "CMAKE_HAVE_LIBC_PTHREAD"
       cached: true
       stdout: |
-        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J'
+        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_cb004/fast
-        /usr/bin/gmake  -f CMakeFiles/cmTC_cb004.dir/build.make CMakeFiles/cmTC_cb004.dir/build
-        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J'
-        Building CXX object CMakeFiles/cmTC_cb004.dir/src.cxx.o
-        /usr/lib64/ccache/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=gnu++17 -o CMakeFiles/cmTC_cb004.dir/src.cxx.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J/src.cxx
-        Linking CXX executable cmTC_cb004
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_cb004.dir/link.txt --verbose=1
-        /usr/lib64/ccache/c++ CMakeFiles/cmTC_cb004.dir/src.cxx.o -o cmTC_cb004
-        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-QiU41J'
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_8f073/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_8f073.dir/build.make CMakeFiles/cmTC_8f073.dir/build
+        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E'
+        Building CXX object CMakeFiles/cmTC_8f073.dir/src.cxx.o
+        /usr/lib64/ccache/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=gnu++17 -o CMakeFiles/cmTC_8f073.dir/src.cxx.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E/src.cxx
+        Linking CXX executable cmTC_8f073
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_8f073.dir/link.txt --verbose=1
+        /usr/lib64/ccache/c++ CMakeFiles/cmTC_8f073.dir/src.cxx.o -o cmTC_8f073
+        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-1YhX1E'
         
       exitCode: 0
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:517 (find_program)"
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:295 (find_package)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "program"
+    variable: "PKG_CONFIG_EXECUTABLE"
+    description: "pkg-config executable"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "pkg-config"
+      - "pkgconf"
+    candidate_directories:
+      - "/usr/lib64/ccache/"
+      - "/home/sokosova/.local/bin/"
+      - "/home/sokosova/bin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/sbin/"
+      - "/usr/local/go/bin/"
+      - "/home/sokosova/go/bin/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/usr/bin/"
+      - "/usr/sbin/"
+      - "/usr/"
+      - "/bin/"
+      - "/sbin/"
+      - "/usr/X11R6/bin/"
+      - "/usr/X11R6/sbin/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/bin/"
+      - "/usr/pkg/sbin/"
+      - "/usr/pkg/"
+      - "/opt/bin/"
+      - "/opt/sbin/"
+      - "/opt/"
+    searched_directories:
+      - "/usr/lib64/ccache/pkg-config"
+      - "/usr/lib64/ccache/pkgconf"
+      - "/home/sokosova/.local/bin/pkg-config"
+      - "/home/sokosova/.local/bin/pkgconf"
+      - "/home/sokosova/bin/pkg-config"
+      - "/home/sokosova/bin/pkgconf"
+      - "/usr/local/bin/pkg-config"
+      - "/usr/local/bin/pkgconf"
+    found: "/usr/bin/pkg-config"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:761 (find_library)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:297 (pkg_check_modules)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "library"
+    variable: "pkgcfg_lib__OPENSSL_ssl"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ssl"
+    candidate_directories:
+      - "/usr/lib64/"
+    found: "/usr/lib64/libssl.so"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:761 (find_library)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:297 (pkg_check_modules)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "library"
+    variable: "pkgcfg_lib__OPENSSL_crypto"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "crypto"
+    candidate_directories:
+      - "/usr/lib64/"
+    found: "/usr/lib64/libcrypto.so"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:370 (find_path)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "path"
+    variable: "OPENSSL_INCLUDE_DIR"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "openssl/ssl.h"
+    candidate_directories:
+      - "/usr/include/include/"
+      - "/usr/include/"
+      - "/usr/lib64/ccache/include/"
+      - "/usr/lib64/ccache/"
+      - "/home/sokosova/.local/bin/include/"
+      - "/home/sokosova/.local/bin/"
+      - "/home/sokosova/bin/include/"
+      - "/home/sokosova/bin/"
+      - "/usr/local/bin/include/"
+      - "/usr/local/bin/"
+      - "/usr/bin/include/"
+      - "/usr/bin/"
+      - "/usr/local/sbin/include/"
+      - "/usr/local/sbin/"
+      - "/usr/sbin/include/"
+      - "/usr/sbin/"
+      - "/usr/local/go/bin/include/"
+      - "/usr/local/go/bin/"
+      - "/home/sokosova/go/bin/include/"
+      - "/home/sokosova/go/bin/"
+      - "/usr/local/include/include/"
+      - "/usr/local/include/"
+      - "/usr/local/include/"
+      - "/usr/local/"
+      - "/usr/include/include/"
+      - "/usr/include/"
+      - "/usr/include/"
+      - "/usr/"
+      - "/include/include/"
+      - "/include/"
+      - "/usr/X11R6/include/include/"
+      - "/usr/X11R6/include/"
+      - "/usr/X11R6/include/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/include/include/"
+      - "/usr/pkg/include/"
+      - "/usr/pkg/include/"
+      - "/usr/pkg/"
+      - "/opt/include/include/"
+      - "/opt/include/"
+      - "/opt/include/"
+      - "/opt/"
+      - "/usr/include/X11/include/"
+      - "/usr/include/X11/"
+    searched_directories:
+      - "/usr/include/include/openssl/ssl.h"
+    found: "/usr/include/"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_INCLUDE_PATH:
+        - "/usr/include/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:628 (find_library)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "library"
+    variable: "OPENSSL_SSL_LIBRARY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ssl"
+      - "ssleay32"
+      - "ssleay32MD"
+    candidate_directories:
+      - "/usr/lib64/"
+      - "/usr/lib64/ccache/"
+      - "/home/sokosova/.local/bin/"
+      - "/home/sokosova/bin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/sbin/"
+      - "/usr/local/go/bin/"
+      - "/home/sokosova/go/bin/"
+      - "/usr/local/lib64/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib64/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib64/"
+      - "/usr/local/"
+      - "/usr/lib64/"
+      - "/usr/lib/"
+      - "/usr/lib64/"
+      - "/usr/lib/"
+      - "/usr/lib64/"
+      - "/usr/"
+      - "/lib64/"
+      - "/lib/"
+      - "/opt/"
+      - "/usr/lib64/X11/"
+    found: "/usr/lib64/libssl.so"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindOpenSSL.cmake:642 (find_library)"
+      - "CMakeLists.txt:10 (find_package)"
+    mode: "library"
+    variable: "OPENSSL_CRYPTO_LIBRARY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "crypto"
+    candidate_directories:
+      - "/usr/lib64/"
+      - "/usr/lib64/ccache/"
+      - "/home/sokosova/.local/bin/"
+      - "/home/sokosova/bin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/sbin/"
+      - "/usr/local/go/bin/"
+      - "/home/sokosova/go/bin/"
+      - "/usr/local/lib64/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib64/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib64/"
+      - "/usr/local/"
+      - "/usr/lib64/"
+      - "/usr/lib/"
+      - "/usr/lib64/"
+      - "/usr/lib/"
+      - "/usr/lib64/"
+      - "/usr/"
+      - "/lib64/"
+      - "/lib/"
+      - "/opt/"
+      - "/usr/lib64/X11/"
+    found: "/usr/lib64/libcrypto.so"
+    search_context:
+      ENV{PATH}:
+        - "/usr/lib64/ccache"
+        - "/home/sokosova/.local/bin"
+        - "/home/sokosova/bin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/local/sbin"
+        - "/usr/sbin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+        - "/usr/local/go/bin"
+        - "/home/sokosova/go/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
   -
     kind: "try_compile-v1"
     backtrace:
@@ -1207,12 +1622,12 @@ events:
       - "/usr/lib64/cmake/Qt6Core/Qt6CoreDependencies.cmake:36 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Core/Qt6CoreConfig.cmake:52 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     checks:
       - "Performing Test HAVE_STDATOMIC"
     directories:
-      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt"
-      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt"
+      source: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv"
+      binary: "/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -1223,17 +1638,17 @@ events:
       variable: "HAVE_STDATOMIC"
       cached: true
       stdout: |
-        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt'
+        Change Dir: '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv'
         
-        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_ed53b/fast
-        /usr/bin/gmake  -f CMakeFiles/cmTC_ed53b.dir/build.make CMakeFiles/cmTC_ed53b.dir/build
-        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt'
-        Building CXX object CMakeFiles/cmTC_ed53b.dir/src.cxx.o
-        /usr/lib64/ccache/c++ -DHAVE_STDATOMIC  -std=gnu++17 -o CMakeFiles/cmTC_ed53b.dir/src.cxx.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt/src.cxx
-        Linking CXX executable cmTC_ed53b
-        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_ed53b.dir/link.txt --verbose=1
-        /usr/lib64/ccache/c++ CMakeFiles/cmTC_ed53b.dir/src.cxx.o -o cmTC_ed53b
-        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-oPjzYt'
+        Run Build Command(s): /usr/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_0c848/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_0c848.dir/build.make CMakeFiles/cmTC_0c848.dir/build
+        gmake[1]: Entering directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv'
+        Building CXX object CMakeFiles/cmTC_0c848.dir/src.cxx.o
+        /usr/lib64/ccache/c++ -DHAVE_STDATOMIC  -std=gnu++17 -o CMakeFiles/cmTC_0c848.dir/src.cxx.o -c /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv/src.cxx
+        Linking CXX executable cmTC_0c848
+        /usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_0c848.dir/link.txt --verbose=1
+        /usr/lib64/ccache/c++ CMakeFiles/cmTC_0c848.dir/src.cxx.o -o cmTC_0c848
+        gmake[1]: Leaving directory '/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/CMakeFiles/CMakeScratch/TryCompile-vGFBVv'
         
       exitCode: 0
   -
@@ -1243,7 +1658,7 @@ events:
       - "/usr/lib64/cmake/Qt6Core/Qt6CoreDependencies.cmake:43 (_qt_internal_find_tool_dependencies)"
       - "/usr/lib64/cmake/Qt6Core/Qt6CoreConfig.cmake:52 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6CoreTools"
     configs:
       -
@@ -1509,7 +1924,7 @@ events:
     kind: "find_package-v1"
     backtrace:
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6Core"
     configs:
       -
@@ -1635,7 +2050,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_INCLUDE_DIR"
     description: "Path to a file."
@@ -1723,7 +2138,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_GLX_INCLUDE_DIR"
     description: "Path to a file."
@@ -1808,7 +2223,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_EGL_INCLUDE_DIR"
     description: "Path to a file."
@@ -1893,7 +2308,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_GLES2_INCLUDE_DIR"
     description: "Path to a file."
@@ -1978,7 +2393,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_GLES3_INCLUDE_DIR"
     description: "Path to a file."
@@ -2063,7 +2478,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_xmesa_INCLUDE_DIR"
     description: "Path to a file."
@@ -2164,7 +2579,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "OPENGL_GLU_INCLUDE_DIR"
     description: "Path to a file."
@@ -2259,7 +2674,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_opengl_LIBRARY"
     description: "Path to a library."
@@ -2343,7 +2758,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_glx_LIBRARY"
     description: "Path to a library."
@@ -2427,7 +2842,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_egl_LIBRARY"
     description: "Path to a library."
@@ -2511,7 +2926,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_gles2_LIBRARY"
     description: "Path to a library."
@@ -2595,7 +3010,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_gles3_LIBRARY"
     description: "Path to a library."
@@ -2699,7 +3114,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "OPENGL_glu_LIBRARY"
     description: "Path to a library."
@@ -2808,7 +3223,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "path"
     variable: "Vulkan_INCLUDE_DIR"
     description: "Path to a file."
@@ -2891,7 +3306,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "library"
     variable: "Vulkan_LIBRARY"
     description: "Path to a library."
@@ -2973,7 +3388,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "program"
     variable: "Vulkan_GLSLC_EXECUTABLE"
     description: "Path to a program."
@@ -3074,7 +3489,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:37 (_qt_internal_find_third_party_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     mode: "program"
     variable: "Vulkan_GLSLANG_VALIDATOR_EXECUTABLE"
     description: "Path to a program."
@@ -3173,7 +3588,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:44 (_qt_internal_find_tool_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6GuiTools"
     configs:
       -
@@ -3447,7 +3862,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:52 (_qt_internal_find_qt_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6DBusTools"
     configs:
       -
@@ -3718,7 +4133,7 @@ events:
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiDependencies.cmake:52 (_qt_internal_find_qt_dependencies)"
       - "/usr/lib64/cmake/Qt6Gui/Qt6GuiConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6DBus"
     configs:
       -
@@ -3840,7 +4255,7 @@ events:
     kind: "find_package-v1"
     backtrace:
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6Gui"
     configs:
       -
@@ -3962,7 +4377,7 @@ events:
       - "/usr/lib64/cmake/Qt6Widgets/Qt6WidgetsDependencies.cmake:42 (_qt_internal_find_tool_dependencies)"
       - "/usr/lib64/cmake/Qt6Widgets/Qt6WidgetsConfig.cmake:50 (include)"
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6WidgetsTools"
     configs:
       -
@@ -4228,7 +4643,7 @@ events:
     kind: "find_package-v1"
     backtrace:
       - "/usr/lib64/cmake/Qt6/Qt6Config.cmake:263 (find_package)"
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6Widgets"
     configs:
       -
@@ -4346,7 +4761,7 @@ events:
   -
     kind: "find_package-v1"
     backtrace:
-      - "CMakeLists.txt:22 (find_package)"
+      - "CMakeLists.txt:23 (find_package)"
     name: "Qt6"
     components:
       -

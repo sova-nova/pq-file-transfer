@@ -4,6 +4,8 @@
 #include <functional>
 #include <cstdint>
 #include <atomic>
+#include <vector>
+#include "messages.h"
 
 class TransferEngine {
 public:
@@ -20,15 +22,21 @@ public:
 
     void cancel();
 
-    // Callbacks — the GUI hooks into these
     std::function<void(double percent)> on_progress;
     std::function<void(const std::string& msg)> on_status;
     std::function<void(const std::string& error)> on_error;
     std::function<void(const std::string& filepath)> on_complete;
-    std::function<void(const std::string& transfer_id)> on_transfer_id;  // sender gets this back
+    std::function<void(const std::string& transfer_id)> on_transfer_id;
 
 private:
     std::atomic<bool> cancel_flag_{false};
 
     int connect_to_server(const std::string& addr, uint16_t port);
+
+    // Compute a unique nonce for each chunk: base_nonce XOR chunk_index
+    static std::vector<uint8_t> compute_chunk_nonce(
+        const std::vector<uint8_t>& base_nonce, uint32_t chunk_index);
+
+    // Build the payload that gets signed (all header fields except signature itself)
+    static std::vector<uint8_t> build_signing_payload(const FileHeader& header);
 };

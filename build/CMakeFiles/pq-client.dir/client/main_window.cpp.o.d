@@ -342,6 +342,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/c++/16/bits/std_thread.h \
  /usr/include/c++/16/bits/this_thread_sleep.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h \
+ /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/messages.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/key_store.h \
  /usr/include/qt6/QtWidgets/QVBoxLayout \
  /usr/include/qt6/QtWidgets/qboxlayout.h \

@@ -225,8 +225,13 @@ CMakeFiles/pq-server.dir/server/main.cpp.o: \
  /usr/include/c++/16/bits/random.tcc /usr/include/c++/16/numeric \
  /usr/include/c++/16/bits/stl_numeric.h \
  /usr/include/c++/16/pstl/glue_numeric_defs.h \
- /usr/include/c++/16/pstl/execution_defs.h /usr/include/c++/16/chrono \
- /usr/include/c++/16/cstring /usr/include/string.h /usr/include/strings.h \
+ /usr/include/c++/16/pstl/execution_defs.h /usr/include/c++/16/cstring \
+ /usr/include/string.h /usr/include/strings.h \
+ /usr/include/c++/16/algorithm /usr/include/c++/16/bits/stl_algo.h \
+ /usr/include/c++/16/bits/algorithmfwd.h \
+ /usr/include/c++/16/bits/stl_heap.h \
+ /usr/include/c++/16/bits/stl_tempbuf.h \
+ /usr/include/c++/16/pstl/glue_algorithm_defs.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/protocol.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/protocol/messages.h \
  /usr/include/c++/16/optional \

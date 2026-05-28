@@ -105,6 +105,36 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o: \
  /usr/local/include/oqs/sig_slh_dsa.h /usr/local/include/oqs/sig_stfl.h \
  /usr/local/include/oqs/aes_ops.h /usr/local/include/oqs/sha2_ops.h \
  /usr/local/include/oqs/sha3_ops.h /usr/local/include/oqs/sha3x4_ops.h \
+ /usr/include/openssl/evp.h /usr/include/openssl/macros.h \
+ /usr/include/openssl/opensslconf.h /usr/include/openssl/configuration.h \
+ /usr/include/openssl/configuration-x86_64.h \
+ /usr/include/openssl/opensslv.h /usr/include/openssl/types.h \
+ /usr/include/openssl/e_os2.h /usr/include/openssl/safestack.h \
+ /usr/include/openssl/stack.h /usr/include/openssl/core.h \
+ /usr/include/openssl/core_dispatch.h /usr/include/openssl/indicator.h \
+ /usr/include/openssl/params.h /usr/include/openssl/bn.h \
+ /usr/include/openssl/crypto.h /usr/include/time.h \
+ /usr/include/bits/time.h /usr/include/bits/timex.h \
+ /usr/include/bits/types/struct_tm.h \
+ /usr/include/bits/types/struct_itimerspec.h \
+ /usr/include/openssl/cryptoerr.h /usr/include/openssl/symhacks.h \
+ /usr/include/openssl/cryptoerr_legacy.h /usr/include/pthread.h \
+ /usr/include/sched.h /usr/include/bits/sched.h \
+ /usr/include/linux/sched/types.h /usr/include/linux/types.h \
+ /usr/include/asm/types.h /usr/include/asm-generic/types.h \
+ /usr/include/asm-generic/int-ll64.h /usr/include/asm/bitsperlong.h \
+ /usr/include/asm-generic/bitsperlong.h /usr/include/linux/posix_types.h \
+ /usr/include/linux/stddef.h /usr/include/asm/posix_types.h \
+ /usr/include/asm/posix_types_64.h /usr/include/asm-generic/posix_types.h \
+ /usr/include/bits/types/struct_sched_param.h /usr/include/bits/cpu-set.h \
+ /usr/include/bits/setjmp.h \
+ /usr/include/bits/types/struct___jmp_buf_tag.h \
+ /usr/include/openssl/bnerr.h /usr/include/openssl/bio.h \
+ /usr/include/openssl/bioerr.h /usr/include/openssl/evperr.h \
+ /usr/include/openssl/objects.h /usr/include/openssl/obj_mac.h \
+ /usr/include/openssl/asn1.h /usr/include/openssl/asn1err.h \
+ /usr/include/openssl/objectserr.h /usr/include/openssl/rand.h \
+ /usr/include/openssl/randerr.h /usr/include/openssl/hmac.h \
  /usr/include/c++/16/stdexcept /usr/include/c++/16/exception \
  /usr/include/c++/16/bits/exception_ptr.h \
  /usr/include/c++/16/bits/cxxabi_init_exception.h \
@@ -141,18 +171,6 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o: \
  /usr/include/c++/16/ext/atomicity.h \
  /usr/include/c++/16/x86_64-redhat-linux/bits/gthr.h \
  /usr/include/c++/16/x86_64-redhat-linux/bits/gthr-default.h \
- /usr/include/pthread.h /usr/include/sched.h /usr/include/bits/sched.h \
- /usr/include/linux/sched/types.h /usr/include/linux/types.h \
- /usr/include/asm/types.h /usr/include/asm-generic/types.h \
- /usr/include/asm-generic/int-ll64.h /usr/include/asm/bitsperlong.h \
- /usr/include/asm-generic/bitsperlong.h /usr/include/linux/posix_types.h \
- /usr/include/linux/stddef.h /usr/include/asm/posix_types.h \
- /usr/include/asm/posix_types_64.h /usr/include/asm-generic/posix_types.h \
- /usr/include/bits/types/struct_sched_param.h /usr/include/bits/cpu-set.h \
- /usr/include/time.h /usr/include/bits/time.h /usr/include/bits/timex.h \
- /usr/include/bits/types/struct_tm.h \
- /usr/include/bits/types/struct_itimerspec.h /usr/include/bits/setjmp.h \
- /usr/include/bits/types/struct___jmp_buf_tag.h \
  /usr/include/c++/16/x86_64-redhat-linux/bits/atomic_word.h \
  /usr/include/sys/single_threaded.h /usr/include/c++/16/ext/concurrence.h \
  /usr/include/c++/16/bits/shared_ptr_atomic.h \
@@ -160,4 +178,5 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o: \
  /usr/include/c++/16/bits/atomic_lockfree_defines.h \
  /usr/include/c++/16/backward/auto_ptr.h \
  /usr/include/c++/16/pstl/glue_memory_defs.h \
- /usr/include/c++/16/pstl/execution_defs.h
+ /usr/include/c++/16/pstl/execution_defs.h /usr/include/c++/16/cstring \
+ /usr/include/string.h /usr/include/strings.h

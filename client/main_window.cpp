@@ -124,8 +124,14 @@ void MainWindow::start_send() {
 
     if (worker_thread_.joinable()) worker_thread_.join();
 
-    worker_thread_ = std::thread([this, filepath = filepath.toStdString()]() {
-        engine_.upload_file(filepath, "127.0.0.1", 9000);
+        worker_thread_ = std::thread([this, filepath = filepath.toStdString()]() {
+        try {
+            engine_.upload_file(filepath, "127.0.0.1", 9000);
+        } catch (const std::exception& e) {
+            QMetaObject::invokeMethod(this, [this, msg = std::string(e.what())]() {
+                show_error(msg);
+            });
+        }
         QMetaObject::invokeMethod(this, [this]() { set_buttons_enabled(true); });
     });
 }
@@ -144,8 +150,14 @@ void MainWindow::start_receive() {
 
     std::string output_dir = QDir::homePath().toStdString() + "/.pq-file-transfer/downloads";
 
-    worker_thread_ = std::thread([this, id = transfer_id.toStdString(), output_dir]() {
-        engine_.download_file(id, "127.0.0.1", 9000, output_dir);
+        worker_thread_ = std::thread([this, id = transfer_id.toStdString(), output_dir]() {
+        try {
+            engine_.download_file(id, "127.0.0.1", 9000, output_dir);
+        } catch (const std::exception& e) {
+            QMetaObject::invokeMethod(this, [this, msg = std::string(e.what())]() {
+                show_error(msg);
+            });
+        }
         QMetaObject::invokeMethod(this, [this]() { set_buttons_enabled(true); });
     });
 }

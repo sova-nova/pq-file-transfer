@@ -11,6 +11,8 @@ pq-client: \
   libprotocol.a \
   /usr/lib64/libQt6Widgets.so.6.11.1 \
   /usr/local/lib64/liboqs.so \
+  /usr/lib64/libssl.so \
+  /usr/lib64/libcrypto.so \
   /usr/lib64/libQt6Gui.so.6.11.1 \
   /usr/lib64/libGLX.so \
   /usr/lib64/libOpenGL.so \
@@ -48,8 +50,8 @@ pq-client: \
   /usr/lib/gcc/x86_64-redhat-linux/16/libgcc.a \
   /usr/lib/gcc/x86_64-redhat-linux/16/crtend.o \
   /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o \
-  /usr/lib64/libcrypto.so.3 \
   /lib64/ld-linux-x86-64.so.2 \
+  /usr/lib64/libz.so.1 \
   /usr/lib64/libEGL.so.1 \
   /usr/lib64/libfontconfig.so.1 \
   /usr/lib64/libX11.so.6 \
@@ -59,7 +61,6 @@ pq-client: \
   /usr/lib64/libpng16.so.16 \
   /usr/lib64/libharfbuzz.so.0 \
   /usr/lib64/libfreetype.so.6 \
-  /usr/lib64/libz.so.1 \
   /usr/lib64/libXext.so.6 \
   /usr/lib64/libGLdispatch.so.0 \
   /usr/lib64/libicui18n.so.77 \
@@ -105,6 +106,10 @@ libprotocol.a:
 /usr/lib64/libQt6Widgets.so.6.11.1:
 
 /usr/local/lib64/liboqs.so:
+
+/usr/lib64/libssl.so:
+
+/usr/lib64/libcrypto.so:
 
 /usr/lib64/libQt6Gui.so.6.11.1:
 
@@ -180,9 +185,9 @@ libprotocol.a:
 
 /usr/lib/gcc/x86_64-redhat-linux/16/../../../../lib64/crtn.o:
 
-/usr/lib64/libcrypto.so.3:
-
 /lib64/ld-linux-x86-64.so.2:
+
+/usr/lib64/libz.so.1:
 
 /usr/lib64/libEGL.so.1:
 
@@ -201,8 +206,6 @@ libprotocol.a:
 /usr/lib64/libharfbuzz.so.0:
 
 /usr/lib64/libfreetype.so.6:
-
-/usr/lib64/libz.so.1:
 
 /usr/lib64/libXext.so.6:
 
