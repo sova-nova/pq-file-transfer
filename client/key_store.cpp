@@ -9,11 +9,20 @@
 namespace fs = std::filesystem;
 
 KeyStore::KeyStore() {
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+    if (!home) home = std::getenv("APPDATA");
+    if (home) {
+        base_path_ = (fs::path(home) / "pq-file-transfer" / "keys").string();
+        contacts_path_ = (fs::path(home) / "pq-file-transfer" / "contacts").string();
+    }
+#else
     const char* home = std::getenv("HOME");
     if (home) {
         base_path_ = (fs::path(home) / ".pq-file-transfer" / "keys").string();
         contacts_path_ = (fs::path(home) / ".pq-file-transfer" / "contacts").string();
     }
+#endif
 }
 
 void KeyStore::initialize_keys() {

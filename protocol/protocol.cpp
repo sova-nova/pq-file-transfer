@@ -1,7 +1,9 @@
 #include "protocol.h"
 #include "platform.h"
 #include <cstring>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 // --- Low-level write helpers ---
 

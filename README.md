@@ -40,6 +40,93 @@ A cross-platform file transfer application with post-quantum cryptographic prote
 
 ### Install dependencies
 
+#### Windows
+
+1. Install [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) with the "Desktop development with C++" workload
+2. Install [CMake](https://cmake.org/download/) (if not included with Visual Studio)
+3. Install [Git](https://git-scm.com)
+4. Install [Qt 6](https://www.qt.io/download) via the Qt Online Installer (choose Qt 6.x for MSVC 2022 64-bit)
+5. Install [OpenSSL for Windows](https://slproweb.com/products/Win32OpenSSL.html) (Win64 OpenSSL v3.x, full installer)
+
+Build liboqs from source. Open "x64 Native Tools Command Prompt for VS 2022" from the Start Menu:
+
+```cmd
+git clone https://github.com/open-quantum-safe/liboqs.git
+cd liboqs
+mkdir build && cd build
+cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX=C:\liboqs ..
+cmake --build . --config Release
+cmake --install . --config Release
+```
+
+Compile
+
+```cmd
+git clone https://github.com/YOUR_USERNAME/pq-file-transfer.git
+cd pq-file-transfer
+mkdir build && cd build
+```
+
+Configure the build (adjust paths to match your system):
+
+```cmd
+cmake -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_PREFIX_PATH=C:/Qt/6.7.0/msvc2022_64 ^
+  -DOQS_LIBRARY=C:/liboqs/lib/oqs.lib ^
+  -DOQS_INCLUDE_DIR=C:/liboqs/include ^
+  -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" ..
+```
+
+Build:
+
+```cmd
+cmake --build . --config Release
+```
+
+Run on Windows
+
+The server runs directly:
+
+```cmd
+Release\pq-server.exe
+```
+
+The client needs Qt DLLs. Copy them automatically:
+
+```cmd
+C:\Qt\6.7.0\msvc2022_64\bin\windeployqt.exe Release\pq-client.exe
+```
+
+Then run:
+
+```cmd
+Release\pq-client.exe
+```
+
+### Also: Fix the Server Temp Path for Windows
+
+Windows doesn't use `/tmp/`. Update `server/main.cpp` so the storage directory works natively on both OSes. Replace this line:
+
+```cpp
+static const std::string STORAGE_DIR = "/tmp/pq-transfer";
+```
+
+With this:
+
+```cpp
+static std::string get_storage_dir() {
+#ifdef _WIN32
+    const char* temp = std::getenv("TEMP");
+    if (temp) return std::string(temp) + "\\pq-transfer";
+    return "C:\\temp\\pq-transfer";
+#else
+    return "/tmp/pq-transfer";
+#endif
+}
+
+static const std::string STORAGE_DIR = get_storage_dir();
+```
+
 #### Ubuntu/Debian
 
 ```bash

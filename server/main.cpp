@@ -25,7 +25,17 @@ struct TransferState {
 
 static std::map<std::string, TransferState> g_transfers;
 static std::mutex g_mutex;
-static const std::string STORAGE_DIR = "/tmp/pq-transfer";
+static std::string get_storage_dir() {
+#ifdef _WIN32
+    const char* temp = std::getenv("TEMP");
+    if (temp) return std::string(temp) + "\\pq-transfer";
+    return "C:\\temp\\pq-transfer";
+#else
+    return "/tmp/pq-transfer";
+#endif
+}
+
+static const std::string STORAGE_DIR = get_storage_dir();
 
 // --- Helpers ---
 
