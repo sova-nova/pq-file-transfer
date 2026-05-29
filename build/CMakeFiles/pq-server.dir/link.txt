@@ -1,1 +1,0 @@
-/usr/lib64/ccache/c++ -Wl,--dependency-file=CMakeFiles/pq-server.dir/link.d "CMakeFiles/pq-server.dir/pq-server_autogen/mocs_compilation.cpp.o" "CMakeFiles/pq-server.dir/server/main.cpp.o" -o pq-server  libprotocol.a
