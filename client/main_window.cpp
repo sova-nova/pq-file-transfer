@@ -232,7 +232,7 @@ void MainWindow::start_send() {
     worker_thread_ = std::thread([this, filepath = filepath.toStdString(),
                                    recipient_str]() {
         try {
-            engine_.upload_file(filepath, "127.0.0.1", 9000, recipient_str);
+            engine_.upload_file(filepath, "10.0.0.248", 9000, recipient_str);
         } catch (const std::exception& e) {
             QMetaObject::invokeMethod(this, [this, msg = std::string(e.what())]() {
                 show_error(msg);
@@ -258,7 +258,7 @@ void MainWindow::start_receive() {
 
     worker_thread_ = std::thread([this, id = transfer_id.toStdString(), output_dir]() {
         try {
-            engine_.download_file(id, "127.0.0.1", 9000, output_dir);
+            engine_.download_file(id, "10.0.0.248", 9000, output_dir);
         } catch (const std::exception& e) {
             QMetaObject::invokeMethod(this, [this, msg = std::string(e.what())]() {
                 show_error(msg);
