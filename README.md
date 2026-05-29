@@ -3,14 +3,11 @@
 A cross-platform file transfer application with post-quantum cryptographic protection. Files are encrypted client-side using ML-KEM-768 (key exchange), ML-DSA-65 (signatures), AES-256-GCM (encryption), and HKDF-SHA256 (key derivation). The relay server never sees plaintext data.
 
 ## Architecture
-+----------+ +----------------+ +----------+
-| Client A | ---> | Relay Server | ---> | Client B |
-| (Sender) | | (blind relay) | |(Receiver)|
-+----------+ +----------------+ +----------+
-|
-Sees only encrypted
-blobs -- cannot read
-file contents
+
+```mermaid
+graph LR
+    A[Client A<br/>Sender] -->|encrypted blob| B[Relay Server<br/>blind relay]
+    B -->|encrypted blob| C[Client B<br/>Receiver]
 
 - **Client** — Qt 6 desktop application with GUI
 - **Relay Server** — Lightweight TCP relay that stores and forwards encrypted blobs
