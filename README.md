@@ -4,10 +4,7 @@ A cross-platform file transfer application with post-quantum cryptographic prote
 
 ## Architecture
 
-```mermaid
-graph LR
-    A[Client A<br/>Sender] -->|encrypted blob| B[Relay Server<br/>blind relay]
-    B -->|encrypted blob| C[Client B<br/>Receiver]
+*To add later*
 
 - **Client** — Qt 6 desktop application with GUI
 - **Relay Server** — Lightweight TCP relay that stores and forwards encrypted blobs
