@@ -1,12 +1,8 @@
 #include "transfer_engine.h"
 #include "protocol.h"
+#include "platform.h"
 #include "crypto_engine.h"
 #include "key_store.h"
-
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 
 #include <fstream>
 #include <filesystem>
@@ -23,24 +19,24 @@ void TransferEngine::cancel() {
 }
 
 int TransferEngine::connect_to_server(const std::string& addr, uint16_t port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) return -1;
+    socket_t sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == INVALID_SOCKET_VAL) return -1;
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
 
     if (inet_pton(AF_INET, addr.c_str(), &server_addr.sin_addr) <= 0) {
-        close(sockfd);
+        close_socket(sockfd);
         return -1;
     }
 
-    if (::connect(sockfd, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
-        close(sockfd);
+    if (::connect(sockfd, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) == SOCKET_ERROR_VAL) {
+        close_socket(sockfd);
         return -1;
     }
 
-    return sockfd;
+    return static_cast<int>(sockfd);
 }
 
 std::vector<uint8_t> TransferEngine::compute_chunk_nonce(
@@ -97,7 +93,6 @@ void TransferEngine::upload_file(const std::string& filepath,
         return;
     }
 
-    // Load recipient's public KEM key
     auto contact = keystore.load_contact(recipient);
     if (contact.pub_kem.empty()) {
         if (on_error) on_error("Contact not found: " + recipient);
@@ -131,7 +126,6 @@ void TransferEngine::upload_file(const std::string& filepath,
     uint32_t total_chunks = static_cast<uint32_t>((file_size + chunk_size - 1) / chunk_size);
     if (file_size == 0) total_chunks = 1;
 
-    // Sender ID = fingerprint of our own DSA public key
     std::string sender_id;
     for (size_t i = 0; i < 8 && i < pub_dsa.size(); i++) {
         char hex[3];
@@ -167,14 +161,14 @@ void TransferEngine::upload_file(const std::string& filepath,
     auto header_payload = serialize_file_header(header);
     if (!send_message(sockfd, MessageType::UPLOAD_REQUEST, header_payload)) {
         if (on_error) on_error("Failed to send file header");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
     auto ack = recv_message(sockfd);
     if (!ack || ack->type != MessageType::ACK) {
         if (on_error) on_error("Server rejected upload");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -186,7 +180,7 @@ void TransferEngine::upload_file(const std::string& filepath,
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
         if (on_error) on_error("Failed to open file");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -197,7 +191,7 @@ void TransferEngine::upload_file(const std::string& filepath,
         if (cancel_flag_) {
             if (on_error) on_error("Transfer cancelled");
             file.close();
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
 
@@ -220,7 +214,7 @@ void TransferEngine::upload_file(const std::string& filepath,
         if (!send_message(sockfd, MessageType::UPLOAD_CHUNK, chunk_payload)) {
             if (on_error) on_error("Failed to send chunk " + std::to_string(i));
             file.close();
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
 
@@ -233,7 +227,7 @@ void TransferEngine::upload_file(const std::string& filepath,
 
     if (!send_message(sockfd, MessageType::UPLOAD_DONE, {})) {
         if (on_error) on_error("Failed to finalize upload");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -246,7 +240,7 @@ void TransferEngine::upload_file(const std::string& filepath,
     if (on_progress) on_progress(1.0);
     if (on_complete) on_complete(filepath);
 
-    close(sockfd);
+    close_socket(sockfd);
 }
 
 void TransferEngine::download_file(const std::string& transfer_id,
@@ -266,7 +260,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
     std::vector<uint8_t> id_payload(transfer_id.begin(), transfer_id.end());
     if (!send_message(sockfd, MessageType::DOWNLOAD_REQUEST, id_payload)) {
         if (on_error) on_error("Failed to send download request");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -275,14 +269,14 @@ void TransferEngine::download_file(const std::string& transfer_id,
     auto header_msg = recv_message(sockfd);
     if (!header_msg || header_msg->type != MessageType::UPLOAD_REQUEST) {
         if (on_error) on_error("Server did not send file header");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
     auto header = deserialize_file_header(header_msg->payload.data(), header_msg->payload.size());
     if (!header) {
         if (on_error) on_error("Malformed file header from server");
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -297,7 +291,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
         auto priv_kem = keystore.load_private_kem();
         if (priv_kem.empty()) {
             if (on_error) on_error("No private KEM key found");
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
 
@@ -305,9 +299,6 @@ void TransferEngine::download_file(const std::string& transfer_id,
 
         aes_key = crypto.generate_aes_key(shared_secret);
 
-        // Look up sender by their DSA fingerprint
-        // The sender_id is the first 8 hex chars of their pub_dsa
-        // We need to reconstruct the first 8 bytes to search
         std::vector<uint8_t> sender_fingerprint(8);
         for (size_t i = 0; i < 8; i++) {
             std::string byte_str = header->sender_id.substr(i * 2, 2);
@@ -327,7 +318,6 @@ void TransferEngine::download_file(const std::string& transfer_id,
                 if (on_status) on_status("Signature verified ✓  From: " + contact->name + "  Downloading...");
             }
         } else {
-            // Unknown sender — try with our own key (self-test fallback)
             auto own_pub_dsa = keystore.load_public_dsa();
             valid = crypto.verify(signing_payload, header->signature, own_pub_dsa);
             if (valid) {
@@ -337,7 +327,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
 
         if (!valid) {
             if (on_error) on_error("Signature verification FAILED — unknown or untrusted sender");
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
 
@@ -351,7 +341,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
     std::ofstream file(output_path, std::ios::binary);
     if (!file.is_open()) {
         if (on_error) on_error("Failed to create output file: " + output_path);
-        close(sockfd);
+        close_socket(sockfd);
         return;
     }
 
@@ -361,7 +351,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
         if (!msg) {
             if (on_error) on_error("Connection lost during download");
             file.close();
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
 
@@ -396,7 +386,7 @@ void TransferEngine::download_file(const std::string& transfer_id,
             if (on_error) on_error("Transfer cancelled");
             file.close();
             fs::remove(output_path);
-            close(sockfd);
+            close_socket(sockfd);
             return;
         }
     }
@@ -407,5 +397,5 @@ void TransferEngine::download_file(const std::string& transfer_id,
     if (on_status) on_status("Download complete: " + output_path);
     if (on_complete) on_complete(output_path);
 
-    close(sockfd);
+    close_socket(sockfd);
 }

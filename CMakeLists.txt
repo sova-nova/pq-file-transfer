@@ -46,3 +46,9 @@ target_link_libraries(pq-client PRIVATE
 )
 
 target_include_directories(pq-client PRIVATE ${OQS_INCLUDE_DIR})
+
+# Windows-specific: link ws2_32
+if(WIN32)
+    target_link_libraries(pq-server PRIVATE ws2_32)
+    target_link_libraries(pq-client PRIVATE ws2_32)
+endif()

@@ -1,9 +1,5 @@
 #include <iostream>
 #include <csignal>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <thread>
 #include <mutex>
 #include <map>
@@ -11,9 +7,9 @@
 #include <filesystem>
 #include <random>
 #include <cstring>
-#include <algorithm>
 
 #include "protocol.h"
+#include "platform.h"
 
 namespace fs = std::filesystem;
 
@@ -52,7 +48,7 @@ void send_ack(int sockfd, const std::string& message = "") {
 bool send_error_and_close(int sockfd, const std::string& error_msg) {
     std::cerr << "Error: " << error_msg << std::endl;
     send_ack(sockfd, "ERROR: " + error_msg);
-    close(sockfd);
+    close_socket(sockfd);
     return false;
 }
 
@@ -64,29 +60,27 @@ std::string chunk_filename(uint32_t index) {
 
 // --- Client Handler ---
 
-void handle_client(int sockfd) {
-    // Read first message to determine sender vs receiver
+void handle_client(socket_t sockfd) {
     uint8_t len_buf[4];
-    if (!recv_exact(sockfd, len_buf, 4)) { close(sockfd); return; }
+    if (!recv_exact(sockfd, len_buf, 4)) { close_socket(sockfd); return; }
 
     uint32_t net_len;
     std::memcpy(&net_len, len_buf, 4);
     uint32_t payload_len = ntohl(net_len);
 
-    if (payload_len > 256 * 1024 * 1024) { close(sockfd); return; }
+    if (payload_len > 256 * 1024 * 1024) { close_socket(sockfd); return; }
 
     uint8_t type_byte;
-    if (!recv_exact(sockfd, &type_byte, 1)) { close(sockfd); return; }
+    if (!recv_exact(sockfd, &type_byte, 1)) { close_socket(sockfd); return; }
 
     MessageType type = static_cast<MessageType>(type_byte);
 
     std::vector<uint8_t> payload(payload_len);
     if (payload_len > 0) {
-        if (!recv_exact(sockfd, payload.data(), payload_len)) { close(sockfd); return; }
+        if (!recv_exact(sockfd, payload.data(), payload_len)) { close_socket(sockfd); return; }
     }
 
     if (type == MessageType::UPLOAD_REQUEST) {
-        // --- SENDER PATH ---
         auto header = deserialize_file_header(payload.data(), payload.size());
         if (!header) {
             send_error_and_close(sockfd, "Malformed FileHeader");
@@ -97,7 +91,6 @@ void handle_client(int sockfd) {
         std::string dir_path = (fs::path(STORAGE_DIR) / transfer_id).string();
         fs::create_directories(dir_path);
 
-        // Save header
         auto header_bytes = serialize_file_header(*header);
         std::ofstream(dir_path + "/header.bin", std::ios::binary)
             .write(reinterpret_cast<const char*>(header_bytes.data()), header_bytes.size());
@@ -113,7 +106,6 @@ void handle_client(int sockfd) {
 
         send_ack(sockfd, transfer_id);
 
-        // Receive chunks — store each as a separate file
         uint32_t chunks_received = 0;
         while (true) {
             auto chunk_msg = recv_message(sockfd);
@@ -136,7 +128,6 @@ void handle_client(int sockfd) {
             auto chunk = deserialize_file_chunk(chunk_msg->payload.data(), chunk_msg->payload.size());
             if (!chunk) continue;
 
-            // Write chunk data to its own file
             std::string chunk_path = dir_path + "/" + chunk_filename(chunk->chunk_index);
             std::ofstream cf(chunk_path, std::ios::binary);
             if (cf.is_open()) {
@@ -157,10 +148,9 @@ void handle_client(int sockfd) {
                   << " (" << chunks_received << " chunks)" << std::endl;
 
         send_ack(sockfd, "UPLOAD_COMPLETE");
-        close(sockfd);
+        close_socket(sockfd);
 
     } else if (type == MessageType::LIST_FILES || type == MessageType::DOWNLOAD_REQUEST) {
-        // --- RECEIVER PATH ---
         if (type == MessageType::LIST_FILES) {
             std::vector<TransferInfo> files;
             {
@@ -178,10 +168,9 @@ void handle_client(int sockfd) {
             auto file_list_payload = serialize_file_list(files);
             send_message(sockfd, MessageType::FILE_LIST, file_list_payload);
             std::cout << "Sent file list: " << files.size() << " files" << std::endl;
-            close(sockfd);
+            close_socket(sockfd);
 
         } else {
-            // DOWNLOAD_REQUEST
             std::string transfer_id(payload.begin(), payload.end());
 
             TransferState state;
@@ -197,7 +186,6 @@ void handle_client(int sockfd) {
 
             std::cout << "Download started: " << transfer_id << std::endl;
 
-            // Load saved header and send it
             std::ifstream hf(state.dir_path + "/header.bin", std::ios::binary | std::ios::ate);
             if (!hf.is_open()) {
                 send_error_and_close(sockfd, "Header file missing");
@@ -211,7 +199,6 @@ void handle_client(int sockfd) {
 
             send_message(sockfd, MessageType::UPLOAD_REQUEST, header_bytes);
 
-            // Send each chunk file in order
             for (uint32_t i = 0; i < state.header.total_chunks; i++) {
                 std::string chunk_path = state.dir_path + "/" + chunk_filename(i);
 
@@ -234,7 +221,7 @@ void handle_client(int sockfd) {
                 auto chunk_payload = serialize_file_chunk(chunk);
                 if (!send_message(sockfd, MessageType::DOWNLOAD_CHUNK, chunk_payload)) {
                     std::cerr << "Receiver disconnected: " << transfer_id << std::endl;
-                    close(sockfd);
+                    close_socket(sockfd);
                     return;
                 }
             }
@@ -250,7 +237,7 @@ void handle_client(int sockfd) {
             fs::remove_all(state.dir_path);
             std::cout << "Cleaned up: " << transfer_id << std::endl;
 
-            close(sockfd);
+            close_socket(sockfd);
         }
 
     } else {
@@ -264,34 +251,44 @@ static constexpr int PORT = 9000;
 static constexpr int BACKLOG = 5;
 
 int main() {
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
+
+    if (platform_init() != 0) {
+        std::cerr << "Failed to initialize network" << std::endl;
+        return 1;
+    }
 
     fs::create_directories(STORAGE_DIR);
     std::cout << "Storage directory: " << STORAGE_DIR << std::endl;
 
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
+    socket_t server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == INVALID_SOCKET_VAL) {
         std::cerr << "Failed to create socket" << std::endl;
+        platform_cleanup();
         return 1;
     }
 
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(PORT);
 
-    if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR_VAL) {
         std::cerr << "Failed to bind to port " << PORT << std::endl;
-        close(server_fd);
+        close_socket(server_fd);
+        platform_cleanup();
         return 1;
     }
 
-    if (listen(server_fd, BACKLOG) < 0) {
+    if (listen(server_fd, BACKLOG) == SOCKET_ERROR_VAL) {
         std::cerr << "Failed to listen" << std::endl;
-        close(server_fd);
+        close_socket(server_fd);
+        platform_cleanup();
         return 1;
     }
 
@@ -301,9 +298,9 @@ int main() {
     while (true) {
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+        socket_t client_fd = accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
 
-        if (client_fd < 0) {
+        if (client_fd == INVALID_SOCKET_VAL) {
             std::cerr << "Failed to accept connection" << std::endl;
             continue;
         }
@@ -316,6 +313,7 @@ int main() {
         std::thread(handle_client, client_fd).detach();
     }
 
-    close(server_fd);
+    close_socket(server_fd);
+    platform_cleanup();
     return 0;
 }

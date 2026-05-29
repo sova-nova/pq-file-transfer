@@ -1,6 +1,6 @@
 #include "protocol.h"
+#include "platform.h"
 #include <cstring>
-#include <arpa/inet.h>
 #include <unistd.h>
 
 // --- Low-level write helpers ---
@@ -12,7 +12,6 @@ void write_u32(std::vector<uint8_t>& buf, uint32_t val) {
 }
 
 void write_u64(std::vector<uint8_t>& buf, uint64_t val) {
-    // Write as two 32-bit values in network order (avoids platform-specific uint64_t issues)
     write_u32(buf, static_cast<uint32_t>(val >> 32));
     write_u32(buf, static_cast<uint32_t>(val & 0xFFFFFFFF));
 }
@@ -219,11 +218,8 @@ std::optional<std::vector<TransferInfo>> deserialize_file_list(const uint8_t* da
 
 std::vector<uint8_t> serialize_wire_message(MessageType type, const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> buf;
-    // 4 bytes: payload length
     write_u32(buf, static_cast<uint32_t>(payload.size()));
-    // 1 byte: message type
     buf.push_back(static_cast<uint8_t>(type));
-    // payload
     buf.insert(buf.end(), payload.begin(), payload.end());
     return buf;
 }
@@ -233,7 +229,8 @@ std::vector<uint8_t> serialize_wire_message(MessageType type, const std::vector<
 bool send_exact(int sockfd, const uint8_t* data, size_t len) {
     size_t total_sent = 0;
     while (total_sent < len) {
-        ssize_t sent = ::send(sockfd, data + total_sent, len - total_sent, MSG_NOSIGNAL);
+        ssize_t sent = ::send(sockfd, reinterpret_cast<const char*>(data + total_sent),
+                               len - total_sent, SEND_FLAGS);
         if (sent <= 0) return false;
         total_sent += static_cast<size_t>(sent);
     }
@@ -243,7 +240,8 @@ bool send_exact(int sockfd, const uint8_t* data, size_t len) {
 bool recv_exact(int sockfd, uint8_t* buffer, size_t len) {
     size_t total_recv = 0;
     while (total_recv < len) {
-        ssize_t recvd = ::recv(sockfd, buffer + total_recv, len - total_recv, 0);
+        ssize_t recvd = ::recv(sockfd, reinterpret_cast<char*>(buffer + total_recv),
+                                len - total_recv, 0);
         if (recvd <= 0) return false;
         total_recv += static_cast<size_t>(recvd);
     }
@@ -256,7 +254,6 @@ bool send_message(int sockfd, MessageType type, const std::vector<uint8_t>& payl
 }
 
 std::optional<WireMessage> recv_message(int sockfd) {
-    // Read 4-byte payload length
     uint8_t len_buf[4];
     if (!recv_exact(sockfd, len_buf, 4)) return std::nullopt;
 
@@ -264,15 +261,12 @@ std::optional<WireMessage> recv_message(int sockfd) {
     std::memcpy(&net_len, len_buf, 4);
     uint32_t payload_len = ntohl(net_len);
 
-    // Sanity check: reject absurdly large messages (256 MB limit)
     if (payload_len > 256 * 1024 * 1024) return std::nullopt;
 
-    // Read 1-byte message type
     uint8_t type_byte;
     if (!recv_exact(sockfd, &type_byte, 1)) return std::nullopt;
     MessageType type = static_cast<MessageType>(type_byte);
 
-    // Read payload
     std::vector<uint8_t> payload(payload_len);
     if (payload_len > 0) {
         if (!recv_exact(sockfd, payload.data(), payload_len)) return std::nullopt;
