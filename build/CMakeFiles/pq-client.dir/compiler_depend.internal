@@ -299,6 +299,7 @@
  /usr/include/qt6/QtCore/q20utility.h
  /usr/include/qt6/QtCore/q23type_traits.h
  /usr/include/qt6/QtCore/q23utility.h
+ /usr/include/qt6/QtCore/qabstractitemmodel.h
  /usr/include/qt6/QtCore/qalgorithms.h
  /usr/include/qt6/QtCore/qalloc.h
  /usr/include/qt6/QtCore/qanystringview.h
@@ -349,6 +350,7 @@
  /usr/include/qt6/QtCore/qlatin1stringview.h
  /usr/include/qt6/QtCore/qline.h
  /usr/include/qt6/QtCore/qlist.h
+ /usr/include/qt6/QtCore/qlocale.h
  /usr/include/qt6/QtCore/qlogging.h
  /usr/include/qt6/QtCore/qmalloc.h
  /usr/include/qt6/QtCore/qmap.h
@@ -369,6 +371,7 @@
  /usr/include/qt6/QtCore/qprocessordetection.h
  /usr/include/qt6/QtCore/qrect.h
  /usr/include/qt6/QtCore/qrefcount.h
+ /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
  /usr/include/qt6/QtCore/qscopeguard.h
  /usr/include/qt6/QtCore/qset.h
@@ -447,18 +450,29 @@
  /usr/include/qt6/QtGui/qtguiexports.h
  /usr/include/qt6/QtGui/qtguiglobal.h
  /usr/include/qt6/QtGui/qtransform.h
+ /usr/include/qt6/QtGui/qvalidator.h
  /usr/include/qt6/QtGui/qwindowdefs.h
+ /usr/include/qt6/QtWidgets/QComboBox
  /usr/include/qt6/QtWidgets/QLabel
  /usr/include/qt6/QtWidgets/QMainWindow
  /usr/include/qt6/QtWidgets/QProgressBar
  /usr/include/qt6/QtWidgets/QPushButton
  /usr/include/qt6/QtWidgets/qabstractbutton.h
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h
+ /usr/include/qt6/QtWidgets/qabstractslider.h
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h
+ /usr/include/qt6/QtWidgets/qcombobox.h
  /usr/include/qt6/QtWidgets/qframe.h
  /usr/include/qt6/QtWidgets/qlabel.h
  /usr/include/qt6/QtWidgets/qmainwindow.h
  /usr/include/qt6/QtWidgets/qprogressbar.h
  /usr/include/qt6/QtWidgets/qpushbutton.h
+ /usr/include/qt6/QtWidgets/qrubberband.h
  /usr/include/qt6/QtWidgets/qsizepolicy.h
+ /usr/include/qt6/QtWidgets/qslider.h
+ /usr/include/qt6/QtWidgets/qstyle.h
+ /usr/include/qt6/QtWidgets/qstyleoption.h
+ /usr/include/qt6/QtWidgets/qtabbar.h
  /usr/include/qt6/QtWidgets/qtabwidget.h
  /usr/include/qt6/QtWidgets/qtwidgets-config.h
  /usr/include/qt6/QtWidgets/qtwidgetsexports.h
@@ -1249,6 +1263,7 @@ CMakeFiles/pq-client.dir/client/key_store.cpp.o
  /usr/include/c++/16/bits/cpp_type_traits.h
  /usr/include/c++/16/bits/cxxabi_forced.h
  /usr/include/c++/16/bits/cxxabi_init_exception.h
+ /usr/include/c++/16/bits/enable_special_members.h
  /usr/include/c++/16/bits/erase_if.h
  /usr/include/c++/16/bits/exception.h
  /usr/include/c++/16/bits/exception_defines.h
@@ -1351,6 +1366,7 @@ CMakeFiles/pq-client.dir/client/key_store.cpp.o
  /usr/include/c++/16/limits
  /usr/include/c++/16/locale
  /usr/include/c++/16/new
+ /usr/include/c++/16/optional
  /usr/include/c++/16/ostream
  /usr/include/c++/16/pstl/pstl_config.h
  /usr/include/c++/16/ratio
@@ -1713,6 +1729,7 @@ CMakeFiles/pq-client.dir/client/main.cpp.o
  /usr/include/qt6/QtCore/q23type_traits.h
  /usr/include/qt6/QtCore/q23utility.h
  /usr/include/qt6/QtCore/qabstracteventdispatcher.h
+ /usr/include/qt6/QtCore/qabstractitemmodel.h
  /usr/include/qt6/QtCore/qalgorithms.h
  /usr/include/qt6/QtCore/qalloc.h
  /usr/include/qt6/QtCore/qanystringview.h
@@ -1791,6 +1808,7 @@ CMakeFiles/pq-client.dir/client/main.cpp.o
  /usr/include/qt6/QtCore/qprocessordetection.h
  /usr/include/qt6/QtCore/qrect.h
  /usr/include/qt6/QtCore/qrefcount.h
+ /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
  /usr/include/qt6/QtCore/qscopeguard.h
  /usr/include/qt6/QtCore/qset.h
@@ -1872,20 +1890,31 @@ CMakeFiles/pq-client.dir/client/main.cpp.o
  /usr/include/qt6/QtGui/qtguiexports.h
  /usr/include/qt6/QtGui/qtguiglobal.h
  /usr/include/qt6/QtGui/qtransform.h
+ /usr/include/qt6/QtGui/qvalidator.h
  /usr/include/qt6/QtGui/qwindowdefs.h
  /usr/include/qt6/QtWidgets/QApplication
+ /usr/include/qt6/QtWidgets/QComboBox
  /usr/include/qt6/QtWidgets/QLabel
  /usr/include/qt6/QtWidgets/QMainWindow
  /usr/include/qt6/QtWidgets/QProgressBar
  /usr/include/qt6/QtWidgets/QPushButton
  /usr/include/qt6/QtWidgets/qabstractbutton.h
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h
+ /usr/include/qt6/QtWidgets/qabstractslider.h
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h
  /usr/include/qt6/QtWidgets/qapplication.h
+ /usr/include/qt6/QtWidgets/qcombobox.h
  /usr/include/qt6/QtWidgets/qframe.h
  /usr/include/qt6/QtWidgets/qlabel.h
  /usr/include/qt6/QtWidgets/qmainwindow.h
  /usr/include/qt6/QtWidgets/qprogressbar.h
  /usr/include/qt6/QtWidgets/qpushbutton.h
+ /usr/include/qt6/QtWidgets/qrubberband.h
  /usr/include/qt6/QtWidgets/qsizepolicy.h
+ /usr/include/qt6/QtWidgets/qslider.h
+ /usr/include/qt6/QtWidgets/qstyle.h
+ /usr/include/qt6/QtWidgets/qstyleoption.h
+ /usr/include/qt6/QtWidgets/qtabbar.h
  /usr/include/qt6/QtWidgets/qtabwidget.h
  /usr/include/qt6/QtWidgets/qtwidgets-config.h
  /usr/include/qt6/QtWidgets/qtwidgetsexports.h
@@ -2040,6 +2069,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/c++/16/bits/fs_fwd.h
  /usr/include/c++/16/bits/fs_ops.h
  /usr/include/c++/16/bits/fs_path.h
+ /usr/include/c++/16/bits/fstream.tcc
  /usr/include/c++/16/bits/functexcept.h
  /usr/include/c++/16/bits/functional_hash.h
  /usr/include/c++/16/bits/hash_bytes.h
@@ -2155,6 +2185,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/c++/16/ext/string_conversions.h
  /usr/include/c++/16/ext/type_traits.h
  /usr/include/c++/16/filesystem
+ /usr/include/c++/16/fstream
  /usr/include/c++/16/functional
  /usr/include/c++/16/initializer_list
  /usr/include/c++/16/iomanip
@@ -2208,8 +2239,10 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/c++/16/vector
  /usr/include/c++/16/version
  /usr/include/c++/16/x86_64-redhat-linux/bits/atomic_word.h
+ /usr/include/c++/16/x86_64-redhat-linux/bits/basic_file.h
  /usr/include/c++/16/x86_64-redhat-linux/bits/c++allocator.h
  /usr/include/c++/16/x86_64-redhat-linux/bits/c++config.h
+ /usr/include/c++/16/x86_64-redhat-linux/bits/c++io.h
  /usr/include/c++/16/x86_64-redhat-linux/bits/c++locale.h
  /usr/include/c++/16/x86_64-redhat-linux/bits/cpu_defines.h
  /usr/include/c++/16/x86_64-redhat-linux/bits/ctype_base.h
@@ -2248,6 +2281,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/qt6/QtCore/q20utility.h
  /usr/include/qt6/QtCore/q23type_traits.h
  /usr/include/qt6/QtCore/q23utility.h
+ /usr/include/qt6/QtCore/qabstractitemmodel.h
  /usr/include/qt6/QtCore/qalgorithms.h
  /usr/include/qt6/QtCore/qalloc.h
  /usr/include/qt6/QtCore/qanystringview.h
@@ -2326,6 +2360,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/qt6/QtCore/qprocessordetection.h
  /usr/include/qt6/QtCore/qrect.h
  /usr/include/qt6/QtCore/qrefcount.h
+ /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
  /usr/include/qt6/QtCore/qscopeguard.h
  /usr/include/qt6/QtCore/qset.h
@@ -2409,17 +2444,25 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/qt6/QtGui/qtguiexports.h
  /usr/include/qt6/QtGui/qtguiglobal.h
  /usr/include/qt6/QtGui/qtransform.h
+ /usr/include/qt6/QtGui/qvalidator.h
  /usr/include/qt6/QtGui/qwindowdefs.h
+ /usr/include/qt6/QtWidgets/QComboBox
  /usr/include/qt6/QtWidgets/QFileDialog
+ /usr/include/qt6/QtWidgets/QHBoxLayout
  /usr/include/qt6/QtWidgets/QInputDialog
  /usr/include/qt6/QtWidgets/QLabel
+ /usr/include/qt6/QtWidgets/QLineEdit
  /usr/include/qt6/QtWidgets/QMainWindow
  /usr/include/qt6/QtWidgets/QMessageBox
  /usr/include/qt6/QtWidgets/QProgressBar
  /usr/include/qt6/QtWidgets/QPushButton
  /usr/include/qt6/QtWidgets/QVBoxLayout
  /usr/include/qt6/QtWidgets/qabstractbutton.h
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h
+ /usr/include/qt6/QtWidgets/qabstractslider.h
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h
  /usr/include/qt6/QtWidgets/qboxlayout.h
+ /usr/include/qt6/QtWidgets/qcombobox.h
  /usr/include/qt6/QtWidgets/qdialog.h
  /usr/include/qt6/QtWidgets/qdialogbuttonbox.h
  /usr/include/qt6/QtWidgets/qfiledialog.h
@@ -2434,7 +2477,12 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o
  /usr/include/qt6/QtWidgets/qmessagebox.h
  /usr/include/qt6/QtWidgets/qprogressbar.h
  /usr/include/qt6/QtWidgets/qpushbutton.h
+ /usr/include/qt6/QtWidgets/qrubberband.h
  /usr/include/qt6/QtWidgets/qsizepolicy.h
+ /usr/include/qt6/QtWidgets/qslider.h
+ /usr/include/qt6/QtWidgets/qstyle.h
+ /usr/include/qt6/QtWidgets/qstyleoption.h
+ /usr/include/qt6/QtWidgets/qtabbar.h
  /usr/include/qt6/QtWidgets/qtabwidget.h
  /usr/include/qt6/QtWidgets/qtwidgets-config.h
  /usr/include/qt6/QtWidgets/qtwidgetsexports.h
@@ -2703,7 +2751,6 @@ CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o
  /usr/include/c++/16/iomanip
  /usr/include/c++/16/ios
  /usr/include/c++/16/iosfwd
- /usr/include/c++/16/iostream
  /usr/include/c++/16/istream
  /usr/include/c++/16/limits
  /usr/include/c++/16/locale
@@ -3098,6 +3145,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtCore/q20utility.h
  /usr/include/qt6/QtCore/q23type_traits.h
  /usr/include/qt6/QtCore/q23utility.h
+ /usr/include/qt6/QtCore/qabstractitemmodel.h
  /usr/include/qt6/QtCore/qalgorithms.h
  /usr/include/qt6/QtCore/qalloc.h
  /usr/include/qt6/QtCore/qanystringview.h
@@ -3148,6 +3196,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtCore/qlatin1stringview.h
  /usr/include/qt6/QtCore/qline.h
  /usr/include/qt6/QtCore/qlist.h
+ /usr/include/qt6/QtCore/qlocale.h
  /usr/include/qt6/QtCore/qlogging.h
  /usr/include/qt6/QtCore/qmalloc.h
  /usr/include/qt6/QtCore/qmap.h
@@ -3168,6 +3217,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtCore/qprocessordetection.h
  /usr/include/qt6/QtCore/qrect.h
  /usr/include/qt6/QtCore/qrefcount.h
+ /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
  /usr/include/qt6/QtCore/qscopeguard.h
  /usr/include/qt6/QtCore/qset.h
@@ -3252,18 +3302,29 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtGui/qtguiexports.h
  /usr/include/qt6/QtGui/qtguiglobal.h
  /usr/include/qt6/QtGui/qtransform.h
+ /usr/include/qt6/QtGui/qvalidator.h
  /usr/include/qt6/QtGui/qwindowdefs.h
+ /usr/include/qt6/QtWidgets/QComboBox
  /usr/include/qt6/QtWidgets/QLabel
  /usr/include/qt6/QtWidgets/QMainWindow
  /usr/include/qt6/QtWidgets/QProgressBar
  /usr/include/qt6/QtWidgets/QPushButton
  /usr/include/qt6/QtWidgets/qabstractbutton.h
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h
+ /usr/include/qt6/QtWidgets/qabstractslider.h
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h
+ /usr/include/qt6/QtWidgets/qcombobox.h
  /usr/include/qt6/QtWidgets/qframe.h
  /usr/include/qt6/QtWidgets/qlabel.h
  /usr/include/qt6/QtWidgets/qmainwindow.h
  /usr/include/qt6/QtWidgets/qprogressbar.h
  /usr/include/qt6/QtWidgets/qpushbutton.h
+ /usr/include/qt6/QtWidgets/qrubberband.h
  /usr/include/qt6/QtWidgets/qsizepolicy.h
+ /usr/include/qt6/QtWidgets/qslider.h
+ /usr/include/qt6/QtWidgets/qstyle.h
+ /usr/include/qt6/QtWidgets/qstyleoption.h
+ /usr/include/qt6/QtWidgets/qtabbar.h
  /usr/include/qt6/QtWidgets/qtabwidget.h
  /usr/include/qt6/QtWidgets/qtwidgets-config.h
  /usr/include/qt6/QtWidgets/qtwidgetsexports.h

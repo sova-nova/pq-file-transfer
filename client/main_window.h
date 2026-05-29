@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QProgressBar>
+#include <QComboBox>
 #include <string>
 #include <thread>
 #include <atomic>
@@ -21,8 +22,10 @@ private:
     QLabel* status_label_;
     QPushButton* send_button_;
     QPushButton* receive_button_;
+    QPushButton* add_contact_button_;
     QProgressBar* progress_bar_;
     QLabel* transfer_id_label_;
+    QComboBox* recipient_combo_;
 
     TransferEngine engine_;
     std::thread worker_thread_;
@@ -30,9 +33,10 @@ private:
 
     void start_send();
     void start_receive();
+    void add_contact();
+    void refresh_contacts();
     void set_buttons_enabled(bool enabled);
 
-    // Thread-safe UI updates
     void update_status(const std::string& msg);
     void update_progress(double percent);
     void show_error(const std::string& error);

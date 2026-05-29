@@ -298,6 +298,7 @@ pq-client_autogen/timestamp: /home/sokosova/personal/projects/coding-projects/pq
   /usr/include/qt6/QtCore/q20utility.h \
   /usr/include/qt6/QtCore/q23type_traits.h \
   /usr/include/qt6/QtCore/q23utility.h \
+  /usr/include/qt6/QtCore/qabstractitemmodel.h \
   /usr/include/qt6/QtCore/qalgorithms.h \
   /usr/include/qt6/QtCore/qalloc.h \
   /usr/include/qt6/QtCore/qanystringview.h \
@@ -348,6 +349,7 @@ pq-client_autogen/timestamp: /home/sokosova/personal/projects/coding-projects/pq
   /usr/include/qt6/QtCore/qlatin1stringview.h \
   /usr/include/qt6/QtCore/qline.h \
   /usr/include/qt6/QtCore/qlist.h \
+  /usr/include/qt6/QtCore/qlocale.h \
   /usr/include/qt6/QtCore/qlogging.h \
   /usr/include/qt6/QtCore/qmalloc.h \
   /usr/include/qt6/QtCore/qmap.h \
@@ -368,6 +370,7 @@ pq-client_autogen/timestamp: /home/sokosova/personal/projects/coding-projects/pq
   /usr/include/qt6/QtCore/qprocessordetection.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
+  /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
   /usr/include/qt6/QtCore/qscopeguard.h \
   /usr/include/qt6/QtCore/qset.h \
@@ -446,18 +449,29 @@ pq-client_autogen/timestamp: /home/sokosova/personal/projects/coding-projects/pq
   /usr/include/qt6/QtGui/qtguiexports.h \
   /usr/include/qt6/QtGui/qtguiglobal.h \
   /usr/include/qt6/QtGui/qtransform.h \
+  /usr/include/qt6/QtGui/qvalidator.h \
   /usr/include/qt6/QtGui/qwindowdefs.h \
+  /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QLabel \
   /usr/include/qt6/QtWidgets/QMainWindow \
   /usr/include/qt6/QtWidgets/QProgressBar \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
+  /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+  /usr/include/qt6/QtWidgets/qabstractslider.h \
+  /usr/include/qt6/QtWidgets/qabstractspinbox.h \
+  /usr/include/qt6/QtWidgets/qcombobox.h \
   /usr/include/qt6/QtWidgets/qframe.h \
   /usr/include/qt6/QtWidgets/qlabel.h \
   /usr/include/qt6/QtWidgets/qmainwindow.h \
   /usr/include/qt6/QtWidgets/qprogressbar.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
+  /usr/include/qt6/QtWidgets/qrubberband.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
+  /usr/include/qt6/QtWidgets/qslider.h \
+  /usr/include/qt6/QtWidgets/qstyle.h \
+  /usr/include/qt6/QtWidgets/qstyleoption.h \
+  /usr/include/qt6/QtWidgets/qtabbar.h \
   /usr/include/qt6/QtWidgets/qtabwidget.h \
   /usr/include/qt6/QtWidgets/qtwidgets-config.h \
   /usr/include/qt6/QtWidgets/qtwidgetsexports.h \
@@ -1246,6 +1260,7 @@ CMakeFiles/pq-client.dir/client/key_store.cpp.o: /home/sokosova/personal/project
   /usr/include/c++/16/bits/cpp_type_traits.h \
   /usr/include/c++/16/bits/cxxabi_forced.h \
   /usr/include/c++/16/bits/cxxabi_init_exception.h \
+  /usr/include/c++/16/bits/enable_special_members.h \
   /usr/include/c++/16/bits/erase_if.h \
   /usr/include/c++/16/bits/exception.h \
   /usr/include/c++/16/bits/exception_defines.h \
@@ -1348,6 +1363,7 @@ CMakeFiles/pq-client.dir/client/key_store.cpp.o: /home/sokosova/personal/project
   /usr/include/c++/16/limits \
   /usr/include/c++/16/locale \
   /usr/include/c++/16/new \
+  /usr/include/c++/16/optional \
   /usr/include/c++/16/ostream \
   /usr/include/c++/16/pstl/pstl_config.h \
   /usr/include/c++/16/ratio \
@@ -1709,6 +1725,7 @@ CMakeFiles/pq-client.dir/client/main.cpp.o: /home/sokosova/personal/projects/cod
   /usr/include/qt6/QtCore/q23type_traits.h \
   /usr/include/qt6/QtCore/q23utility.h \
   /usr/include/qt6/QtCore/qabstracteventdispatcher.h \
+  /usr/include/qt6/QtCore/qabstractitemmodel.h \
   /usr/include/qt6/QtCore/qalgorithms.h \
   /usr/include/qt6/QtCore/qalloc.h \
   /usr/include/qt6/QtCore/qanystringview.h \
@@ -1787,6 +1804,7 @@ CMakeFiles/pq-client.dir/client/main.cpp.o: /home/sokosova/personal/projects/cod
   /usr/include/qt6/QtCore/qprocessordetection.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
+  /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
   /usr/include/qt6/QtCore/qscopeguard.h \
   /usr/include/qt6/QtCore/qset.h \
@@ -1868,20 +1886,31 @@ CMakeFiles/pq-client.dir/client/main.cpp.o: /home/sokosova/personal/projects/cod
   /usr/include/qt6/QtGui/qtguiexports.h \
   /usr/include/qt6/QtGui/qtguiglobal.h \
   /usr/include/qt6/QtGui/qtransform.h \
+  /usr/include/qt6/QtGui/qvalidator.h \
   /usr/include/qt6/QtGui/qwindowdefs.h \
   /usr/include/qt6/QtWidgets/QApplication \
+  /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QLabel \
   /usr/include/qt6/QtWidgets/QMainWindow \
   /usr/include/qt6/QtWidgets/QProgressBar \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
+  /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+  /usr/include/qt6/QtWidgets/qabstractslider.h \
+  /usr/include/qt6/QtWidgets/qabstractspinbox.h \
   /usr/include/qt6/QtWidgets/qapplication.h \
+  /usr/include/qt6/QtWidgets/qcombobox.h \
   /usr/include/qt6/QtWidgets/qframe.h \
   /usr/include/qt6/QtWidgets/qlabel.h \
   /usr/include/qt6/QtWidgets/qmainwindow.h \
   /usr/include/qt6/QtWidgets/qprogressbar.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
+  /usr/include/qt6/QtWidgets/qrubberband.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
+  /usr/include/qt6/QtWidgets/qslider.h \
+  /usr/include/qt6/QtWidgets/qstyle.h \
+  /usr/include/qt6/QtWidgets/qstyleoption.h \
+  /usr/include/qt6/QtWidgets/qtabbar.h \
   /usr/include/qt6/QtWidgets/qtabwidget.h \
   /usr/include/qt6/QtWidgets/qtwidgets-config.h \
   /usr/include/qt6/QtWidgets/qtwidgetsexports.h \
@@ -2035,6 +2064,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/c++/16/bits/fs_fwd.h \
   /usr/include/c++/16/bits/fs_ops.h \
   /usr/include/c++/16/bits/fs_path.h \
+  /usr/include/c++/16/bits/fstream.tcc \
   /usr/include/c++/16/bits/functexcept.h \
   /usr/include/c++/16/bits/functional_hash.h \
   /usr/include/c++/16/bits/hash_bytes.h \
@@ -2150,6 +2180,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/c++/16/ext/string_conversions.h \
   /usr/include/c++/16/ext/type_traits.h \
   /usr/include/c++/16/filesystem \
+  /usr/include/c++/16/fstream \
   /usr/include/c++/16/functional \
   /usr/include/c++/16/initializer_list \
   /usr/include/c++/16/iomanip \
@@ -2203,8 +2234,10 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/c++/16/vector \
   /usr/include/c++/16/version \
   /usr/include/c++/16/x86_64-redhat-linux/bits/atomic_word.h \
+  /usr/include/c++/16/x86_64-redhat-linux/bits/basic_file.h \
   /usr/include/c++/16/x86_64-redhat-linux/bits/c++allocator.h \
   /usr/include/c++/16/x86_64-redhat-linux/bits/c++config.h \
+  /usr/include/c++/16/x86_64-redhat-linux/bits/c++io.h \
   /usr/include/c++/16/x86_64-redhat-linux/bits/c++locale.h \
   /usr/include/c++/16/x86_64-redhat-linux/bits/cpu_defines.h \
   /usr/include/c++/16/x86_64-redhat-linux/bits/ctype_base.h \
@@ -2243,6 +2276,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/qt6/QtCore/q20utility.h \
   /usr/include/qt6/QtCore/q23type_traits.h \
   /usr/include/qt6/QtCore/q23utility.h \
+  /usr/include/qt6/QtCore/qabstractitemmodel.h \
   /usr/include/qt6/QtCore/qalgorithms.h \
   /usr/include/qt6/QtCore/qalloc.h \
   /usr/include/qt6/QtCore/qanystringview.h \
@@ -2321,6 +2355,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/qt6/QtCore/qprocessordetection.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
+  /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
   /usr/include/qt6/QtCore/qscopeguard.h \
   /usr/include/qt6/QtCore/qset.h \
@@ -2404,17 +2439,25 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/qt6/QtGui/qtguiexports.h \
   /usr/include/qt6/QtGui/qtguiglobal.h \
   /usr/include/qt6/QtGui/qtransform.h \
+  /usr/include/qt6/QtGui/qvalidator.h \
   /usr/include/qt6/QtGui/qwindowdefs.h \
+  /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QFileDialog \
+  /usr/include/qt6/QtWidgets/QHBoxLayout \
   /usr/include/qt6/QtWidgets/QInputDialog \
   /usr/include/qt6/QtWidgets/QLabel \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QMainWindow \
   /usr/include/qt6/QtWidgets/QMessageBox \
   /usr/include/qt6/QtWidgets/QProgressBar \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/QVBoxLayout \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
+  /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+  /usr/include/qt6/QtWidgets/qabstractslider.h \
+  /usr/include/qt6/QtWidgets/qabstractspinbox.h \
   /usr/include/qt6/QtWidgets/qboxlayout.h \
+  /usr/include/qt6/QtWidgets/qcombobox.h \
   /usr/include/qt6/QtWidgets/qdialog.h \
   /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
   /usr/include/qt6/QtWidgets/qfiledialog.h \
@@ -2429,7 +2472,12 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: /home/sokosova/personal/proje
   /usr/include/qt6/QtWidgets/qmessagebox.h \
   /usr/include/qt6/QtWidgets/qprogressbar.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
+  /usr/include/qt6/QtWidgets/qrubberband.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
+  /usr/include/qt6/QtWidgets/qslider.h \
+  /usr/include/qt6/QtWidgets/qstyle.h \
+  /usr/include/qt6/QtWidgets/qstyleoption.h \
+  /usr/include/qt6/QtWidgets/qtabbar.h \
   /usr/include/qt6/QtWidgets/qtabwidget.h \
   /usr/include/qt6/QtWidgets/qtwidgets-config.h \
   /usr/include/qt6/QtWidgets/qtwidgetsexports.h \
@@ -2697,7 +2745,6 @@ CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o: /home/sokosova/personal/p
   /usr/include/c++/16/iomanip \
   /usr/include/c++/16/ios \
   /usr/include/c++/16/iosfwd \
-  /usr/include/c++/16/iostream \
   /usr/include/c++/16/istream \
   /usr/include/c++/16/limits \
   /usr/include/c++/16/locale \
@@ -3091,6 +3138,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: pq-client_aut
   /usr/include/qt6/QtCore/q20utility.h \
   /usr/include/qt6/QtCore/q23type_traits.h \
   /usr/include/qt6/QtCore/q23utility.h \
+  /usr/include/qt6/QtCore/qabstractitemmodel.h \
   /usr/include/qt6/QtCore/qalgorithms.h \
   /usr/include/qt6/QtCore/qalloc.h \
   /usr/include/qt6/QtCore/qanystringview.h \
@@ -3141,6 +3189,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: pq-client_aut
   /usr/include/qt6/QtCore/qlatin1stringview.h \
   /usr/include/qt6/QtCore/qline.h \
   /usr/include/qt6/QtCore/qlist.h \
+  /usr/include/qt6/QtCore/qlocale.h \
   /usr/include/qt6/QtCore/qlogging.h \
   /usr/include/qt6/QtCore/qmalloc.h \
   /usr/include/qt6/QtCore/qmap.h \
@@ -3161,6 +3210,7 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: pq-client_aut
   /usr/include/qt6/QtCore/qprocessordetection.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
+  /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
   /usr/include/qt6/QtCore/qscopeguard.h \
   /usr/include/qt6/QtCore/qset.h \
@@ -3245,18 +3295,29 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: pq-client_aut
   /usr/include/qt6/QtGui/qtguiexports.h \
   /usr/include/qt6/QtGui/qtguiglobal.h \
   /usr/include/qt6/QtGui/qtransform.h \
+  /usr/include/qt6/QtGui/qvalidator.h \
   /usr/include/qt6/QtGui/qwindowdefs.h \
+  /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QLabel \
   /usr/include/qt6/QtWidgets/QMainWindow \
   /usr/include/qt6/QtWidgets/QProgressBar \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
+  /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+  /usr/include/qt6/QtWidgets/qabstractslider.h \
+  /usr/include/qt6/QtWidgets/qabstractspinbox.h \
+  /usr/include/qt6/QtWidgets/qcombobox.h \
   /usr/include/qt6/QtWidgets/qframe.h \
   /usr/include/qt6/QtWidgets/qlabel.h \
   /usr/include/qt6/QtWidgets/qmainwindow.h \
   /usr/include/qt6/QtWidgets/qprogressbar.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
+  /usr/include/qt6/QtWidgets/qrubberband.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
+  /usr/include/qt6/QtWidgets/qslider.h \
+  /usr/include/qt6/QtWidgets/qstyle.h \
+  /usr/include/qt6/QtWidgets/qstyleoption.h \
+  /usr/include/qt6/QtWidgets/qtabbar.h \
   /usr/include/qt6/QtWidgets/qtabwidget.h \
   /usr/include/qt6/QtWidgets/qtwidgets-config.h \
   /usr/include/qt6/QtWidgets/qtwidgetsexports.h \
@@ -3367,23 +3428,17 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o:
 
 /usr/lib64/libxml2.so.2:
 
-/usr/lib64/cmake/Qt6Core/Qt6CoreTargetsPrecheck.cmake:
+/usr/lib64/libxcb.so.1:
 
-/usr/lib64/cmake/Qt6Core/Qt6CoreMacros.cmake:
+/usr/lib64/libsystemd.so.0:
 
-/usr/include/c++/16/pstl/glue_memory_defs.h:
+/usr/lib64/libpcre2-16.so.0:
 
-/usr/include/c++/16/bits/stl_function.h:
+/usr/lib64/libicudata.so.77:
 
-/usr/lib64/cmake/Qt6Core/Qt6CoreConfigVersion.cmake:
+/usr/lib64/libharfbuzz.so.0:
 
-/usr/include/qt6/QtCore/qmargins.h:
-
-/usr/share/cmake/Modules/MacroAddFileDependencies.cmake:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreAdditionalTargetInfo.cmake:
-
-/usr/include/openssl/configuration-x86_64.h:
+/usr/lib64/libgomp.so.1:
 
 /usr/lib64/cmake/Qt6/QtPublicSbomPythonHelpers.cmake:
 
@@ -3425,11 +3480,17 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o:
 
 /usr/lib64/libb2.so.1:
 
-/usr/lib64/libxcb.so.1:
+/usr/lib64/libgraphite2.so.3:
+
+/usr/lib64/cmake/Qt6/QtPublicCMakeEarlyPolicyHelpers.cmake:
 
 /usr/lib64/cmake/Qt6/QtPublicAppleHelpers.cmake:
 
 /usr/lib64/cmake/Qt6/QtPublicAndroidHelpers.cmake:
+
+/usr/lib64/libpng16.so.16:
+
+/usr/lib64/cmake/Qt6/QtPublicDependencyHelpers.cmake:
 
 /usr/lib64/cmake/Qt6/QtFeatureCommon.cmake:
 
@@ -3458,6 +3519,8 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o:
 /usr/include/string.h:
 
 /usr/include/stdlib.h:
+
+/usr/include/qt6/QtWidgets/qslider.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QXdgDesktopPortalThemePluginConfig.cmake:
 
@@ -3488,6 +3551,8 @@ CMakeFiles/pq-client.dir/client/crypto_engine.cpp.o:
 /usr/include/openssl/types.h:
 
 /usr/include/qt6/QtWidgets/QLabel:
+
+/usr/include/qt6/QtGui/qvalidator.h:
 
 /usr/include/qt6/QtGui/qtguiglobal.h:
 
@@ -3531,6 +3596,10 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 
 /usr/include/qt6/QtCore/qttypetraits.h:
 
+/usr/include/qt6/QtCore/qtypeinfo.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QMinimalIntegrationPluginTargetsPrecheck.cmake:
+
 /usr/include/qt6/QtCore/qversiontagging.h:
 
 /usr/include/c++/16/bits/stringfwd.h:
@@ -3538,10 +3607,6 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 /usr/include/c++/16/list:
 
 /usr/include/bits/libc-header-start.h:
-
-/usr/lib64/cmake/Qt6Gui/Qt6QMinimalIntegrationPluginTargetsPrecheck.cmake:
-
-/usr/include/qt6/QtCore/qtypeinfo.h:
 
 /usr/include/qt6/QtCore/qtpreprocessorsupport.h:
 
@@ -3559,8 +3624,6 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 
 /usr/include/qt6/QtCore/qtenvironmentvariables.h:
 
-/usr/include/qt6/QtCore/qtcoreglobal.h:
-
 /usr/include/qt6/QtCore/qtcore-config.h:
 
 /usr/include/qt6/QtCore/qsysinfo.h:
@@ -3576,6 +3639,8 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 /usr/include/assert.h:
 
 /usr/include/qt6/QtCore/qstringlist.h:
+
+/usr/include/qt6/QtWidgets/qcombobox.h:
 
 /usr/lib64/cmake/Qt6/Qt6VersionlessAliasTargets.cmake:
 
@@ -3603,6 +3668,10 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 
 /usr/include/limits.h:
 
+/usr/lib64/libpcre2-8.so.0:
+
+/usr/include/qt6/QtCore/qglobalstatic.h:
+
 /usr/lib64/cmake/Qt6Gui/Qt6QGifPluginAdditionalTargetInfo.cmake:
 
 /usr/include/sys/socket.h:
@@ -3610,8 +3679,6 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 /usr/include/qt6/QtCore/qobject.h:
 
 /usr/include/qt6/QtCore/qnumeric.h:
-
-/usr/lib64/libgomp.so.1:
 
 /usr/include/qt6/QtCore/qmetatype.h:
 
@@ -3646,8 +3713,6 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 /usr/include/qt6/QtCore/qiterator.h:
 
 /usr/include/qt6/QtCore/qminmax.h:
-
-/usr/lib64/libharfbuzz.so.0:
 
 /usr/include/qt6/QtCore/qglobal.h:
 
@@ -3705,9 +3770,11 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 
 /usr/lib64/cmake/Qt6Widgets/Qt6WidgetsConfigVersion.cmake:
 
-/usr/lib64/cmake/Qt6Core/Qt6CoreDependencies.cmake:
-
 /usr/include/qt6/QtCore/qatomic_cxx11.h:
+
+/usr/lib64/libglib-2.0.so.0:
+
+/usr/include/qt6/QtCore/qassert.h:
 
 /usr/local/include/oqs/kem_kyber.h:
 
@@ -3724,6 +3791,10 @@ CMakeFiles/4.3.0/CMakeSystem.cmake:
 /usr/include/qt6/QtCore/qalloc.h:
 
 /usr/lib64/cmake/Qt6DBus/Qt6DBusMacros.cmake:
+
+/usr/include/qt6/QtCore/qabstractitemmodel.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QEvdevTabletPluginAdditionalTargetInfo.cmake:
 
 /usr/include/qt6/QtCore/q23type_traits.h:
 
@@ -3863,6 +3934,8 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 
 /usr/include/bits/cpu-set.h:
 
+/usr/include/qt6/QtWidgets/qstyleoption.h:
+
 /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/crypto_engine.h:
 
 /usr/lib64/cmake/Qt6/QtPublicSbomGenerationCycloneDXHelpers.cmake:
@@ -3872,10 +3945,6 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 /usr/include/qt6/QtGui/qfont.h:
 
 /usr/include/c++/16/bits/new_throw.h:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreConfigVersionImpl.cmake:
-
-/usr/include/c++/16/bits/atomic_base.h:
 
 /usr/lib64/cmake/Qt6/QtPublicGitHelpers.cmake:
 
@@ -3895,6 +3964,10 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 
 /usr/lib64/cmake/Qt6Gui/Qt6DrmEglServerBufferPluginConfig.cmake:
 
+/usr/lib64/libicui18n.so.77:
+
+/usr/include/c++/16/chrono:
+
 /usr/include/c++/16/initializer_list:
 
 /usr/include/c++/16/bits/uses_allocator_args.h:
@@ -3906,12 +3979,6 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 /usr/include/c++/16/ext/type_traits.h:
 
 /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main.cpp:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreConfig.cmake:
-
-/usr/lib64/cmake/Qt6Gui/Qt6QWbmpPluginTargetsPrecheck.cmake:
-
-/usr/include/qt6/QtCore/qscopeguard.h:
 
 /usr/include/qt6/QtWidgets/qmainwindow.h:
 
@@ -3971,10 +4038,6 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 
 /usr/lib64/cmake/Qt6WidgetsTools/Qt6WidgetsToolsVersionlessTargets.cmake:
 
-/usr/lib64/cmake/Qt6Gui/Qt6QMngPluginTargetsPrecheck.cmake:
-
-/usr/include/c++/16/bits/char_traits.h:
-
 /usr/include/bits/types/__fpos_t.h:
 
 /usr/include/qt6/QtCore/qtaggedpointer.h:
@@ -4020,6 +4083,8 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 /usr/lib64/libQt6Gui.so.6.11.1:
 
 /usr/include/bits/setjmp.h:
+
+/usr/include/qt6/QtWidgets/qabstractslider.h:
 
 /usr/include/bits/select.h:
 
@@ -4091,14 +4156,6 @@ pq-client_autogen/7EM65HM6UG/moc_main_window.cpp:
 
 /usr/include/c++/16/ratio:
 
-/usr/lib64/libicuuc.so.77:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreTargets.cmake:
-
-/usr/include/c++/16/tr1/poly_laguerre.tcc:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreConfigExtras.cmake:
-
 /usr/include/c++/16/bits/cpp_type_traits.h:
 
 CMakeFiles/4.3.0/CMakeCXXCompiler.cmake:
@@ -4122,12 +4179,6 @@ pq-client_autogen/mocs_compilation.cpp:
 /usr/include/sched.h:
 
 /usr/lib64/cmake/Qt6CoreTools/Qt6CoreToolsTargets-relwithdebinfo.cmake:
-
-/usr/lib64/cmake/Qt6Gui/Qt6QICNSPluginTargets.cmake:
-
-/usr/include/c++/16/algorithm:
-
-/usr/include/bits/types/struct_FILE.h:
 
 /usr/include/c++/16/bits/stdexcept_except.h:
 
@@ -4209,6 +4260,10 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/bits/stdio_lim.h:
 
+/usr/include/qt6/QtWidgets/qrubberband.h:
+
+/usr/include/c++/16/tr1/legendre_function.tcc:
+
 /usr/lib64/cmake/Qt6DBus/Qt6DBusConfig.cmake:
 
 /usr/include/c++/16/tr1/beta_function.tcc:
@@ -4262,8 +4317,6 @@ pq-client_autogen/moc_predefs.h:
 /usr/include/bits/time.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QWbmpPluginConfig.cmake:
-
-/usr/lib64/cmake/Qt6/QtPublicWindowsHelpers.cmake:
 
 /usr/include/c++/16/x86_64-redhat-linux/bits/atomic_word.h:
 
@@ -4335,15 +4388,13 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/c++/16/cerrno:
 
-/usr/lib64/cmake/Qt6CoreTools/Qt6CoreToolsConfig.cmake:
-
-/usr/include/bits/types/time_t.h:
-
 /usr/include/c++/16/unordered_map:
 
 /usr/include/c++/16/bits/localefwd.h:
 
 /usr/include/pthread.h:
+
+/usr/include/qt6/QtWidgets/QComboBox:
 
 /usr/include/c++/16/bits/shared_ptr_atomic.h:
 
@@ -4383,6 +4434,14 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/qt6/QtCore/qstringtokenizer.h:
 
+/usr/include/bits/types/time_t.h:
+
+/usr/lib64/cmake/Qt6CoreTools/Qt6CoreToolsConfig.cmake:
+
+/usr/lib64/liblzma.so.5:
+
+/usr/include/bits/types/__fpos64_t.h:
+
 /usr/lib64/crti.o:
 
 /usr/include/c++/16/string_view:
@@ -4392,6 +4451,10 @@ pq-client_autogen/moc_predefs.h:
 /usr/lib64/cmake/Qt6Gui/Qt6QMinimalEglIntegrationPluginTargets.cmake:
 
 /lib64/libmvec.so.1:
+
+/usr/include/qt6/QtWidgets/qtabbar.h:
+
+/usr/include/libintl.h:
 
 /usr/include/c++/16/bits/new_except.h:
 
@@ -4437,17 +4500,31 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6Widgets/Qt6WidgetsConfig.cmake:
 
+/usr/include/qt6/QtWidgets/qstyle.h:
+
+/usr/lib64/cmake/Qt6DBusTools/Qt6DBusToolsAdditionalTargetInfo.cmake:
+
 /usr/include/c++/16/cassert:
 
 /usr/lib64/cmake/Qt6/QtPublicSbomCommonGenerationHelpers.cmake:
 
 /usr/include/c++/16/bits/uses_allocator.h:
 
+/usr/include/c++/16/bits/stl_function.h:
+
+/usr/include/c++/16/bits/atomic_base.h:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreConfigVersionImpl.cmake:
+
 /usr/include/c++/16/ext/numeric_traits.h:
 
 /usr/include/c++/16/bits/stl_iterator_base_types.h:
 
 /usr/include/c++/16/bits/stl_relops.h:
+
+/usr/include/qt6/QtCore/qtcoreglobal.h:
+
+/usr/include/qt6/QtWidgets/qabstractspinbox.h:
 
 /usr/include/qt6/QtCore/qhashfunctions.h:
 
@@ -4463,21 +4540,11 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QTgaPluginConfig.cmake:
 
-/usr/include/c++/16/unordered_set:
-
-/usr/lib64/cmake/Qt6Core/Qt6CoreTargets-relwithdebinfo.cmake:
-
 /usr/include/qt6/QtGui/qtgui-config.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QJpegPluginTargets.cmake:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QOffscreenIntegrationPluginTargetsPrecheck.cmake:
-
-/usr/lib64/cmake/Qt6Gui/Qt6VulkanServerBufferPluginTargets-relwithdebinfo.cmake:
-
-/usr/include/bits/types/cookie_io_functions_t.h:
-
-/usr/lib64/cmake/Qt6Gui/Qt6QWaylandXdgShellIntegrationPluginTargetsPrecheck.cmake:
 
 /usr/include/c++/16/bits/streambuf.tcc:
 
@@ -4545,9 +4612,9 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/qt6/QtCore/qdeadlinetimer.h:
 
-/usr/include/bits/types/struct_sched_param.h:
-
 /usr/lib64/libfreetype.so.6:
+
+/usr/include/bits/types/struct_sched_param.h:
 
 /usr/include/qt6/QtWidgets/QVBoxLayout:
 
@@ -4567,6 +4634,16 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/libfontconfig.so.1:
 
+/usr/include/qt6/QtCore/qmargins.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QWbmpPluginTargetsPrecheck.cmake:
+
+/usr/include/qt6/QtCore/qscopeguard.h:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreConfig.cmake:
+
+/usr/share/cmake/Modules/MacroAddFileDependencies.cmake:
+
 /usr/include/c++/16/bits/unordered_map.h:
 
 /usr/include/c++/16/ext/alloc_traits.h:
@@ -4583,6 +4660,12 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/c++/16/ext/concurrence.h:
 
+/usr/lib64/cmake/Qt6Core/Qt6CoreDependencies.cmake:
+
+/usr/include/c++/16/bits/char_traits.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QMngPluginTargetsPrecheck.cmake:
+
 /usr/include/c++/16/ext/string_conversions.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QComposePlatformInputContextPluginAdditionalTargetInfo.cmake:
@@ -4593,11 +4676,11 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QWaylandFullScreenShellV1IntegrationPluginAdditionalTargetInfo.cmake:
 
-/usr/lib64/libsystemd.so.0:
-
 /usr/include/c++/16/memory:
 
 /usr/include/openssl/safestack.h:
+
+/usr/include/qt6/QtWidgets/qabstractitemdelegate.h:
 
 /usr/include/c++/16/new:
 
@@ -4653,8 +4736,6 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6DBus/Qt6DBusVersionlessAliasTargets.cmake:
 
-/usr/include/c++/16/tr1/legendre_function.tcc:
-
 /usr/include/qt6/QtGui/qtextdocument.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QEvdevTabletPluginTargets-relwithdebinfo.cmake:
@@ -4670,6 +4751,12 @@ pq-client_autogen/moc_predefs.h:
 /usr/lib64/cmake/Qt6Gui/Qt6QEvdevKeyboardPluginTargets-relwithdebinfo.cmake:
 
 /usr/include/bits/types/error_t.h:
+
+/usr/include/c++/16/tr1/poly_laguerre.tcc:
+
+/usr/lib64/libicuuc.so.77:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreTargets.cmake:
 
 /usr/include/asm/errno.h:
 
@@ -4687,6 +4774,38 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/locale_conv.h:
 
+/usr/lib64/cmake/Qt6/QtPublicWindowsHelpers.cmake:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreAdditionalTargetInfo.cmake:
+
+/usr/include/c++/16/algorithm:
+
+/usr/include/bits/types/struct_FILE.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QICNSPluginTargets.cmake:
+
+/usr/include/openssl/configuration-x86_64.h:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreConfigExtras.cmake:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreConfigVersion.cmake:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreMacros.cmake:
+
+/usr/include/c++/16/pstl/glue_memory_defs.h:
+
+/usr/include/c++/16/unordered_set:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreTargets-relwithdebinfo.cmake:
+
+/usr/lib64/cmake/Qt6Core/Qt6CoreTargetsPrecheck.cmake:
+
+/usr/lib64/cmake/Qt6Gui/Qt6VulkanServerBufferPluginTargets-relwithdebinfo.cmake:
+
+/usr/include/bits/types/cookie_io_functions_t.h:
+
+/usr/lib64/cmake/Qt6Gui/Qt6QWaylandXdgShellIntegrationPluginTargetsPrecheck.cmake:
+
 /usr/lib64/cmake/Qt6CoreTools/Qt6CoreToolsConfigVersion.cmake:
 
 /usr/lib64/cmake/Qt6CoreTools/Qt6CoreToolsTargets.cmake:
@@ -4701,15 +4820,11 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6DBus/Qt6DBusConfigVersionImpl.cmake:
 
-/usr/lib64/libicudata.so.77:
-
 /usr/lib64/cmake/Qt6DBus/Qt6DBusDependencies.cmake:
 
 /usr/lib64/cmake/Qt6DBus/Qt6DBusTargetsPrecheck.cmake:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QVncIntegrationPluginTargetsPrecheck.cmake:
-
-/usr/lib64/cmake/Qt6DBusTools/Qt6DBusToolsAdditionalTargetInfo.cmake:
 
 /usr/lib64/cmake/Qt6DBusTools/Qt6DBusToolsConfig.cmake:
 
@@ -4831,11 +4946,11 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QTsLibPluginTargets-relwithdebinfo.cmake:
 
+/usr/lib64/libssl.so:
+
 /usr/include/bits/fp-logb.h:
 
 /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h:
-
-/usr/lib64/libssl.so:
 
 /usr/include/bits/mathcalls-macros.h:
 
@@ -4854,8 +4969,6 @@ pq-client_autogen/moc_predefs.h:
 /usr/lib64/cmake/Qt6Gui/Qt6QLinuxFbIntegrationPluginTargets-relwithdebinfo.cmake:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QEvdevMousePluginTargetsPrecheck.cmake:
-
-/usr/lib64/cmake/Qt6Gui/Qt6QEvdevTabletPluginAdditionalTargetInfo.cmake:
 
 /usr/lib64/cmake/Qt6Gui/Qt6QEvdevTabletPluginTargets.cmake:
 
@@ -5165,10 +5278,6 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/lib64/cmake/Qt6Widgets/Qt6WidgetsMacros.cmake:
 
-/usr/include/qt6/QtCore/qglobalstatic.h:
-
-/usr/lib64/libpcre2-8.so.0:
-
 /usr/include/unistd.h:
 
 /usr/include/c++/16/bits/locale_classes.h:
@@ -5307,15 +5416,13 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/openssl/obj_mac.h:
 
-/usr/include/c++/16/chrono:
-
-/usr/lib64/libicui18n.so.77:
-
 /usr/include/openssl/objectserr.h:
 
 /usr/include/openssl/opensslv.h:
 
 /usr/include/openssl/rand.h:
+
+/usr/include/qt6/QtCore/qregularexpression.h:
 
 /usr/include/openssl/randerr.h:
 
@@ -5389,8 +5496,6 @@ pq-client_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/locale_facets.h:
 
-/usr/include/c++/16/bits/locale_facets.tcc:
-
 /usr/include/c++/16/bits/ostream.h:
 
 /usr/include/qt6/QtCore/qtversion.h:
@@ -5410,8 +5515,6 @@ pq-client_autogen/moc_predefs.h:
 /usr/include/c++/16/x86_64-redhat-linux/bits/c++io.h:
 
 /usr/include/c++/16/x86_64-redhat-linux/bits/messages_members.h:
-
-/usr/include/libintl.h:
 
 /usr/lib64/cmake/Qt6Gui/Qt6GuiVersionlessAliasTargets.cmake:
 
@@ -5444,6 +5547,10 @@ pq-client_autogen/moc_predefs.h:
 /usr/lib64/cmake/Qt6Gui/Qt6GuiPlugins.cmake:
 
 /usr/include/qt6/QtCore/qabstracteventdispatcher.h:
+
+/usr/include/c++/16/bits/locale_facets.tcc:
+
+/usr/include/qt6/QtWidgets/QHBoxLayout:
 
 /usr/include/qt6/QtCore/qcoreapplication.h:
 
@@ -5492,6 +5599,8 @@ pq-client_autogen/moc_predefs.h:
 CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o:
 
 /usr/include/qt6/QtWidgets/QInputDialog:
+
+/usr/include/qt6/QtWidgets/QLineEdit:
 
 /usr/include/qt6/QtWidgets/qboxlayout.h:
 
@@ -5572,21 +5681,3 @@ CMakeFiles/pq-client.dir/client/transfer_engine.cpp.o:
 /usr/lib64/libcrypto.so:
 
 /usr/lib64/libdbus-1.so.3:
-
-/usr/include/qt6/QtCore/qassert.h:
-
-/usr/lib64/libglib-2.0.so.0:
-
-/usr/lib64/cmake/Qt6/QtPublicCMakeEarlyPolicyHelpers.cmake:
-
-/usr/lib64/libgraphite2.so.3:
-
-/usr/include/bits/types/__fpos64_t.h:
-
-/usr/lib64/liblzma.so.5:
-
-/usr/lib64/libpcre2-16.so.0:
-
-/usr/lib64/cmake/Qt6/QtPublicDependencyHelpers.cmake:
-
-/usr/lib64/libpng16.so.16:

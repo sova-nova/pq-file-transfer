@@ -339,7 +339,20 @@ CMakeFiles/pq-client.dir/pq-client_autogen/mocs_compilation.cpp.o: \
  /usr/include/qt6/QtWidgets/qpushbutton.h \
  /usr/include/qt6/QtWidgets/qabstractbutton.h \
  /usr/include/qt6/QtWidgets/QProgressBar \
- /usr/include/qt6/QtWidgets/qprogressbar.h /usr/include/c++/16/thread \
+ /usr/include/qt6/QtWidgets/qprogressbar.h \
+ /usr/include/qt6/QtWidgets/QComboBox \
+ /usr/include/qt6/QtWidgets/qcombobox.h \
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+ /usr/include/qt6/QtWidgets/qstyleoption.h \
+ /usr/include/qt6/QtCore/qlocale.h \
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h \
+ /usr/include/qt6/QtGui/qvalidator.h \
+ /usr/include/qt6/QtCore/qregularexpression.h \
+ /usr/include/qt6/QtWidgets/qslider.h \
+ /usr/include/qt6/QtWidgets/qabstractslider.h \
+ /usr/include/qt6/QtWidgets/qstyle.h /usr/include/qt6/QtWidgets/qtabbar.h \
+ /usr/include/qt6/QtWidgets/qrubberband.h \
+ /usr/include/qt6/QtCore/qabstractitemmodel.h /usr/include/c++/16/thread \
  /usr/include/c++/16/bits/std_thread.h \
  /usr/include/c++/16/bits/this_thread_sleep.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/build/pq-client_autogen/7EM65HM6UG/../../../client/transfer_engine.h \

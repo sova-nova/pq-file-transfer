@@ -103,15 +103,16 @@ CMakeFiles/pq-client.dir/client/key_store.cpp.o: \
  /usr/include/c++/16/bits/vector.tcc /usr/include/c++/16/cstdint \
  /usr/lib/gcc/x86_64-redhat-linux/16/include/stdint.h \
  /usr/include/stdint.h /usr/include/bits/stdint-uintn.h \
- /usr/include/bits/stdint-least.h \
+ /usr/include/bits/stdint-least.h /usr/include/c++/16/optional \
+ /usr/include/c++/16/exception /usr/include/c++/16/bits/exception_ptr.h \
+ /usr/include/c++/16/bits/cxxabi_init_exception.h \
+ /usr/include/c++/16/typeinfo /usr/include/c++/16/bits/nested_exception.h \
+ /usr/include/c++/16/bits/enable_special_members.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/crypto_engine.h \
  /usr/include/c++/16/filesystem /usr/include/c++/16/bits/fs_fwd.h \
  /usr/include/c++/16/system_error \
  /usr/include/c++/16/x86_64-redhat-linux/bits/error_constants.h \
- /usr/include/c++/16/stdexcept /usr/include/c++/16/exception \
- /usr/include/c++/16/bits/exception_ptr.h \
- /usr/include/c++/16/bits/cxxabi_init_exception.h \
- /usr/include/c++/16/typeinfo /usr/include/c++/16/bits/nested_exception.h \
+ /usr/include/c++/16/stdexcept \
  /usr/include/c++/16/bits/stdexcept_except.h \
  /usr/include/c++/16/bits/chrono.h /usr/include/c++/16/ratio \
  /usr/include/c++/16/limits /usr/include/c++/16/ctime /usr/include/time.h \

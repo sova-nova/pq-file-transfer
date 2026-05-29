@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <optional>
 
 class KeyStore {
 public:
@@ -28,6 +29,16 @@ public:
 
     Contact load_contact(const std::string& name);
 
+    // New: list all contact names
+    std::vector<std::string> list_contacts();
+
+    // New: find a contact by matching the first 8 bytes of their DSA public key
+    std::optional<Contact> find_contact_by_dsa_fingerprint(const std::vector<uint8_t>& pub_dsa);
+
+    // New: delete a contact
+    void delete_contact(const std::string& name);
+
 private:
     std::string base_path_;
+    std::string contacts_path_;
 };

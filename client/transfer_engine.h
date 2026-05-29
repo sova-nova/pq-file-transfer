@@ -13,7 +13,8 @@ public:
 
     void upload_file(const std::string& filepath,
                      const std::string& server_addr,
-                     uint16_t server_port);
+                     uint16_t server_port,
+                     const std::string& recipient);
 
     void download_file(const std::string& transfer_id,
                        const std::string& server_addr,
@@ -33,10 +34,8 @@ private:
 
     int connect_to_server(const std::string& addr, uint16_t port);
 
-    // Compute a unique nonce for each chunk: base_nonce XOR chunk_index
     static std::vector<uint8_t> compute_chunk_nonce(
         const std::vector<uint8_t>& base_nonce, uint32_t chunk_index);
 
-    // Build the payload that gets signed (all header fields except signature itself)
     static std::vector<uint8_t> build_signing_payload(const FileHeader& header);
 };

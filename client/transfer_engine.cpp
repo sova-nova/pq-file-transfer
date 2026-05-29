@@ -80,7 +80,8 @@ std::vector<uint8_t> TransferEngine::build_signing_payload(const FileHeader& hea
 
 void TransferEngine::upload_file(const std::string& filepath,
                                  const std::string& server_addr,
-                                 uint16_t server_port) {
+                                 uint16_t server_port,
+                                 const std::string& recipient) {
     cancel_flag_ = false;
 
     if (on_status) on_status("Loading keys...");
@@ -88,18 +89,24 @@ void TransferEngine::upload_file(const std::string& filepath,
     CryptoEngine crypto;
     KeyStore keystore;
 
-    auto pub_kem = keystore.load_public_kem();
     auto priv_dsa = keystore.load_private_dsa();
     auto pub_dsa = keystore.load_public_dsa();
 
-    if (pub_kem.empty() || priv_dsa.empty()) {
+    if (priv_dsa.empty() || pub_dsa.empty()) {
         if (on_error) on_error("No keys found — restart the app to generate them");
         return;
     }
 
-    if (on_status) on_status("Performing key exchange...");
+    // Load recipient's public KEM key
+    auto contact = keystore.load_contact(recipient);
+    if (contact.pub_kem.empty()) {
+        if (on_error) on_error("Contact not found: " + recipient);
+        return;
+    }
 
-    auto encap_result = crypto.encapsulate(pub_kem);
+    if (on_status) on_status("Performing key exchange with " + recipient + "...");
+
+    auto encap_result = crypto.encapsulate(contact.pub_kem);
 
     if (on_status) on_status("Deriving encryption key...");
 
@@ -124,6 +131,7 @@ void TransferEngine::upload_file(const std::string& filepath,
     uint32_t total_chunks = static_cast<uint32_t>((file_size + chunk_size - 1) / chunk_size);
     if (file_size == 0) total_chunks = 1;
 
+    // Sender ID = fingerprint of our own DSA public key
     std::string sender_id;
     for (size_t i = 0; i < 8 && i < pub_dsa.size(); i++) {
         char hex[3];
@@ -287,8 +295,6 @@ void TransferEngine::download_file(const std::string& transfer_id,
         KeyStore keystore;
 
         auto priv_kem = keystore.load_private_kem();
-        auto pub_dsa = keystore.load_public_dsa();
-
         if (priv_kem.empty()) {
             if (on_error) on_error("No private KEM key found");
             close(sockfd);
@@ -299,18 +305,42 @@ void TransferEngine::download_file(const std::string& transfer_id,
 
         aes_key = crypto.generate_aes_key(shared_secret);
 
+        // Look up sender by their DSA fingerprint
+        // The sender_id is the first 8 hex chars of their pub_dsa
+        // We need to reconstruct the first 8 bytes to search
+        std::vector<uint8_t> sender_fingerprint(8);
+        for (size_t i = 0; i < 8; i++) {
+            std::string byte_str = header->sender_id.substr(i * 2, 2);
+            sender_fingerprint[i] = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+        }
+
+        auto contact = keystore.find_contact_by_dsa_fingerprint(sender_fingerprint);
+
         if (on_status) on_status("Verifying signature...");
 
         auto signing_payload = build_signing_payload(*header);
-        bool valid = crypto.verify(signing_payload, header->signature, pub_dsa);
+
+        bool valid = false;
+        if (contact) {
+            valid = crypto.verify(signing_payload, header->signature, contact->pub_dsa);
+            if (valid) {
+                if (on_status) on_status("Signature verified ✓  From: " + contact->name + "  Downloading...");
+            }
+        } else {
+            // Unknown sender — try with our own key (self-test fallback)
+            auto own_pub_dsa = keystore.load_public_dsa();
+            valid = crypto.verify(signing_payload, header->signature, own_pub_dsa);
+            if (valid) {
+                if (on_status) on_status("Signature verified ✓  From: (self)  Downloading...");
+            }
+        }
 
         if (!valid) {
-            if (on_error) on_error("Signature verification FAILED — file may be tampered or from unknown sender");
+            if (on_error) on_error("Signature verification FAILED — unknown or untrusted sender");
             close(sockfd);
             return;
         }
 
-        if (on_status) on_status("Signature verified ✓  Downloading...");
     } else {
         if (on_status) on_status("Downloading (unencrypted)...");
     }

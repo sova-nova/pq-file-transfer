@@ -338,7 +338,20 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/qt6/QtWidgets/qpushbutton.h \
  /usr/include/qt6/QtWidgets/qabstractbutton.h \
  /usr/include/qt6/QtWidgets/QProgressBar \
- /usr/include/qt6/QtWidgets/qprogressbar.h /usr/include/c++/16/thread \
+ /usr/include/qt6/QtWidgets/qprogressbar.h \
+ /usr/include/qt6/QtWidgets/QComboBox \
+ /usr/include/qt6/QtWidgets/qcombobox.h \
+ /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+ /usr/include/qt6/QtWidgets/qstyleoption.h \
+ /usr/include/qt6/QtCore/qlocale.h \
+ /usr/include/qt6/QtWidgets/qabstractspinbox.h \
+ /usr/include/qt6/QtGui/qvalidator.h \
+ /usr/include/qt6/QtCore/qregularexpression.h \
+ /usr/include/qt6/QtWidgets/qslider.h \
+ /usr/include/qt6/QtWidgets/qabstractslider.h \
+ /usr/include/qt6/QtWidgets/qstyle.h /usr/include/qt6/QtWidgets/qtabbar.h \
+ /usr/include/qt6/QtWidgets/qrubberband.h \
+ /usr/include/qt6/QtCore/qabstractitemmodel.h /usr/include/c++/16/thread \
  /usr/include/c++/16/bits/std_thread.h \
  /usr/include/c++/16/bits/this_thread_sleep.h \
  /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/transfer_engine.h \
@@ -349,6 +362,7 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/qt6/QtWidgets/qlayout.h \
  /usr/include/qt6/QtWidgets/qlayoutitem.h \
  /usr/include/qt6/QtWidgets/qgridlayout.h \
+ /usr/include/qt6/QtWidgets/QHBoxLayout \
  /usr/include/qt6/QtWidgets/QFileDialog \
  /usr/include/qt6/QtWidgets/qfiledialog.h /usr/include/qt6/QtCore/qdir.h \
  /usr/include/qt6/QtCore/qdirlisting.h \
@@ -377,9 +391,8 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/c++/16/bits/sstream.tcc /usr/include/c++/16/codecvt \
  /usr/include/c++/16/bits/fs_dir.h /usr/include/c++/16/bits/fs_ops.h \
  /usr/include/qt6/QtCore/qdatetime.h /usr/include/qt6/QtCore/qcalendar.h \
- /usr/include/qt6/QtCore/qlocale.h /usr/include/qt6/QtCore/qfile.h \
- /usr/include/qt6/QtCore/qfileinfo.h /usr/include/qt6/QtCore/qtimezone.h \
- /usr/include/qt6/QtWidgets/qdialog.h \
+ /usr/include/qt6/QtCore/qfile.h /usr/include/qt6/QtCore/qfileinfo.h \
+ /usr/include/qt6/QtCore/qtimezone.h /usr/include/qt6/QtWidgets/qdialog.h \
  /usr/include/qt6/QtWidgets/QInputDialog \
  /usr/include/qt6/QtWidgets/qinputdialog.h \
  /usr/include/qt6/QtWidgets/qlineedit.h \
@@ -389,4 +402,8 @@ CMakeFiles/pq-client.dir/client/main_window.cpp.o: \
  /usr/include/qt6/QtWidgets/QMessageBox \
  /usr/include/qt6/QtWidgets/qmessagebox.h \
  /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
- /usr/include/qt6/QtCore/QMetaObject
+ /usr/include/qt6/QtCore/QMetaObject /usr/include/qt6/QtWidgets/QLineEdit \
+ /usr/include/c++/16/fstream \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/basic_file.h \
+ /usr/include/c++/16/x86_64-redhat-linux/bits/c++io.h \
+ /usr/include/c++/16/bits/fstream.tcc
