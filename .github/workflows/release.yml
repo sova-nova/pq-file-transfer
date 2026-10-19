@@ -23,7 +23,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libssl-dev libsecret-1-dev libgl1-mesa-dev libglu1-mesa-dev \
+          sudo apt-get install -y cmake g++ libssl-dev libsqlite3-dev libsecret-1-dev libgl1-mesa-dev libglu1-mesa-dev \
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libfontconfig1 libdbus-1-3
 
@@ -100,6 +100,7 @@ jobs:
           mkdir dist
           mv PQ_File_Transfer*.AppImage dist/PQ-File-Transfer-linux-x86_64.AppImage
           cp build/pq-server dist/pq-server-linux-x86_64
+          cp build/pq-relay-check dist/pq-relay-check-linux-x86_64
           chmod +x dist/*
 
       - uses: actions/upload-artifact@v7
@@ -122,9 +123,9 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
 
-      - name: OpenSSL (static, via vcpkg)
+      - name: OpenSSL and SQLite (static, via vcpkg)
         run: |
-          "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows-static-md
+          "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows-static-md sqlite3:x64-windows-static-md
 
       - name: Restore liboqs
         id: oqs-cache
@@ -181,7 +182,7 @@ jobs:
       - name: Package zip
         run: |
           mkdir -p PQ-File-Transfer
-          cp build/Release/pq-client.exe build/Release/pq-server.exe PQ-File-Transfer/
+          cp build/Release/pq-client.exe build/Release/pq-server.exe build/Release/pq-relay-check.exe PQ-File-Transfer/
           windeployqt --release --no-translations --compiler-runtime PQ-File-Transfer/pq-client.exe
           mkdir dist
           7z a -tzip dist/PQ-File-Transfer-windows-x64.zip PQ-File-Transfer

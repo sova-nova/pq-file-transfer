@@ -41,6 +41,7 @@
 #else
     #include <sys/types.h>
     #include <sys/socket.h>
+    #include <sys/select.h>
     #include <sys/time.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
@@ -86,3 +87,14 @@
     #endif
     }
 #endif
+
+// True if the socket has data to read (or has been closed) within `millis` milliseconds.
+inline bool wait_readable(socket_t s, int millis) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(s, &fds);
+    timeval tv;
+    tv.tv_sec = millis / 1000;
+    tv.tv_usec = (millis % 1000) * 1000;
+    return select(static_cast<int>(s) + 1, &fds, nullptr, nullptr, &tv) > 0;
+}

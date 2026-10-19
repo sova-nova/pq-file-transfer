@@ -43,6 +43,9 @@ std::optional<FileChunk> deserialize_file_chunk(const uint8_t* data, size_t len)
 std::string bytes_to_hex(const uint8_t* data, size_t len);
 inline std::string bytes_to_hex(const std::vector<uint8_t>& v) { return bytes_to_hex(v.data(), v.size()); }
 
+// Decodes upper- or lowercase hex. std::nullopt for odd length or any other character.
+std::optional<std::vector<uint8_t>> hex_to_bytes(const std::string& hex);
+
 // True if `s` is exactly `expected_len` lowercase hex characters.
 bool is_lower_hex(const std::string& s, size_t expected_len);
 

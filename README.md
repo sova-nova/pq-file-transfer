@@ -48,8 +48,9 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 | Library | Purpose | Version |
 |---|---|---|
 | Qt 6 | GUI (client only) | 6.2+ |
-| liboqs | ML-KEM-768, ML-DSA-65 (client only) | 0.10+ |
+| liboqs | ML-KEM-768, ML-DSA-65 (client, and the relay for signatures) | 0.10+ |
 | OpenSSL | AES-GCM, HKDF, scrypt, SHA-256, RNG | 1.1.1+ (3.x recommended) |
+| SQLite 3 | The relay's mailbox storage (server and tests) | 3.35+ |
 | QtKeychain | Remembering the passphrase in the OS keychain (client only, optional) | 0.14+ built for Qt 6 |
 | CMake | Build system | 3.16+ |
 | C++17 compiler | GCC 9+, Clang 10+, MSVC 2019+ | |
@@ -60,7 +61,7 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 
 ```bash
 sudo apt update
-sudo apt install cmake build-essential qt6-base-dev libssl-dev
+sudo apt install cmake build-essential qt6-base-dev libssl-dev libsqlite3-dev
 
 git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs && mkdir build && cd build
@@ -94,7 +95,7 @@ cmake ..            # macOS: cmake -DCMAKE_PREFIX_PATH=$(brew --prefix qt) ..
 cmake --build . -j
 ```
 
-To build only the relay server, for example on a headless machine without Qt or liboqs, use `cmake -DPQ_BUILD_CLIENT=OFF ..`.
+To build only the relay server and the command-line tools, for example on a headless machine without Qt, use `cmake -DPQ_BUILD_CLIENT=OFF ..`. They still need liboqs and SQLite. You don't have to compile them on the relay machine at all: the release page has a ready-made `pq-server-linux-x86_64` (it needs the system's `libssl3` and `libsqlite3-0`, both present on current Debian and Ubuntu).
 
 **Optional: OS keychain support.** If QtKeychain for Qt 6 is installed, CMake finds it and the client can remember your key passphrase. Without it the client still works and just asks for the passphrase at every start. To build it yourself:
 
@@ -137,11 +138,56 @@ The Windows build has not been tested yet.
 ./pq-server [--port 9000] [--bind ADDR] [--storage DIR] [--quota-gb 50]
 ```
 
-The server listens on TCP port 9000. Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a server restart, and their 24 hours keep counting while the server is down: anything already past it is deleted at startup.
+One server, one port, two protocols. It tells them apart by a connection's first message, so existing file-transfer clients keep working while the new mailbox features are built.
+
+- **File transfers (protocol v2).** Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a restart, and their 24 hours keep counting while the server is down.
+- **Mailboxes (protocol v3).** Sealed envelopes are held until their owner collects them. State lives in `<storage>/v3`, which holds the database and **the relay's signing key**. Back that folder up (see below).
 
 `--bind ADDR` limits the server to one IPv4 address. If you reach it over WireGuard, bind it to the tunnel address (for example `--bind 10.8.0.1`) so that it never listens on your LAN or the internet, even if a firewall rule is wrong. The default, `0.0.0.0`, listens on every interface.
 
 To reach the server over the internet, forward its port, or run it on a small VPS. Traffic to the server is not TLS-encrypted, but everything sensitive is already end-to-end encrypted. An observer can see sizes, timing and transfer IDs.
+
+#### The mailbox relay
+
+**Identity.** On first start the relay generates a signing key and prints its **Relay ID**, the SHA-256 of the public key. Clients pin that ID, and the relay proves it holds the matching key every time a client connects, so a fake relay, a hijacked address or a replayed answer is detected even outside WireGuard. That is why the key matters: if you rebuild the machine without `<storage>/v3/relay_private.key`, every client sees "relay changed" and refuses to talk to the new one. The private key is stored with owner-only permissions and is not passphrase-protected, because the relay has to start unattended.
+
+**Invites.** Nobody can create a mailbox without an invite, so strangers can't fill your disk. Make one on the relay machine:
+
+```bash
+./pq-server --storage /var/lib/pq-relay --create-invite --public-address 10.8.0.1:9000
+```
+
+It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8.0.1:9000/<relay id>/<code>`. That single string carries where the relay is, which key to trust, and the code, so the first connection is already verified. An invite works once and expires after 14 days.
+
+**Checking it from the outside.** `pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
+
+```bash
+pq-relay-check 10.8.0.1:9000                 # reachable? prints the Relay ID to compare
+pq-relay-check 10.8.0.1:9000 <relay id>      # ...and checks it matches the one you were given
+pq-relay-check 'pqft-relay://...'            # full round trip using one invite (it is used up)
+```
+
+**What the relay sees and stores.** Random mailbox IDs, the hash of each send token, and sealed envelopes it cannot read. It never sees names, identity keys, who sent a message, or content. Envelopes are deleted when their owner acknowledges them, or when their lifetime runs out (never more than 30 days).
+
+**Limits and settings.**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mailbox-quota-kib N` | 65536 | Queued bytes allowed per mailbox |
+| `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
+| `--sweep-seconds N` | 60 | How often expired envelopes are removed |
+
+A systemd unit for the relay (the `ExecStart` line is the important part):
+
+```ini
+[Service]
+User=pqrelay
+StateDirectory=pq-relay
+ExecStart=/usr/local/bin/pq-server --port 9000 --bind 10.8.0.1 --storage /var/lib/pq-relay --quota-gb 20
+Restart=on-failure
+```
+
+**Status.** The relay core is finished and tested, but the app can't send messages through it yet. Chats arrive in the next milestones.
 
 ### 2. Start the client and set the server
 
@@ -217,6 +263,9 @@ ctest --test-dir build --output-on-failure
 - `sharing` checks server addresses, contact cards (both versions) and share links, and signed identity bundles, including damaged and hostile input and the key-swap attack above.
 - `contacts` checks verified and unverified contacts and the rules for importing newer, older and rotated bundles (Linux and macOS only).
 - `keys` checks the passphrase protection: the encrypted file format (including tampering, swapped files and hostile settings) and locking, unlocking, changing and removing the passphrase, including a crash in the middle of protecting (Linux and macOS only).
+- `relay_protocol` checks the v3 message encodings, every truncation and 3000 random corruptions of each, and the signing inputs.
+- `relay_store` checks the relay's database with a controlled clock: invites, mailbox limits, send tokens, ordering, expiry, quotas, acknowledgement scoping and persistence (Linux and macOS only).
+- `relay` starts a real relay and checks registration and invites, sign-in (including replayed and mis-bound signatures), deposits, offline delivery, push, restarts, expiry, rate limits and hijack attempts, then runs a scripted hostile relay against the client: wrong key, replayed answers, silence, duplicated and malformed envelopes, and a frame declaring 4 GiB (Linux and macOS only).
 - `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
 
 The release workflow runs the same tests against the real liboqs before it publishes anything.

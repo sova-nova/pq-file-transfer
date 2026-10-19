@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include <openssl/rand.h>
 
 #include "protocol.h"
+#include "relay_service.h"
 #include "scope_exit.h"
 
 #ifndef _WIN32
@@ -60,6 +62,8 @@ static uint64_t g_reserved_bytes = 0;  // guarded by g_mutex
 static uint64_t g_storage_quota = DEFAULT_QUOTA_GB * 1024 * 1024 * 1024;
 static fs::path g_storage_dir;
 static std::atomic<int> g_active_connections{0};
+
+static std::unique_ptr<relay::RelayService> g_relay;  // protocol v3 (mailboxes); v2 file transfer is handled below
 
 static std::mutex g_log_mutex;
 
@@ -332,7 +336,7 @@ static void handle_download(socket_t sock, const std::vector<uint8_t>& payload) 
 
 // --- Connection handling ---
 
-static void handle_client(socket_t sock) {
+static void handle_client(socket_t sock, std::string peer_ip) {
     auto guard = make_scope_exit([sock] {
         close_socket(sock);
         g_active_connections--;
@@ -351,6 +355,10 @@ static void handle_client(socket_t sock) {
                 break;
             case MessageType::DOWNLOAD_REQUEST:
                 handle_download(sock, first->payload);
+                break;
+            case MessageType::RELAY_HELLO:
+                // Protocol v3. Sessions are long-lived: the idle limit is the service's, not the socket's.
+                g_relay->handle_session(sock, first->payload, peer_ip);
                 break;
             default:
                 send_error(sock, "Unexpected first message");
@@ -475,11 +483,21 @@ static void print_usage(const char* prog) {
               << "  --bind ADDR    IPv4 address to listen on (default 0.0.0.0, all interfaces).\n"
               << "                 Use your WireGuard address, e.g. 10.8.0.1, to accept tunnel traffic only\n"
               << "  --storage DIR  where encrypted transfers are kept (default: temp dir, or $PQ_STORAGE_DIR)\n"
-              << "  --quota-gb N   max total storage in GiB (default " << DEFAULT_QUOTA_GB << ")\n";
+              << "  --quota-gb N   max total storage in GiB (default " << DEFAULT_QUOTA_GB << ")\n"
+              << "\nMailbox relay (protocol v3). Its state lives in <storage>/v3, including the relay's\n"
+              << "signing key: back that folder up.\n"
+              << "  --create-invite             make a single-use invite, print it and exit\n"
+              << "  --public-address HOST:PORT  put this address in the printed invite string\n"
+              << "  --mailbox-quota-kib N       queued bytes allowed per mailbox (default 65536)\n"
+              << "  --rate-limit N              deposits per minute per send token and per address (default 120)\n"
+              << "  --sweep-seconds N           how often expired envelopes are removed (default 60)\n";
 }
 
 int main(int argc, char* argv[]) {
     uint16_t port = DEFAULT_PORT;
+    relay::RelayLimits limits;
+    bool create_invite = false;
+    std::string public_address;
     std::string bind_text = "0.0.0.0";
     in_addr bind_addr{};
     bind_addr.s_addr = htonl(INADDR_ANY);
@@ -498,6 +516,17 @@ int main(int argc, char* argv[]) {
                 bind_text = argv[++i];
                 if (inet_pton(AF_INET, bind_text.c_str(), &bind_addr) != 1)
                     throw std::invalid_argument("bind");
+            } else if (arg == "--create-invite") {
+                create_invite = true;
+            } else if (arg == "--public-address" && has_value) {
+                public_address = argv[++i];
+            } else if (arg == "--mailbox-quota-kib" && has_value) {
+                limits.mailbox_quota_bytes = std::stoull(argv[++i]) * 1024;
+            } else if (arg == "--rate-limit" && has_value) {
+                limits.rate_limit_per_minute = std::stoi(argv[++i]);
+            } else if (arg == "--sweep-seconds" && has_value) {
+                limits.sweep_seconds = std::stoi(argv[++i]);
+                if (limits.sweep_seconds < 1) throw std::out_of_range("sweep");
             } else if (arg == "--storage" && has_value) {
                 g_storage_dir = fs::path(argv[++i]);
             } else if (arg == "--quota-gb" && has_value) {
@@ -518,8 +547,32 @@ int main(int argc, char* argv[]) {
     }
 
     if (!prepare_storage_dir(g_storage_dir)) return 1;
+
+    try {
+        g_relay = std::make_unique<relay::RelayService>(g_storage_dir / "v3", limits);
+    } catch (const std::exception& e) {
+        std::cerr << "Cannot start the mailbox relay: " << e.what() << std::endl;
+        return 1;
+    }
+    g_relay->set_logger(log_line);
+
+    if (create_invite) {
+        std::string code = g_relay->create_invite();
+        std::string grouped;
+        for (size_t i = 0; i < code.size(); i += 4) grouped += (i ? "-" : "") + code.substr(i, 4);
+        std::cout << "Invite code:  " << grouped << "\n"
+                  << "Relay ID:     " << g_relay->relay_id_hex() << "\n";
+        if (!public_address.empty())
+            std::cout << "Invite string (give this to the person; it works once and expires in 14 days):\n"
+                      << "  pqft-relay://" << public_address << "/" << g_relay->relay_id_hex() << "/" << code << "\n";
+        else
+            std::cout << "Add --public-address HOST:PORT to also print a ready-to-paste invite string.\n";
+        return 0;
+    }
+    g_relay->start_sweeper();
     restore_transfers();
     std::cout << "Storage directory: " << g_storage_dir.string() << std::endl;
+    std::cout << "Mailbox relay ID: " << g_relay->relay_id_hex() << std::endl;
 
     socket_t server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == INVALID_SOCKET_VAL) {
@@ -580,7 +633,7 @@ int main(int argc, char* argv[]) {
         log_line(std::string("Connection from ") + client_ip + ":" + std::to_string(ntohs(client_addr.sin_port)));
 
         try {
-            std::thread(handle_client, client_fd).detach();
+            std::thread(handle_client, client_fd, std::string(client_ip)).detach();
         } catch (const std::exception&) {
             g_active_connections--;
             close_socket(client_fd);

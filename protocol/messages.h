@@ -48,6 +48,27 @@ enum class MessageType : uint8_t {
     // 0x07 / 0x08 were LIST_FILES / FILE_LIST in v1. Removed: listing every
     // transfer let anyone discover and download (and so delete) any of them.
     DOWNLOAD_HEADER  = 0x09,  // server → receiver: the stored FileHeader
+
+    // --- Protocol v3: mailbox relay (see relay_protocol.h). A relay tells v3 from v2 by the
+    // first message: RELAY_HELLO starts a v3 session, anything else is handled as v2. ---
+    RELAY_HELLO        = 0x20,  // client → relay: version + client nonce
+    RELAY_HELLO_REPLY  = 0x21,  // relay → client: relay key, signature, auth challenge
+    RELAY_REGISTER     = 0x22,  // client → relay: create a mailbox (invite + proof of key)
+    RELAY_REGISTER_OK  = 0x23,
+    RELAY_AUTH         = 0x24,  // client → relay: sign the challenge for a mailbox
+    RELAY_AUTH_OK      = 0x25,
+    RELAY_DEPOSIT      = 0x26,  // anyone with a send token → relay: store a sealed envelope
+    RELAY_DEPOSIT_OK   = 0x27,  // relay → depositor: envelope ID
+    RELAY_COLLECT      = 0x28,  // mailbox owner → relay: start delivering envelopes
+    RELAY_ENVELOPE     = 0x29,  // relay → owner: one stored envelope
+    RELAY_COLLECT_END  = 0x2A,  // relay → owner: the backlog has been delivered
+    RELAY_ACK          = 0x2B,  // owner → relay: these envelopes are stored safely, delete them
+    RELAY_ACK_OK       = 0x2C,
+    RELAY_TOKEN_ADD    = 0x2D,  // owner → relay: accept this send token (hash)
+    RELAY_TOKEN_REVOKE = 0x2E,  // owner → relay: stop accepting this send token (hash)
+    RELAY_TOKEN_OK     = 0x2F,
+    RELAY_PING         = 0x30,
+    RELAY_PONG         = 0x31,
     ERROR_MSG        = 0xFE,  // either direction: UTF-8 error text
     ACK              = 0xFF,  // generic acknowledgment (payload depends on context)
 };

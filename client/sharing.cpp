@@ -343,3 +343,35 @@ std::optional<ShareLink> parse_share_link(const std::string& text) {
 
     return ShareLink{*server, id};
 }
+
+// --- Relay invites ---
+
+std::string build_relay_invite(const RelayInvite& invite) {
+    return std::string("pqft-relay://") + format_server_address(invite.server) + "/" +
+           bytes_to_hex(invite.relay_id) + "/" + bytes_to_hex(invite.invite);
+}
+
+std::optional<RelayInvite> parse_relay_invite(const std::string& text) {
+    std::string s = trim(text);
+    while (!s.empty() && (s.front() == '<' || s.front() == '"' || s.front() == '\'')) s.erase(0, 1);
+    while (!s.empty() && (s.back() == '>' || s.back() == '"' || s.back() == '\'' || s.back() == '.' || s.back() == ',')) s.pop_back();
+
+    static const char prefix[] = "pqft-relay://";
+    const size_t prefix_len = std::strlen(prefix);
+    if (s.size() <= prefix_len || ascii_lower(s.substr(0, prefix_len)) != prefix) return std::nullopt;
+
+    std::string rest = s.substr(prefix_len);
+    size_t first = rest.find('/');
+    size_t second = first == std::string::npos ? std::string::npos : rest.find('/', first + 1);
+    if (first == std::string::npos || second == std::string::npos) return std::nullopt;
+
+    auto server = parse_server_address(rest.substr(0, first));
+    auto relay_id = hex_to_bytes(rest.substr(first + 1, second - first - 1));
+    std::string code;
+    for (char c : rest.substr(second + 1))
+        if (c != '-' && !std::isspace(static_cast<unsigned char>(c))) code.push_back(c);
+    auto invite = hex_to_bytes(code);
+
+    if (!server || !relay_id || relay_id->size() != 32 || !invite || invite->size() != 16) return std::nullopt;
+    return RelayInvite{*server, std::move(*relay_id), std::move(*invite)};
+}

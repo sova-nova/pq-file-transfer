@@ -88,3 +88,19 @@ struct ShareLink {
 
 std::string build_share_link(const ServerAddress& server, const std::string& transfer_id);
 std::optional<ShareLink> parse_share_link(const std::string& text);
+
+// --- Relay invites ---
+//
+// "pqft-relay://host[:port]/<64 hex relay ID>/<32 hex invite code>", printed by
+// `pq-server --create-invite --public-address ...`. One string carries where the relay is, which
+// relay key to trust (so the very first connection is already verified) and the one-time code.
+
+struct RelayInvite {
+    ServerAddress server;
+    std::vector<uint8_t> relay_id;  // 32 bytes: SHA-256 of the relay's signing key
+    std::vector<uint8_t> invite;    // 16 bytes
+};
+
+std::string build_relay_invite(const RelayInvite& invite);
+// Tolerates surrounding whitespace, quotes and dashes or spaces inside the code.
+std::optional<RelayInvite> parse_relay_invite(const std::string& text);

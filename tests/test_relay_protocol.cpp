@@ -1,0 +1,180 @@
+// Unit tests for the v3 payload codecs and signing inputs: round trips, truncation, trailing
+// bytes, and random mutation (decoders must never crash or accept garbage as something else).
+#include "relay_protocol.h"
+
+#include "protocol.h"
+#include "sharing.h"
+
+#include <functional>
+#include <iostream>
+#include <random>
+#include <string>
+
+using namespace relay;
+using Bytes = std::vector<uint8_t>;
+
+static int failures = 0;
+#define CHECK(c, msg)                                                  \
+    do {                                                               \
+        if (c) std::cout << "  PASS " << (msg) << "\n";                \
+        else { std::cout << "  FAIL " << (msg) << "\n"; failures++; } \
+    } while (0)
+
+static Bytes fill(uint8_t v, size_t n) { return Bytes(n, v); }
+
+// Every strict prefix of `good` must be rejected, and so must `good` plus a trailing byte.
+template <typename Decode>
+static void check_framing(const std::string& name, const Bytes& good, Decode decode) {
+    bool prefixes_rejected = true;
+    for (size_t n = 0; n < good.size(); n++)
+        if (decode(Bytes(good.begin(), good.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes_rejected = false;
+    CHECK(prefixes_rejected, name + ": every truncation is rejected (" + std::to_string(good.size()) + " lengths)");
+    Bytes longer = good;
+    longer.push_back(0);
+    CHECK(!decode(longer), name + ": a trailing byte is rejected");
+}
+
+// Random single-byte and multi-byte corruption must never crash. (Whether a mutated message is
+// still valid is its decoder's business; this checks robustness.)
+template <typename Decode>
+static void fuzz(const std::string& name, const Bytes& good, Decode decode) {
+    std::mt19937 rng(12345);
+    int survived = 0;
+    for (int i = 0; i < 3000; i++) {
+        Bytes m = good;
+        int flips = 1 + static_cast<int>(rng() % 4);
+        for (int f = 0; f < flips && !m.empty(); f++) m[rng() % m.size()] = static_cast<uint8_t>(rng());
+        if (rng() % 5 == 0 && !m.empty()) m.resize(rng() % m.size());
+        decode(m);
+        survived++;
+    }
+    CHECK(survived == 3000, name + ": 3000 random mutations decoded without crashing");
+}
+
+int main() {
+    std::cout << "Round trips and framing\n";
+    {
+        Hello h; h.client_nonce = fill(1, NONCE_BYTES);
+        auto e = encode(h);
+        auto d = decode_hello(e);
+        CHECK(d && d->version == WIRE_VERSION && d->client_nonce == h.client_nonce, "hello round trip");
+        check_framing("hello", e, decode_hello);
+        fuzz("hello", e, decode_hello);
+        Hello shortnonce; shortnonce.client_nonce = fill(1, 5);
+        CHECK(!decode_hello(encode(shortnonce)), "hello: a nonce of the wrong length is rejected");
+    }
+    {
+        HelloReply r{fill(2, 100), fill(3, 200), fill(4, NONCE_BYTES)};
+        auto e = encode(r);
+        auto d = decode_hello_reply(e);
+        CHECK(d && d->relay_public_key == r.relay_public_key && d->signature == r.signature && d->auth_challenge == r.auth_challenge, "hello reply round trip");
+        check_framing("hello reply", e, decode_hello_reply);
+        fuzz("hello reply", e, decode_hello_reply);
+        HelloReply bad = r; bad.auth_challenge = fill(4, 31);
+        CHECK(!decode_hello_reply(encode(bad)), "hello reply: a challenge of the wrong length is rejected");
+    }
+    {
+        Register r{fill(1, INVITE_BYTES), fill(2, MAILBOX_ID_BYTES), fill(3, 300), fill(4, HASH_BYTES), fill(5, 400)};
+        auto e = encode(r);
+        auto d = decode_register(e);
+        CHECK(d && d->invite == r.invite && d->mailbox_id == r.mailbox_id && d->access_public_key == r.access_public_key &&
+                  d->send_token_hash == r.send_token_hash && d->signature == r.signature, "register round trip");
+        check_framing("register", e, decode_register);
+        fuzz("register", e, decode_register);
+        Register wrong = r; wrong.mailbox_id = fill(2, 15);
+        CHECK(!decode_register(encode(wrong)), "register: a mailbox ID of the wrong length is rejected");
+    }
+    {
+        Auth a{fill(1, MAILBOX_ID_BYTES), fill(2, 500)};
+        auto e = encode(a);
+        auto d = decode_auth(e);
+        CHECK(d && d->mailbox_id == a.mailbox_id && d->signature == a.signature, "auth round trip");
+        check_framing("auth", e, decode_auth);
+        fuzz("auth", e, decode_auth);
+    }
+    {
+        Deposit dep{fill(1, MAILBOX_ID_BYTES), fill(2, SEND_TOKEN_BYTES), fill(3, 1000), 3600};
+        auto e = encode(dep);
+        auto d = decode_deposit(e);
+        CHECK(d && d->mailbox_id == dep.mailbox_id && d->send_token == dep.send_token && d->envelope == dep.envelope && d->ttl_seconds == 3600, "deposit round trip");
+        check_framing("deposit", encode(Deposit{fill(1, MAILBOX_ID_BYTES), fill(2, SEND_TOKEN_BYTES), fill(3, 20), 5}), decode_deposit);
+        fuzz("deposit", e, decode_deposit);
+        Deposit max{fill(1, MAILBOX_ID_BYTES), fill(2, SEND_TOKEN_BYTES), fill(3, MAX_ENVELOPE_BYTES), 1};
+        Deposit over{fill(1, MAILBOX_ID_BYTES), fill(2, SEND_TOKEN_BYTES), fill(3, MAX_ENVELOPE_BYTES + 1), 1};
+        CHECK(decode_deposit(encode(max)).has_value() && !decode_deposit(encode(over)), "deposit: the envelope size limit is exact");
+        CHECK(encode(max).size() <= MAX_MESSAGE_PAYLOAD, "a maximum-size deposit fits in a maximum-size message");
+    }
+    {
+        StoredEnvelope s{fill(1, ENVELOPE_ID_BYTES), 1700000000, fill(2, 300)};
+        auto e = encode(s);
+        auto d = decode_stored_envelope(e);
+        CHECK(d && d->id == s.id && d->deposited_at == s.deposited_at && d->envelope == s.envelope, "stored envelope round trip");
+        check_framing("stored envelope", e, decode_stored_envelope);
+        fuzz("stored envelope", e, decode_stored_envelope);
+    }
+    {
+        IdList l{{fill(1, ENVELOPE_ID_BYTES), fill(2, ENVELOPE_ID_BYTES)}};
+        auto e = encode(l);
+        auto d = decode_id_list(e);
+        CHECK(d && d->ids == l.ids, "id list round trip");
+        check_framing("id list", e, decode_id_list);
+        fuzz("id list", e, decode_id_list);
+        IdList many; for (size_t i = 0; i <= MAX_ACK_IDS; i++) many.ids.push_back(fill(1, ENVELOPE_ID_BYTES));
+        CHECK(!decode_id_list(encode(many)), "id list: more than the maximum is rejected");
+        Bytes lying; write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_id_list(lying), "id list: a huge declared count doesn't allocate or hang");
+        CHECK(decode_id_list(encode(IdList{})).has_value(), "id list: an empty list is valid");
+    }
+    {
+        HashOp h{fill(9, HASH_BYTES)};
+        auto e = encode(h);
+        CHECK(decode_hash_op(e) && decode_hash_op(e)->token_hash == h.token_hash, "hash op round trip");
+        check_framing("hash op", e, decode_hash_op);
+        fuzz("hash op", e, decode_hash_op);
+    }
+
+    std::cout << "Signing inputs\n";
+    {
+        Bytes nonce = fill(1, 32), relay_id = fill(2, 32), chal = fill(3, 32), mailbox = fill(4, 16), key = fill(5, 100), th = fill(6, 32);
+        auto hello = hello_signing_input(nonce, relay_id, 3, chal);
+        auto reg = register_signing_input(relay_id, mailbox, key, th);
+        auto auth = auth_signing_input(chal, relay_id, mailbox);
+        CHECK(hello != reg && hello != auth && reg != auth, "each purpose has its own signing input");
+        CHECK(hello_signing_input(fill(9, 32), relay_id, 3, chal) != hello, "the client nonce is covered");
+        CHECK(hello_signing_input(nonce, fill(9, 32), 3, chal) != hello, "the relay ID is covered");
+        CHECK(hello_signing_input(nonce, relay_id, 4, chal) != hello, "the version is covered");
+        CHECK(hello_signing_input(nonce, relay_id, 3, fill(9, 32)) != hello, "the auth challenge is covered");
+        CHECK(auth_signing_input(fill(9, 32), relay_id, mailbox) != auth && auth_signing_input(chal, fill(9, 32), mailbox) != auth &&
+                  auth_signing_input(chal, relay_id, fill(9, 16)) != auth, "auth covers the challenge, the relay and the mailbox");
+        CHECK(register_signing_input(fill(9, 32), mailbox, key, th) != reg && register_signing_input(relay_id, fill(9, 16), key, th) != reg &&
+                  register_signing_input(relay_id, mailbox, fill(9, 100), th) != reg && register_signing_input(relay_id, mailbox, key, fill(9, 32)) != reg,
+              "register covers the relay, mailbox, access key and token hash");
+        // Field boundaries are unambiguous: moving a byte between adjacent fields changes the input.
+        CHECK(auth_signing_input(fill(3, 31), relay_id, mailbox) != auth_signing_input(fill(3, 32), relay_id, mailbox), "fields are length-prefixed");
+    }
+
+    std::cout << "Relay invite strings\n";
+    {
+        RelayInvite inv{{"10.8.0.1", 9000}, fill(0xAB, 32), fill(0xCD, 16)};
+        std::string text = build_relay_invite(inv);
+        auto p = parse_relay_invite(text);
+        CHECK(p && p->server.host == "10.8.0.1" && p->server.port == 9000 && p->relay_id == inv.relay_id && p->invite == inv.invite, "round trip: " + text.substr(0, 40) + "...");
+        RelayInvite v6{{"fd00::1", 9100}, fill(0x01, 32), fill(0x02, 16)};
+        auto p6 = parse_relay_invite(build_relay_invite(v6));
+        CHECK(p6 && p6->server.host == "fd00::1" && p6->server.port == 9100, "IPv6 and a custom port");
+
+        std::string dashed = "pqft-relay://10.8.0.1:9000/" + bytes_to_hex(inv.relay_id) + "/cdcd-cdcd-cdcd-cdcd-cdcd-cdcd-cdcd-cdcd";
+        CHECK(parse_relay_invite("  <" + dashed + ">. ").has_value(), "tolerates the grouped code the server prints, plus whitespace and <>");
+        for (std::string bad : std::vector<std::string>{"", "pqft-relay://", "pqft-relay://10.8.0.1/abc/def", "http://10.8.0.1/x/y",
+                 "pqft-relay://ho st/" + bytes_to_hex(inv.relay_id) + "/" + bytes_to_hex(inv.invite),
+                 "pqft-relay://10.8.0.1/" + bytes_to_hex(fill(1, 31)) + "/" + bytes_to_hex(inv.invite),
+                 "pqft-relay://10.8.0.1/" + bytes_to_hex(inv.relay_id) + "/" + bytes_to_hex(fill(1, 15)),
+                 "pqft-relay://10.8.0.1/" + bytes_to_hex(inv.relay_id)})
+            CHECK(!parse_relay_invite(bad), "rejects '" + bad.substr(0, 36) + "'");
+        auto hex = hex_to_bytes("00ffAb");
+        CHECK(hex && *hex == (Bytes{0x00, 0xFF, 0xAB}) && !hex_to_bytes("abc") && !hex_to_bytes("zz"), "hex_to_bytes accepts both cases and rejects bad input");
+    }
+
+    std::cout << (failures ? "\nFAILURES: " : "\nAll checks passed. ") << failures << "\n";
+    return failures ? 1 : 0;
+}

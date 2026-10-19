@@ -224,6 +224,24 @@ std::string bytes_to_hex(const uint8_t* data, size_t len) {
     return out;
 }
 
+std::optional<std::vector<uint8_t>> hex_to_bytes(const std::string& hex) {
+    if (hex.size() % 2 != 0) return std::nullopt;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int hi = nibble(hex[i]), lo = nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out.push_back(static_cast<uint8_t>(hi * 16 + lo));
+    }
+    return out;
+}
+
 bool is_lower_hex(const std::string& s, size_t expected_len) {
     if (s.size() != expected_len) return false;
     return std::all_of(s.begin(), s.end(), [](char c) {
