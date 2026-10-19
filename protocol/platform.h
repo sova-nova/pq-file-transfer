@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cerrno>
+#include <string>
+
 // Cross-platform socket abstraction.
 
 #ifdef _WIN32
@@ -97,4 +100,32 @@ inline bool wait_readable(socket_t s, int millis) {
     tv.tv_sec = millis / 1000;
     tv.tv_usec = (millis % 1000) * 1000;
     return select(static_cast<int>(s) + 1, &fds, nullptr, nullptr, &tv) > 0;
+}
+
+// The error code of the last failed socket call on this thread.
+inline int last_socket_error() {
+#ifdef _WIN32
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+// Why a connection attempt failed, in words, and what to check. `what` is "relay" or "server".
+// `err` is last_socket_error() right after the failed connect(), or 0 if unknown.
+inline std::string describe_connect_failure(const std::string& what, const std::string& address, int err) {
+#ifdef _WIN32
+    const bool refused = err == WSAECONNREFUSED;
+    const bool silent = err == WSAETIMEDOUT || err == WSAEHOSTUNREACH || err == WSAENETUNREACH || err == WSAENETDOWN;
+#else
+    const bool refused = err == ECONNREFUSED;
+    const bool silent = err == ETIMEDOUT || err == EHOSTUNREACH || err == ENETUNREACH || err == ENETDOWN;
+#endif
+    std::string head = "Could not connect to the " + what + " at " + address;
+    if (refused)
+        return head + ": nothing is listening there (connection refused). Is the " + what +
+               " running? Check the address and port, and that the " + what + " is set to listen on an address you can reach.";
+    if (silent)
+        return head + ": no answer. Check the address, that you are on the right network or VPN, and that a firewall isn't blocking the port.";
+    return head + ". Check that the " + what + " is running, that the address and port are right, that you are on the right network or VPN, and that a firewall isn't blocking the port.";
 }

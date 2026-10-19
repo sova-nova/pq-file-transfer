@@ -225,6 +225,7 @@ socket_t TransferEngine::connect_to_server(const std::string& host, uint16_t por
         throw TransferError("Could not resolve server address \"" + host + "\"");
     auto free_results = make_scope_exit([results] { freeaddrinfo(results); });
 
+    int failure = 0;
     for (addrinfo* ai = results; ai; ai = ai->ai_next) {
         check_cancelled();
         socket_t sock = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -236,10 +237,11 @@ socket_t TransferEngine::connect_to_server(const std::string& host, uint16_t por
             active_socket_ = sock;
         }
         if (::connect(sock, ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen)) == 0) return sock;
+        failure = last_socket_error();  // read before release_socket can change it
         release_socket(sock);
     }
     check_cancelled();
-    throw TransferError("Could not connect to server " + host + ":" + port_str);
+    throw TransferError(describe_connect_failure("server", host + ":" + port_str, failure));
 }
 
 void TransferEngine::release_socket(socket_t sock) {

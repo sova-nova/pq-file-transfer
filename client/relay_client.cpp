@@ -44,6 +44,7 @@ bool RelayClient::connect(const std::string& host, uint16_t port, const std::vec
     }
     auto free_results = make_scope_exit([results] { freeaddrinfo(results); });
 
+    int failure = 0;
     for (addrinfo* ai = results; ai; ai = ai->ai_next) {
         socket_t s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == INVALID_SOCKET_VAL) continue;
@@ -53,10 +54,11 @@ bool RelayClient::connect(const std::string& host, uint16_t port, const std::vec
             sock_ = s;
             break;
         }
+        failure = last_socket_error();  // read before close_socket can change it
         close_socket(s);
     }
     if (sock_ == INVALID_SOCKET_VAL) {
-        error = "Could not connect to the relay at " + host + ":" + std::to_string(port);
+        error = describe_connect_failure("relay", host + ":" + std::to_string(port), failure);
         return false;
     }
 

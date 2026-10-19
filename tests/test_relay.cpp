@@ -35,7 +35,7 @@ static int failures = 0;
         else { std::cout << "  FAIL " << (msg) << "\n"; failures++; } \
     } while (0)
 
-static bool has(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
+static bool has(const std::string& s, const std::string& needle) { return s.find(needle) != std::string::npos; }
 static void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 static std::string SERVER_BIN;
@@ -197,6 +197,27 @@ static void test_real_relay() {
     if (!first_invite) return;
     Bytes pin = first_invite->relay_id;
     std::string err;
+
+    std::cout << "0. A relay that isn't running\n";
+    {
+        // Find a port nothing is listening on.
+        int probe = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        bind(probe, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        socklen_t len = sizeof(addr);
+        getsockname(probe, reinterpret_cast<sockaddr*>(&addr), &len);
+        uint16_t closed_port = ntohs(addr.sin_port);
+        close(probe);
+
+        RelayClient c;
+        std::string e;
+        bool ok = c.connect("127.0.0.1", closed_port, {}, 3, e);
+        CHECK(!ok && has(e, "127.0.0.1:" + std::to_string(closed_port)), "the message names the address that was tried: " + e);
+        CHECK(has(e, "nothing is listening") && has(e, "Is the relay running"), "a refused connection says so and suggests the likely cause");
+        CHECK(has(e, "address and port"), "and what else to check");
+    }
 
     std::cout << "1. Relay identity\n";
     {
