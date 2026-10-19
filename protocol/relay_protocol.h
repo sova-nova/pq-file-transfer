@@ -66,6 +66,9 @@ struct Deposit {
 struct StoredEnvelope {
     std::vector<uint8_t> id;                // ENVELOPE_ID_BYTES
     uint64_t deposited_at = 0;              // unix seconds, the relay's clock
+    std::vector<uint8_t> token_hash;        // HASH_BYTES: which send token the depositor used (all zero for
+                                            // envelopes stored before this was recorded). Lets the owner notice
+                                            // a card that was passed on; it never identifies the sender.
     std::vector<uint8_t> envelope;
 };
 

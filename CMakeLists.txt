@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pq-file-transfer VERSION 0.6.0 LANGUAGES CXX)
+project(pq-file-transfer VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -83,9 +83,13 @@ add_library(pq_core STATIC
     client/sharing.cpp
     client/identity_bundle.cpp
     client/relay_client.cpp
+    client/message_record.cpp
+    client/envelope.cpp
+    client/history_store.cpp
+    client/messaging_engine.cpp
 )
 target_include_directories(pq_core PUBLIC ${CMAKE_SOURCE_DIR}/client)
-target_link_libraries(pq_core PUBLIC pq_crypto protocol Threads::Threads OpenSSL::Crypto)
+target_link_libraries(pq_core PUBLIC pq_crypto protocol Threads::Threads OpenSSL::Crypto SQLite::SQLite3)
 pq_warnings(pq_core)
 
 # --- Command-line check for a relay (no Qt) ---
@@ -104,6 +108,8 @@ if(PQ_BUILD_CLIENT)
         client/main_window.cpp
         client/key_dialogs.cpp
         client/keychain.cpp
+        client/chat_widget.h
+        client/chat_widget.cpp
     )
     target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets)
     pq_warnings(pq-client)
@@ -146,6 +152,11 @@ if(PQ_BUILD_TESTS)
     pq_warnings(pq-test-sharing)
     add_test(NAME sharing COMMAND pq-test-sharing)
 
+    add_executable(pq-test-chat-formats tests/test_chat_formats.cpp)
+    target_link_libraries(pq-test-chat-formats PRIVATE pq_core)
+    pq_warnings(pq-test-chat-formats)
+    add_test(NAME chat_formats COMMAND pq-test-chat-formats)
+
     add_executable(pq-test-relay-protocol tests/test_relay_protocol.cpp)
     target_link_libraries(pq-test-relay-protocol PRIVATE pq_core)
     pq_warnings(pq-test-relay-protocol)
@@ -163,6 +174,11 @@ if(PQ_BUILD_TESTS)
         pq_warnings(pq-test-contacts)
         add_test(NAME contacts COMMAND pq-test-contacts)
 
+        add_executable(pq-test-history tests/test_history.cpp)
+        target_link_libraries(pq-test-history PRIVATE pq_core)
+        pq_warnings(pq-test-history)
+        add_test(NAME history COMMAND pq-test-history)
+
         add_executable(pq-test-relay-store tests/test_relay_store.cpp)
         target_link_libraries(pq-test-relay-store PRIVATE pq_relay)
         pq_warnings(pq-test-relay-store)
@@ -174,6 +190,13 @@ if(PQ_BUILD_TESTS)
         add_dependencies(pq-test-e2e pq-server)
         add_test(NAME e2e COMMAND pq-test-e2e $<TARGET_FILE:pq-server>)
         set_tests_properties(e2e PROPERTIES TIMEOUT 120)
+
+        add_executable(pq-test-chat tests/test_chat.cpp)
+        target_link_libraries(pq-test-chat PRIVATE pq_core)
+        pq_warnings(pq-test-chat)
+        add_dependencies(pq-test-chat pq-server)
+        add_test(NAME chat COMMAND pq-test-chat $<TARGET_FILE:pq-server>)
+        set_tests_properties(chat PROPERTIES TIMEOUT 300)
 
         add_executable(pq-test-relay tests/test_relay.cpp)
         target_link_libraries(pq-test-relay PRIVATE pq_core)

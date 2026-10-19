@@ -1,5 +1,6 @@
 #include "main_window.h"
 #include "crypto_engine.h"
+#include "chat_widget.h"
 #include "key_dialogs.h"
 #include "keychain.h"
 
@@ -19,6 +20,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProgressBar>
+#include <QTabWidget>
 #include <QPushButton>
 #include <QSettings>
 #include <QUrl>
@@ -89,9 +91,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("PQ File Transfer");
     setMinimumSize(480, 560);
 
-    auto* central = new QWidget(this);
-    setCentralWidget(central);
-    auto* layout = new QVBoxLayout(central);
+    // Two tabs: the existing file transfer, and chats. Everything below up to the Chats tab is the
+    // Files page, built into `layout`.
+    auto* tabs = new QTabWidget(this);
+    setCentralWidget(tabs);
+    auto* files_page = new QWidget(tabs);
+    auto* layout = new QVBoxLayout(files_page);
+    tabs->addTab(files_page, "Files");
 
     auto* title = new QLabel("PQ File Transfer", this);
     title->setAlignment(Qt::AlignCenter);
@@ -253,9 +259,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(copy_id_button_, &QPushButton::clicked, this, &MainWindow::copy_transfer_id);
     connect(open_downloads_button_, &QPushButton::clicked, this, &MainWindow::open_downloads);
     connect(server_edit_, &QLineEdit::editingFinished, this, &MainWindow::save_server_setting);
+
+    // The Chats tab owns the messaging engine and its worker thread.
+    chat_widget_ = new ChatWidget(*keystore_, keystore_->app_dir() / "history.db", tabs);
+    tabs->addTab(chat_widget_, "Chats");
 }
 
 MainWindow::~MainWindow() {
+    // The Chats tab's worker thread uses the key store. Qt would delete the tab only after this
+    // window's members (including the key store) are gone, so stop and delete it here, first.
+    if (chat_widget_) {
+        delete chat_widget_;
+        chat_widget_ = nullptr;
+    }
     engine_.cancel();
     if (worker_thread_.joinable()) worker_thread_.join();
     if (keystore_) keystore_->lock();  // wipe the decrypted keys from memory
@@ -467,6 +483,7 @@ void MainWindow::refresh_contacts() {
 
     int idx = recipient_combo_->findData(previous);
     if (idx >= 0) recipient_combo_->setCurrentIndex(idx);
+    if (chat_widget_) chat_widget_->refresh();
 }
 
 void MainWindow::add_contact() {
@@ -528,7 +545,7 @@ void MainWindow::add_contact_from_card() {
     if (card->bundle) {
         // A card from someone you already have is an update. Only the owner of the signing key
         // can make a valid newer one, so it is applied without asking.
-        auto outcome = keystore_->import_bundle_for_known_identity(*card->bundle);
+        auto outcome = keystore_->import_bundle_for_known_identity(*card->bundle, card->send_token);
         using Result = KeyStore::BundleImportResult;
         if (outcome.result != Result::UnknownIdentity) {
             refresh_contacts();
@@ -536,6 +553,7 @@ void MainWindow::add_contact_from_card() {
             if (outcome.result == Result::Updated) {
                 QString msg = "Updated " + who + "'s contact card.";
                 if (outcome.was_unverified) msg += " Their encryption key is now verified.";
+                if (card->bundle && card->bundle->has_mailbox() && !card->send_token.empty()) msg += " You can message them.";
                 update_status(msg.toStdString());
                 if (outcome.was_unverified && outcome.encryption_key_changed) {
                     QMessageBox warn(QMessageBox::Warning, "Encryption key replaced",
@@ -571,7 +589,8 @@ void MainWindow::add_contact_from_card() {
 
     auto name = ask_contact_name(qstr(sanitize_contact_name(card->name)));
     if (!name) return;
-    finish_add_contact(*name, card->pub_kem, card->pub_dsa, card->server, card->bundle ? &*card->bundle : nullptr);
+    finish_add_contact(*name, card->pub_kem, card->pub_dsa, card->server, card->bundle ? &*card->bundle : nullptr,
+                       card->send_token);
 }
 
 void MainWindow::add_contact_from_files() {
@@ -604,7 +623,8 @@ void MainWindow::finish_add_contact(const QString& name,
                                     const std::vector<uint8_t>& pub_kem,
                                     const std::vector<uint8_t>& pub_dsa,
                                     const std::string& card_server,
-                                    const IdentityBundle* bundle) {
+                                    const IdentityBundle* bundle,
+                                    const std::vector<uint8_t>& send_token) {
     std::string name_str = name.toStdString();
     std::string fp = CryptoEngine::fingerprint(pub_dsa);
     if (fp == keystore_->own_fingerprint()) {
@@ -634,8 +654,12 @@ void MainWindow::finish_add_contact(const QString& name,
     if (confirm.exec() != QMessageBox::Yes) return;
 
     try {
-        if (bundle) keystore_->save_contact_bundle(name_str, *bundle);
-        else keystore_->save_contact(name_str, pub_kem, pub_dsa);
+        if (bundle) {
+            keystore_->save_contact_bundle(name_str, *bundle);
+            if (send_token.size() == 32) keystore_->save_contact_token(name_str, send_token);
+        } else {
+            keystore_->save_contact(name_str, pub_kem, pub_dsa);
+        }
     } catch (const std::exception& e) {
         QMessageBox::warning(this, "Add Contact", qstr(e.what()));
         return;
@@ -681,6 +705,11 @@ void MainWindow::remove_contact() {
 }
 
 void MainWindow::copy_contact_card() {
+    // With messaging set up, every card carries a fresh permission to message you, made for one person.
+    if (chat_widget_ && chat_widget_->is_set_up()) {
+        chat_widget_->copy_card_to_clipboard();
+        return;
+    }
     QSettings settings;
     bool ok = false;
     QString name = QInputDialog::getText(this, "Contact Card", "Your name, as your contacts will see it:",

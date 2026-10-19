@@ -1,6 +1,8 @@
 // Tests for the relay's SQLite store, with a controlled clock (no waiting for expiry).
 #include "relay_store.h"
 
+#include <sqlite3.h>
+
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
@@ -82,10 +84,10 @@ int main() {
     {
         RelayStore s(db);
         using D = RelayStore::DepositResult;
-        CHECK(s.deposit(id(1), id(0x11), envelope(100, 1), 1000, 10, 1 << 20) == D::Ok, "deposit one");
-        CHECK(s.deposit(id(1), id(0x12), envelope(100, 2), 1001, 100, 1 << 20) == D::Ok, "deposit two");
-        CHECK(s.deposit(id(1), id(0x13), envelope(100, 3), 1002, 100, 1 << 20) == D::Ok, "deposit three");
-        CHECK(s.deposit(id(2), id(0x21), envelope(50, 9), 1002, 100, 1 << 20) == D::Ok, "deposit to another mailbox");
+        CHECK(s.deposit(id(1), id(0x11), envelope(100, 1), id(0x7A, 32), 1000, 10, 1 << 20) == D::Ok, "deposit one");
+        CHECK(s.deposit(id(1), id(0x12), envelope(100, 2), id(0x7A, 32), 1001, 100, 1 << 20) == D::Ok, "deposit two");
+        CHECK(s.deposit(id(1), id(0x13), envelope(100, 3), id(0x7A, 32), 1002, 100, 1 << 20) == D::Ok, "deposit three");
+        CHECK(s.deposit(id(2), id(0x21), envelope(50, 9), id(0x7A, 32), 1002, 100, 1 << 20) == D::Ok, "deposit to another mailbox");
 
         auto all = s.fetch(id(1), 0, 1005, 100);
         CHECK(all.size() == 3 && all[0].id == id(0x11) && all[1].id == id(0x12) && all[2].id == id(0x13), "envelopes come back oldest first");
@@ -109,21 +111,21 @@ int main() {
     {
         RelayStore s(db);
         using D = RelayStore::DepositResult;
-        CHECK(s.deposit(id(1), id(0x31), envelope(400), 5000, 100, 1000) == D::Ok, "400 of 1000 bytes");
-        CHECK(s.deposit(id(1), id(0x32), envelope(400), 5000, 100, 1000) == D::Ok, "800 of 1000 bytes");
-        CHECK(s.deposit(id(1), id(0x33), envelope(400), 5000, 100, 1000) == D::MailboxFull, "a deposit that would exceed the quota is refused");
+        CHECK(s.deposit(id(1), id(0x31), envelope(400), id(0x7A, 32), 5000, 100, 1000) == D::Ok, "400 of 1000 bytes");
+        CHECK(s.deposit(id(1), id(0x32), envelope(400), id(0x7A, 32), 5000, 100, 1000) == D::Ok, "800 of 1000 bytes");
+        CHECK(s.deposit(id(1), id(0x33), envelope(400), id(0x7A, 32), 5000, 100, 1000) == D::MailboxFull, "a deposit that would exceed the quota is refused");
         CHECK(s.envelope_count(id(1)) == 2, "...and nothing was stored");
-        CHECK(s.deposit(id(2), id(0x34), envelope(400), 5000, 100, 1000) == D::Ok, "another mailbox has its own quota");
-        CHECK(s.deposit(id(1), id(0x35), envelope(400), 5101, 100, 1000) == D::Ok, "expired envelopes no longer count toward the quota");
+        CHECK(s.deposit(id(2), id(0x34), envelope(400), id(0x7A, 32), 5000, 100, 1000) == D::Ok, "another mailbox has its own quota");
+        CHECK(s.deposit(id(1), id(0x35), envelope(400), id(0x7A, 32), 5101, 100, 1000) == D::Ok, "expired envelopes no longer count toward the quota");
         s.sweep(100000);
     }
 
     std::cout << "Acknowledging\n";
     {
         RelayStore s(db);
-        s.deposit(id(1), id(0x41), envelope(10), 7000, 1000, 1 << 20);
-        s.deposit(id(1), id(0x42), envelope(10), 7000, 1000, 1 << 20);
-        s.deposit(id(2), id(0x43), envelope(10), 7000, 1000, 1 << 20);
+        s.deposit(id(1), id(0x41), envelope(10), id(0x7A, 32), 7000, 1000, 1 << 20);
+        s.deposit(id(1), id(0x42), envelope(10), id(0x7A, 32), 7000, 1000, 1 << 20);
+        s.deposit(id(2), id(0x43), envelope(10), id(0x7A, 32), 7000, 1000, 1 << 20);
         CHECK(s.ack(id(2), {id(0x41), id(0x42)}) == 0 && s.envelope_count(id(1)) == 2, "another mailbox can't acknowledge (delete) my envelopes");
         CHECK(s.ack(id(1), {id(0x41), id(0x77)}) == 1 && s.envelope_count(id(1)) == 1, "acknowledging deletes only the named envelopes that exist");
         CHECK(s.ack(id(1), {id(0x41)}) == 0, "acknowledging twice deletes nothing more");
@@ -132,16 +134,16 @@ int main() {
 
     std::cout << "Persistence, hostile input and concurrency\n";
     {
-        { RelayStore s(db); s.deposit(id(1), id(0x51), envelope(10, 5), 8000, 1000, 1 << 20); }
+        { RelayStore s(db); s.deposit(id(1), id(0x51), envelope(10, 5), id(0x7A, 32), 8000, 1000, 1 << 20); }
         RelayStore reopened(db);
         auto got = reopened.fetch(id(1), 0, 8001, 100);
         bool found = false;
         for (auto& e : got) if (e.id == id(0x51) && e.envelope == envelope(10, 5)) found = true;
         CHECK(found && reopened.access_key(id(1)).has_value(), "envelopes and mailboxes survive closing and reopening the database");
 
-        CHECK(throws([&] { reopened.deposit(id(77), id(0x52), envelope(10), 8000, 1000, 1 << 20); }), "depositing to a mailbox that doesn't exist is an error, not corruption");
-        CHECK(reopened.deposit(id(1), id(0x53), Bytes(), 8000, 1000, 1 << 20) == RelayStore::DepositResult::Ok, "an empty envelope is stored as empty, not NULL");
-        CHECK(throws([&] { reopened.deposit(id(1), id(0x53), envelope(5), 8000, 1000, 1 << 20); }), "a duplicate envelope ID is refused");
+        CHECK(throws([&] { reopened.deposit(id(77), id(0x52), envelope(10), id(0x7A, 32), 8000, 1000, 1 << 20); }), "depositing to a mailbox that doesn't exist is an error, not corruption");
+        CHECK(reopened.deposit(id(1), id(0x53), Bytes(), id(0x7A, 32), 8000, 1000, 1 << 20) == RelayStore::DepositResult::Ok, "an empty envelope is stored as empty, not NULL");
+        CHECK(throws([&] { reopened.deposit(id(1), id(0x53), envelope(5), id(0x7A, 32), 8000, 1000, 1 << 20); }), "a duplicate envelope ID is refused");
         CHECK(!reopened.token_valid(Bytes(), Bytes()) && !reopened.access_key(Bytes()), "empty IDs just don't match anything");
 
         std::atomic<int> errors{0};
@@ -152,12 +154,62 @@ int main() {
                     try {
                         Bytes eid(16, 0);
                         eid[0] = 0xE0; eid[1] = static_cast<uint8_t>(t); eid[2] = static_cast<uint8_t>(i);
-                        reopened.deposit(id(2), eid, envelope(10), 9000, 1000, 1 << 24);
+                        reopened.deposit(id(2), eid, envelope(10), id(0x7A, 32), 9000, 1000, 1 << 24);
                     } catch (...) { errors++; }
                 }
             });
         for (auto& th : threads) th.join();
         CHECK(errors == 0 && reopened.envelope_count(id(2)) >= 200, "four threads depositing at once all succeed");
+    }
+
+    std::cout << "Token hashes and schema migration\n";
+    {
+        RelayStore s(db);
+        s.deposit(id(1), id(0x61), envelope(10, 1), id(0x7B, 32), 9500, 1000, 1 << 20);
+        auto got = s.fetch(id(1), 0, 9501, 100);
+        bool found = false;
+        for (auto& e : got) if (e.id == id(0x61) && e.token_hash == id(0x7B, 32)) found = true;
+        CHECK(found, "the send token's hash is stored with the envelope and returned to the owner");
+    }
+    {
+        // A database exactly as the first release created it: no token_hash column, version 1.
+        fs::path old_db = dir / "old.db";
+        sqlite3* raw = nullptr;
+        sqlite3_open_v2(old_db.string().c_str(), &raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+        const char* old_schema =
+            "CREATE TABLE invites(hash BLOB PRIMARY KEY, expires_at INTEGER NOT NULL);"
+            "CREATE TABLE mailboxes(id BLOB PRIMARY KEY, access_public_key BLOB NOT NULL, created_at INTEGER NOT NULL);"
+            "CREATE TABLE tokens(mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE, hash BLOB NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(mailbox_id, hash));"
+            "CREATE TABLE envelopes(seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL UNIQUE, mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE, size INTEGER NOT NULL, envelope BLOB NOT NULL, deposited_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);"
+            "CREATE INDEX envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
+            "CREATE INDEX envelopes_by_expiry ON envelopes(expires_at);"
+            "INSERT INTO mailboxes VALUES(x'01010101010101010101010101010101', x'AA', 100);"
+            "INSERT INTO envelopes(id, mailbox_id, size, envelope, deposited_at, expires_at) "
+            "  VALUES(x'0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A', x'01010101010101010101010101010101', 3, x'010203', 9000, 99999999);"
+            "PRAGMA user_version=1;";
+        sqlite3_exec(raw, old_schema, nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+
+        RelayStore migrated(old_db);
+        Bytes box(16, 1);
+        auto old = migrated.fetch(box, 0, 10000, 10);
+        CHECK(old.size() == 1 && old[0].envelope == Bytes({1, 2, 3}) && old[0].token_hash == Bytes(32, 0),
+              "an envelope stored by the first release is still delivered, with an all-zero token hash");
+        CHECK(migrated.deposit(box, id(0x62), envelope(5, 4), id(0x7C, 32), 10000, 1000, 1 << 20) == RelayStore::DepositResult::Ok,
+              "and new deposits work on the migrated database");
+        auto both = migrated.fetch(box, 0, 10001, 10);
+        CHECK(both.size() == 2 && both[1].token_hash == id(0x7C, 32), "old and new envelopes sit side by side");
+        { RelayStore again(old_db); CHECK(again.fetch(box, 0, 10001, 10).size() == 2, "opening a migrated database again is harmless"); }
+
+        sqlite3* check = nullptr;
+        sqlite3_open_v2(old_db.string().c_str(), &check, SQLITE_OPEN_READWRITE, nullptr);
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(check, "PRAGMA user_version", -1, &st, nullptr);
+        sqlite3_step(st);
+        long long version = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        sqlite3_close(check);
+        CHECK(version == 2, "the schema version is now 2");
     }
 
     fs::remove_all(dir);

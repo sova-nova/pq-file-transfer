@@ -14,6 +14,7 @@
 #include "sharing.h"
 #include "transfer_engine.h"
 
+class ChatWidget;
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -47,6 +48,7 @@ private:
     QProgressBar* progress_bar_ = nullptr;
     QLabel* transfer_id_label_ = nullptr;
 
+    ChatWidget* chat_widget_ = nullptr;  // the Chats tab; null until the keys are ready
     std::unique_ptr<KeyStore> keystore_;
     TransferEngine engine_;
     std::thread worker_thread_;
@@ -76,7 +78,8 @@ private:
                             const std::vector<uint8_t>& pub_kem,
                             const std::vector<uint8_t>& pub_dsa,
                             const std::string& card_server,
-                            const IdentityBundle* bundle);
+                            const IdentityBundle* bundle,
+                            const std::vector<uint8_t>& send_token = std::vector<uint8_t>());
     void remove_contact();
     void copy_contact_card();
     void export_keys();

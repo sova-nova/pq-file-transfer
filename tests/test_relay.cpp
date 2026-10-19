@@ -407,11 +407,18 @@ static void test_real_relay() {
 
         // Authentication belongs to the connection: a newer sign-in by the owner replaces the old one.
         RelayClient first; sign_in(first, main_srv, pin, *alice, err);
-        drain(first, 500);
+        drain(first, 500);  // first is now the connection receiving deliveries
+        RelayClient helper; sign_in(helper, main_srv, pin, *alice, err);
+        std::string helper_err;
+        CHECK(helper.add_token(CryptoEngine::sha256(CryptoEngine::random_bytes(8)), helper_err),
+              "a second signed-in connection that is not collecting can work alongside it (" + helper_err + ")");
+        RelayClient::Event still = first.next_event(300);
+        CHECK(still.kind == RelayClient::Event::Kind::Timeout, "...and does not disturb the collecting one");
         RelayClient newer; sign_in(newer, main_srv, pin, *alice, err);
+        newer.collect(err);  // a newer connection that also collects replaces the first
         RelayClient::Event ev;
         for (int i = 0; i < 20; i++) { ev = first.next_event(250); if (ev.kind == RelayClient::Event::Kind::Closed) break; }
-        CHECK(ev.kind == RelayClient::Event::Kind::Closed && has(ev.text, "Another client"), "a second sign-in replaces the first connection: " + ev.text);
+        CHECK(ev.kind == RelayClient::Event::Kind::Closed && has(ev.text, "Another client"), "a newer collecting connection replaces the first one: " + ev.text);
         RelayClient cleanup; sign_in(cleanup, main_srv, pin, *alice, err);
         auto left = drain(cleanup);
         std::vector<Bytes> lids; for (auto& e : left) lids.push_back(e.id);
@@ -652,12 +659,12 @@ struct FakeRelay {
                     send_exact(c, frame, sizeof(frame));
                     break;
                 }
-                relay::StoredEnvelope e{Bytes(16, 0x11), 1700000000, Bytes(50, 0xAB)};
+                relay::StoredEnvelope e{Bytes(16, 0x11), 1700000000, Bytes(32, 0x33), Bytes(50, 0xAB)};
                 send_message(c, MessageType::RELAY_ENVELOPE, relay::encode(e));
                 if (behavior == Behavior::DuplicateEnvelopes) {
                     send_message(c, MessageType::RELAY_ENVELOPE, relay::encode(e));      // the same one again
                     send_message(c, MessageType::RELAY_ENVELOPE, Bytes(7, 0xEE));        // junk
-                    relay::StoredEnvelope e2{Bytes(16, 0x22), 1700000001, Bytes(60, 0xCD)};
+                    relay::StoredEnvelope e2{Bytes(16, 0x22), 1700000001, Bytes(32, 0x33), Bytes(60, 0xCD)};
                     send_message(c, MessageType::RELAY_ENVELOPE, relay::encode(e2));
                     send_message(c, MessageType::RELAY_ENVELOPE, relay::encode(e));      // and the first, once more
                 }

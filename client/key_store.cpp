@@ -1,5 +1,6 @@
 #include "key_store.h"
 #include "crypto_engine.h"
+#include "protocol.h"
 #include "scope_exit.h"
 
 #include <algorithm>
@@ -390,8 +391,13 @@ void KeyStore::save_contact_bundle(const std::string& name, const IdentityBundle
     write_file_atomic(dir / "bundle", bundle.raw, false);
 }
 
-std::vector<uint8_t> KeyStore::make_own_bundle(const std::string& display_name,
-                                               const std::string& relay_hint) const {
+std::vector<uint8_t> KeyStore::make_own_bundle(const std::string& display_name, const std::string& relay_hint) const {
+    BundleAddress address;
+    address.relay_hint = relay_hint;
+    return make_own_bundle(display_name, address);
+}
+
+std::vector<uint8_t> KeyStore::make_own_bundle(const std::string& display_name, const BundleAddress& address) const {
     auto signing_private = load_private_dsa();
     auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(signing_private); });
     if (signing_private.size() != CryptoEngine::sig_secret_key_size())
@@ -399,11 +405,12 @@ std::vector<uint8_t> KeyStore::make_own_bundle(const std::string& display_name,
 
     auto signing_public = load_public_dsa();
     auto encryption_public = load_public_kem();
-    return create_identity_bundle(signing_public, encryption_public, display_name, relay_hint,
+    return create_identity_bundle(signing_public, encryption_public, display_name, address,
                                   static_cast<uint64_t>(std::time(nullptr)), signing_private);
 }
 
-KeyStore::BundleImport KeyStore::import_bundle_for_known_identity(const IdentityBundle& bundle) {
+KeyStore::BundleImport KeyStore::import_bundle_for_known_identity(const IdentityBundle& bundle,
+                                                                  const std::vector<uint8_t>& send_token) {
     BundleImport result;
     auto existing = find_contact_by_fingerprint(bundle.fingerprint());
     if (!existing) return result;  // UnknownIdentity
@@ -416,11 +423,19 @@ KeyStore::BundleImport KeyStore::import_bundle_for_known_identity(const Identity
         // carries a different one it is an old key being replayed, so it is ignored.
         result.result = bundle.encryption_key == existing->pub_kem ? BundleImportResult::Unchanged
                                                                    : BundleImportResult::Stale;
+        // A card made at the same moment as the one we have (two cards copied in one second) can still
+        // bring a different send token. A strictly older card never does: its token may be long revoked.
+        if (result.result == BundleImportResult::Unchanged && bundle.issued_at == existing->bundle_issued_at &&
+            send_token.size() == 32 && send_token != existing->send_token) {
+            save_contact_token(existing->name, send_token);
+            result.result = BundleImportResult::Updated;
+        }
         return result;
     }
 
     result.encryption_key_changed = bundle.encryption_key != existing->pub_kem;
     save_contact_bundle(existing->name, bundle);
+    if (send_token.size() == 32) save_contact_token(existing->name, send_token);
     result.result = BundleImportResult::Updated;
     return result;
 }
@@ -445,8 +460,15 @@ std::optional<KeyStore::Contact> KeyStore::load_contact(const std::string& name)
         if (bundle && bundle->signing_key == c.pub_dsa && bundle->encryption_key == c.pub_kem) {
             c.kem_verified = true;
             c.bundle_issued_at = bundle->issued_at;
+            if (bundle->has_mailbox()) {
+                c.relay_address = bundle->relay_hint;
+                c.relay_id = bundle->relay_id;
+                c.mailbox_id = bundle->mailbox_id;
+            }
         }
     }
+    auto token = read_file_bytes(*dir / "send_token");
+    if (token.size() == 32) c.send_token = std::move(token);
     return c;
 }
 
@@ -481,6 +503,96 @@ void KeyStore::delete_contact(const std::string& name) {
     std::error_code ec;
     fs::remove_all(*dir, ec);
     if (ec) throw std::runtime_error("Cannot delete contact: " + ec.message());
+}
+
+void KeyStore::save_contact_token(const std::string& name, const std::vector<uint8_t>& send_token) {
+    if (send_token.size() != 32) throw std::runtime_error("A send token is 32 bytes");
+    auto dir = contact_dir(name);
+    std::error_code ec;
+    if (!dir || !fs::is_directory(*dir, ec)) throw std::runtime_error("No such contact");
+    write_file_atomic(*dir / "send_token", send_token, true);  // a bearer credential: owner-only
+}
+
+// --- Local secrets ---
+
+std::vector<uint8_t> KeyStore::derive_local_key(const std::string& label) const {
+    auto kem_private = load_private_kem();
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(kem_private); });
+    if (kem_private.size() != CryptoEngine::kem_secret_key_size()) return {};
+    static const std::string salt_text = "pq-suite v3 local keys";
+    return CryptoEngine::hkdf_sha256(kem_private, std::vector<uint8_t>(salt_text.begin(), salt_text.end()), label, 32);
+}
+
+namespace {
+const char ACCESS_WRAP_LABEL[] = "access key wrap";
+const char ACCESS_WRAP_AAD[] = "pq-suite v3 mailbox access key";
+}  // namespace
+
+bool KeyStore::has_access_key() const {
+    std::error_code ec;
+    return fs::exists(keys_dir_ / "public_access", ec) && fs::exists(keys_dir_ / "private_access.enc", ec);
+}
+
+void KeyStore::create_access_key() {
+    if (has_access_key()) throw std::runtime_error("This mailbox already has an access key");
+    auto wrap_key = derive_local_key(ACCESS_WRAP_LABEL);
+    if (wrap_key.empty()) throw std::runtime_error("Your keys are locked. Unlock them first");
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(wrap_key); });
+
+    auto pair = CryptoEngine::generate_sig_keypair();
+    auto nonce = CryptoEngine::random_bytes(12);
+    auto sealed = CryptoEngine::encrypt(wrap_key, nonce, pair.private_key,
+                                        std::vector<uint8_t>(ACCESS_WRAP_AAD, ACCESS_WRAP_AAD + sizeof(ACCESS_WRAP_AAD) - 1));
+    std::vector<uint8_t> blob = nonce;
+    blob.insert(blob.end(), sealed.begin(), sealed.end());
+    CryptoEngine::secure_wipe(pair.private_key);
+
+    // Private half first: if we stop in between there is no public file, so no half-made key counts.
+    write_file_atomic(keys_dir_ / "private_access.enc", blob, true);
+    write_file_atomic(keys_dir_ / "public_access", pair.public_key, false);
+}
+
+std::vector<uint8_t> KeyStore::load_access_public() const { return read_file_bytes(keys_dir_ / "public_access"); }
+
+std::vector<uint8_t> KeyStore::load_access_private() const {
+    auto blob = read_file_bytes(keys_dir_ / "private_access.enc");
+    if (blob.size() <= 12 + 16) return {};
+    auto wrap_key = derive_local_key(ACCESS_WRAP_LABEL);
+    if (wrap_key.empty()) return {};
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(wrap_key); });
+    std::vector<uint8_t> nonce(blob.begin(), blob.begin() + 12), sealed(blob.begin() + 12, blob.end());
+    auto plain = CryptoEngine::decrypt(wrap_key, nonce, sealed,
+                                       std::vector<uint8_t>(ACCESS_WRAP_AAD, ACCESS_WRAP_AAD + sizeof(ACCESS_WRAP_AAD) - 1));
+    if (!plain || plain->size() != CryptoEngine::sig_secret_key_size()) return {};
+    return std::move(*plain);
+}
+
+std::optional<KeyStore::MailboxConfig> KeyStore::load_mailbox_config() const {
+    auto raw = read_file_bytes(app_dir_ / "mailbox.cfg");
+    if (raw.empty()) return std::nullopt;
+    size_t off = 0;
+    MailboxConfig c;
+    auto host = read_string(raw.data(), raw.size(), off, 255);
+    auto port = read_u32(raw.data(), raw.size(), off);
+    auto relay_id = read_blob(raw.data(), raw.size(), off, 32);
+    auto mailbox_id = read_blob(raw.data(), raw.size(), off, 16);
+    if (!host || !port || *port == 0 || *port > 65535 || !relay_id || relay_id->size() != 32 || !mailbox_id ||
+        mailbox_id->size() != 16 || off != raw.size())
+        return std::nullopt;
+    c.host = std::move(*host);
+    c.port = static_cast<uint16_t>(*port);
+    c.relay_id = std::move(*relay_id);
+    c.mailbox_id = std::move(*mailbox_id);
+    return c;
+}
+
+void KeyStore::save_mailbox_config(const MailboxConfig& config) {
+    std::vector<uint8_t> raw;
+    write_string(raw, config.host);
+    write_u32(raw, config.port);
+    write_blob(raw, config.relay_id);
+    write_blob(raw, config.mailbox_id);
+    write_file_atomic(app_dir_ / "mailbox.cfg", raw, false);
 }
 
 std::vector<fs::path> KeyStore::export_public_keys(const fs::path& dir) const {

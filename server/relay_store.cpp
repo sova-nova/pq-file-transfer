@@ -1,89 +1,16 @@
 #include "relay_store.h"
 
-#include <sqlite3.h>
+#include "sqlite_helpers.h"
 
 #include <stdexcept>
 #include <string>
 
 namespace relay {
 
-namespace {
+using sqlitex::exec;
+using sqlitex::Stmt;
+using sqlitex::Transaction;
 
-[[noreturn]] void fail(sqlite3* db, const char* what) {
-    throw std::runtime_error(std::string("relay database: ") + what + ": " + (db ? sqlite3_errmsg(db) : "?"));
-}
-
-void exec(sqlite3* db, const char* sql) {
-    char* err = nullptr;
-    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        std::string msg = err ? err : "unknown error";
-        sqlite3_free(err);
-        throw std::runtime_error("relay database: " + msg);
-    }
-}
-
-// One prepared statement, bound by position (1-based) and stepped.
-class Stmt {
-public:
-    Stmt(sqlite3* db, const char* sql) : db_(db) {
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) fail(db, "prepare");
-    }
-    ~Stmt() { sqlite3_finalize(stmt_); }
-    Stmt(const Stmt&) = delete;
-    Stmt& operator=(const Stmt&) = delete;
-
-    Stmt& blob(int i, const Bytes& b) {
-        static const uint8_t empty = 0;  // never bind NULL for an empty blob
-        if (sqlite3_bind_blob(stmt_, i, b.empty() ? &empty : b.data(), static_cast<int>(b.size()), SQLITE_TRANSIENT) != SQLITE_OK)
-            fail(db_, "bind");
-        return *this;
-    }
-    Stmt& i64(int i, int64_t v) {
-        if (sqlite3_bind_int64(stmt_, i, v) != SQLITE_OK) fail(db_, "bind");
-        return *this;
-    }
-
-    // True while a row is available; false when done.
-    bool step() {
-        int rc = sqlite3_step(stmt_);
-        if (rc == SQLITE_ROW) return true;
-        if (rc == SQLITE_DONE) return false;
-        fail(db_, "step");
-    }
-    Bytes column_blob(int i) const {
-        const void* p = sqlite3_column_blob(stmt_, i);
-        int n = sqlite3_column_bytes(stmt_, i);
-        if (!p || n <= 0) return {};
-        const uint8_t* b = static_cast<const uint8_t*>(p);
-        return Bytes(b, b + n);
-    }
-    int64_t column_i64(int i) const { return sqlite3_column_int64(stmt_, i); }
-
-private:
-    sqlite3* db_;
-    sqlite3_stmt* stmt_ = nullptr;
-};
-
-// BEGIN IMMEDIATE ... COMMIT, rolled back automatically if commit() isn't reached.
-class Transaction {
-public:
-    explicit Transaction(sqlite3* db) : db_(db) { exec(db_, "BEGIN IMMEDIATE"); }
-    ~Transaction() {
-        if (open_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-    }
-    Transaction(const Transaction&) = delete;
-    Transaction& operator=(const Transaction&) = delete;
-    void commit() {
-        exec(db_, "COMMIT");
-        open_ = false;
-    }
-
-private:
-    sqlite3* db_;
-    bool open_ = true;
-};
-
-}  // namespace
 
 RelayStore::RelayStore(const std::filesystem::path& db_path) {
     std::string path = db_path.u8string();  // SQLite wants UTF-8 (matters for non-ASCII paths on Windows)
@@ -117,10 +44,20 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  size INTEGER NOT NULL,"
          "  envelope BLOB NOT NULL,"
          "  deposited_at INTEGER NOT NULL,"
-         "  expires_at INTEGER NOT NULL);"
+         "  expires_at INTEGER NOT NULL,"
+         "  token_hash BLOB);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
-         "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at);"
-         "PRAGMA user_version=1");
+         "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at)");
+
+    // Schema versions: 1 = the first release (envelopes without token_hash), 2 = current.
+    // A brand-new database is created at the current shape and starts at 0.
+    int64_t version = 0;
+    {
+        Stmt v(db_, "PRAGMA user_version");
+        if (v.step()) version = v.column_i64(0);
+    }
+    if (version == 1) exec(db_, "ALTER TABLE envelopes ADD COLUMN token_hash BLOB");
+    if (version < 2) exec(db_, "PRAGMA user_version=2");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -213,7 +150,7 @@ bool RelayStore::revoke_token(const Bytes& mailbox_id, const Bytes& token_hash) 
 }
 
 RelayStore::DepositResult RelayStore::deposit(const Bytes& mailbox_id, const Bytes& envelope_id, const Bytes& envelope,
-                                              int64_t now, uint32_t ttl_seconds, size_t quota_bytes) {
+                                              const Bytes& token_hash, int64_t now, uint32_t ttl_seconds, size_t quota_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     Transaction tx(db_);
     {
@@ -222,20 +159,24 @@ RelayStore::DepositResult RelayStore::deposit(const Bytes& mailbox_id, const Byt
         size_t bytes = used.step() ? static_cast<size_t>(used.column_i64(0)) : 0;
         if (bytes + envelope.size() > quota_bytes) return DepositResult::MailboxFull;
     }
-    Stmt(db_, "INSERT INTO envelopes(id, mailbox_id, size, envelope, deposited_at, expires_at) VALUES(?, ?, ?, ?, ?, ?)")
+    Stmt(db_, "INSERT INTO envelopes(id, mailbox_id, size, envelope, deposited_at, expires_at, token_hash) VALUES(?, ?, ?, ?, ?, ?, ?)")
         .blob(1, envelope_id).blob(2, mailbox_id).i64(3, static_cast<int64_t>(envelope.size()))
-        .blob(4, envelope).i64(5, now).i64(6, now + static_cast<int64_t>(ttl_seconds)).step();
+        .blob(4, envelope).i64(5, now).i64(6, now + static_cast<int64_t>(ttl_seconds)).blob(7, token_hash).step();
     tx.commit();
     return DepositResult::Ok;
 }
 
 std::vector<RelayStore::Stored> RelayStore::fetch(const Bytes& mailbox_id, int64_t after_seq, int64_t now, size_t limit) {
     std::lock_guard<std::mutex> lock(mutex_);
-    Stmt s(db_, "SELECT seq, id, deposited_at, envelope FROM envelopes "
+    Stmt s(db_, "SELECT seq, id, deposited_at, envelope, token_hash FROM envelopes "
                 "WHERE mailbox_id = ? AND seq > ? AND expires_at > ? ORDER BY seq LIMIT ?");
     s.blob(1, mailbox_id).i64(2, after_seq).i64(3, now).i64(4, static_cast<int64_t>(limit));
     std::vector<Stored> out;
-    while (s.step()) out.push_back({s.column_i64(0), s.column_blob(1), s.column_i64(2), s.column_blob(3)});
+    while (s.step()) {
+        Bytes token_hash = s.column_blob(4);
+        if (token_hash.size() != 32) token_hash.assign(32, 0);  // stored before token hashes were recorded
+        out.push_back({s.column_i64(0), s.column_blob(1), s.column_i64(2), std::move(token_hash), s.column_blob(3)});
+    }
     return out;
 }
 

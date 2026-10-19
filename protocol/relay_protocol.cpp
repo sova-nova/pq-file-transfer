@@ -68,6 +68,7 @@ std::vector<uint8_t> encode(const StoredEnvelope& m) {
     std::vector<uint8_t> b;
     write_blob(b, m.id);
     write_u64(b, m.deposited_at);
+    write_blob(b, m.token_hash);
     write_blob(b, m.envelope);
     return b;
 }
@@ -159,10 +160,12 @@ std::optional<StoredEnvelope> decode_stored_envelope(const std::vector<uint8_t>&
     StoredEnvelope m;
     auto id = fixed_blob(in, off, ENVELOPE_ID_BYTES);
     auto at = read_u64(in.data(), in.size(), off);
+    auto token_hash = fixed_blob(in, off, HASH_BYTES);
     auto envelope = read_blob(in.data(), in.size(), off, MAX_ENVELOPE_BYTES);
-    if (!id || !at || !envelope || !at_end(in, off)) return std::nullopt;
+    if (!id || !at || !token_hash || !envelope || !at_end(in, off)) return std::nullopt;
     m.id = std::move(*id);
     m.deposited_at = *at;
+    m.token_hash = std::move(*token_hash);
     m.envelope = std::move(*envelope);
     return m;
 }

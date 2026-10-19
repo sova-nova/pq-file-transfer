@@ -33,6 +33,17 @@ public:
         // been swapped in transit without the fingerprint check noticing.
         bool kem_verified = false;
         uint64_t bundle_issued_at = 0;  // when the bundle was made; 0 if there is none
+
+        // How to reach them by message, from their signed bundle (the address) and the send token
+        // they issued us (the permission). Empty until both are known.
+        std::string relay_address;               // "host:port"
+        std::vector<uint8_t> relay_id;           // 32 bytes: which relay key to trust there
+        std::vector<uint8_t> mailbox_id;         // 16 bytes
+        std::vector<uint8_t> send_token;         // 32 bytes
+        bool can_message() const {
+            return kem_verified && !relay_address.empty() && relay_id.size() == 32 && mailbox_id.size() == 16 &&
+                   send_token.size() == 32;
+        }
     };
 
     // Throws std::runtime_error if no home directory can be determined.
@@ -109,6 +120,36 @@ public:
     // keys must be unlocked; throws with a user-facing message otherwise.
     std::vector<uint8_t> make_own_bundle(const std::string& display_name,
                                          const std::string& relay_hint = std::string()) const;
+    // The same, carrying this user's mailbox address (relay address, relay ID, mailbox ID).
+    std::vector<uint8_t> make_own_bundle(const std::string& display_name, const BundleAddress& address) const;
+
+    // Saves the send token a contact issued us (from their card or a grant). The contact must exist.
+    void save_contact_token(const std::string& name, const std::vector<uint8_t>& send_token);
+
+    // --- Local secrets derived from the identity's private encryption key ---
+    // Anything this app keeps encrypted on disk (message history, the mailbox access key) is
+    // protected by a key derived from the private ML-KEM key. So it is exactly as protected as the
+    // identity itself: locked with the passphrase, restorable from the keys folder, and unaffected
+    // when the passphrase changes.
+
+    // 32 bytes, independent for each label. Empty while the keys are locked.
+    std::vector<uint8_t> derive_local_key(const std::string& label) const;
+
+    // --- The mailbox on a relay (protocol v3) ---
+    struct MailboxConfig {
+        std::string host;
+        uint16_t port = 0;
+        std::vector<uint8_t> relay_id;    // 32 bytes, pinned
+        std::vector<uint8_t> mailbox_id;  // 16 bytes
+    };
+    bool has_access_key() const;
+    // Makes this mailbox's access key pair. The private half is stored encrypted under a derived
+    // local key, so the keys must be unlocked. Throws if one already exists.
+    void create_access_key();
+    std::vector<uint8_t> load_access_public() const;
+    std::vector<uint8_t> load_access_private() const;  // empty if missing or locked
+    std::optional<MailboxConfig> load_mailbox_config() const;
+    void save_mailbox_config(const MailboxConfig& config);
 
     // What to do with a bundle whose signing key may already belong to a contact.
     enum class BundleImportResult {
@@ -125,7 +166,9 @@ public:
     };
     // A newer bundle signed by an already-saved signing key updates that contact without
     // asking: only the owner of the signing key can produce one.
-    BundleImport import_bundle_for_known_identity(const IdentityBundle& bundle);
+    // `send_token`, if given (from a v3 card), is saved for the contact when the bundle is accepted.
+    BundleImport import_bundle_for_known_identity(const IdentityBundle& bundle,
+                                                  const std::vector<uint8_t>& send_token = std::vector<uint8_t>());
 
     // Returns std::nullopt if the contact is missing or its keys are invalid.
     std::optional<Contact> load_contact(const std::string& name) const;

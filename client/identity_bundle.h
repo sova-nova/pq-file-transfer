@@ -30,7 +30,9 @@ struct IdentityBundle {
     static constexpr uint32_t FIELD_SIGNING_KEY = 1;
     static constexpr uint32_t FIELD_ENCRYPTION_KEY = 2;
     static constexpr uint32_t FIELD_DISPLAY_NAME = 3;
-    static constexpr uint32_t FIELD_RELAY_HINT = 16;  // "host:port" suggestion, as in v1 cards
+    static constexpr uint32_t FIELD_RELAY_ID = 5;      // SHA-256 of the relay's signing key (32 bytes)
+    static constexpr uint32_t FIELD_MAILBOX_ID = 6;    // random mailbox ID on that relay (16 bytes)
+    static constexpr uint32_t FIELD_RELAY_HINT = 16;   // "host:port" of the relay
 
     static constexpr size_t MAX_DISPLAY_NAME_BYTES = 64;
     static constexpr size_t MAX_RELAY_HINT_BYTES = 255;
@@ -39,14 +41,34 @@ struct IdentityBundle {
     std::vector<uint8_t> signing_key;     // ML-DSA-65 public key
     std::vector<uint8_t> encryption_key;  // ML-KEM-768 public key
     std::string display_name;             // a suggestion only; untrusted text
-    std::string relay_hint;               // a suggestion only; "" if none
+    std::string relay_hint;               // where the relay is, "host:port"; "" if none
+    std::vector<uint8_t> relay_id;        // which relay key to trust there (empty with relay_hint)
+    std::vector<uint8_t> mailbox_id;      // this identity's mailbox on that relay
     std::vector<uint8_t> raw;             // the exact bytes that were signed and sent
+
+    // A mailbox address is a unit: relay address, relay ID and mailbox ID are all there or all absent.
+    bool has_mailbox() const { return !relay_hint.empty() && !relay_id.empty() && !mailbox_id.empty(); }
 
     // SHA-256 of the signing key, as lowercase hex (the same fingerprint as before).
     std::string fingerprint() const;
 };
 
+// Where an identity can be reached. Either empty, or all three set.
+struct BundleAddress {
+    std::string relay_hint;
+    std::vector<uint8_t> relay_id;
+    std::vector<uint8_t> mailbox_id;
+};
+
 // Builds and signs a bundle. Throws std::runtime_error on bad input sizes or signing failure.
+std::vector<uint8_t> create_identity_bundle(const std::vector<uint8_t>& signing_public,
+                                            const std::vector<uint8_t>& encryption_public,
+                                            const std::string& display_name,
+                                            const BundleAddress& address,
+                                            uint64_t issued_at,
+                                            const std::vector<uint8_t>& signing_private);
+
+// Same, with only a relay address suggestion (no mailbox).
 std::vector<uint8_t> create_identity_bundle(const std::vector<uint8_t>& signing_public,
                                             const std::vector<uint8_t>& encryption_public,
                                             const std::string& display_name,

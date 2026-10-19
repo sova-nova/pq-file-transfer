@@ -12,6 +12,7 @@ namespace {
 
 const char CARD_PREFIX[] = "pqft-contact-1:";
 const char CARD2_PREFIX[] = "pqft-contact-2:";
+const char CARD3_PREFIX[] = "pqft-contact-3:";
 const char LINK_PREFIX[] = "pqft://";
 constexpr uint32_t CARD_MAGIC = 0x50514343;  // "PQCC"
 constexpr uint32_t CARD_VERSION = 1;
@@ -195,7 +196,8 @@ std::string encode_contact_card(const ContactCard& card) {
 }
 
 bool looks_like_contact_card(const std::string& text) {
-    return text.find(CARD_PREFIX) != std::string::npos || text.find(CARD2_PREFIX) != std::string::npos;
+    return text.find(CARD_PREFIX) != std::string::npos || text.find(CARD2_PREFIX) != std::string::npos ||
+           text.find(CARD3_PREFIX) != std::string::npos;
 }
 
 // --- Contact cards, version 2 ---
@@ -207,6 +209,15 @@ std::string encode_contact_card_v2(const std::vector<uint8_t>& bundle_raw) {
     return CARD2_PREFIX + b64_encode(buf);
 }
 
+std::string encode_contact_card_v3(const std::vector<uint8_t>& bundle_raw, const std::vector<uint8_t>& send_token) {
+    std::vector<uint8_t> buf;
+    write_blob(buf, bundle_raw);
+    write_blob(buf, send_token);
+    auto digest = CryptoEngine::sha256(buf);
+    buf.insert(buf.end(), digest.begin(), digest.begin() + CARD_CHECKSUM_BYTES);
+    return CARD3_PREFIX + b64_encode(buf);
+}
+
 std::optional<ImportedCard> decode_any_contact_card(const std::string& text, std::string* error) {
     auto fail = [&](const std::string& msg) -> std::optional<ImportedCard> {
         if (error) *error = msg;
@@ -216,6 +227,41 @@ std::optional<ImportedCard> decode_any_contact_card(const std::string& text, std
     std::string compact;
     for (char c : text)
         if (!std::isspace(static_cast<unsigned char>(c))) compact.push_back(c);
+
+    size_t start3 = compact.find(CARD3_PREFIX);
+    if (start3 != std::string::npos) {
+        std::string body3;
+        for (size_t i = start3 + std::strlen(CARD3_PREFIX); i < compact.size() && b64_value(compact[i]) >= 0; i++)
+            body3.push_back(compact[i]);
+        const char* damaged3 = "The contact card is damaged or incomplete. Paste only the card, exactly as it was sent.";
+        auto raw3 = b64_decode(body3);
+        if (!raw3 || raw3->size() <= CARD_CHECKSUM_BYTES) return fail(damaged3);
+        const size_t payload_len = raw3->size() - CARD_CHECKSUM_BYTES;
+        std::vector<uint8_t> payload(raw3->begin(), raw3->begin() + static_cast<std::ptrdiff_t>(payload_len));
+        auto digest3 = CryptoEngine::sha256(payload);
+        if (!std::equal(digest3.begin(), digest3.begin() + CARD_CHECKSUM_BYTES, raw3->begin() + static_cast<std::ptrdiff_t>(payload_len)))
+            return fail(damaged3);
+
+        size_t off = 0;
+        auto bundle_raw = read_blob(payload.data(), payload.size(), off, 16 * 1024);
+        auto token = read_blob(payload.data(), payload.size(), off, 64);
+        if (!bundle_raw || !token || off != payload.size() || (!token->empty() && token->size() != 32)) return fail(damaged3);
+
+        std::string bundle_error;
+        auto bundle = parse_identity_bundle(*bundle_raw, &bundle_error);
+        if (!bundle) return fail(bundle_error);
+        if (!bundle->relay_hint.empty() && !parse_server_address(bundle->relay_hint))
+            return fail("The contact card contains an invalid relay server address.");
+
+        ImportedCard card;
+        card.name = bundle->display_name;
+        card.pub_kem = bundle->encryption_key;
+        card.pub_dsa = bundle->signing_key;
+        card.server = bundle->relay_hint;
+        card.send_token = std::move(*token);
+        card.bundle = std::move(bundle);
+        return card;
+    }
 
     size_t start = compact.find(CARD2_PREFIX);
     if (start == std::string::npos) {

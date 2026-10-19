@@ -59,6 +59,14 @@ bool looks_like_contact_card(const std::string& text);  // either version
 
 std::string encode_contact_card_v2(const std::vector<uint8_t>& bundle_raw);
 
+// --- Contact cards, version 3 ---
+//
+// "pqft-contact-3:<base64url>": the signed bundle (which now carries the mailbox address) plus the
+// send token issued for whoever this card is for. The token sits outside the signature on purpose:
+// it is a bearer credential for one contact, not a statement about the identity, so the bundle
+// itself can be public without letting anyone message you.
+std::string encode_contact_card_v3(const std::vector<uint8_t>& bundle_raw, const std::vector<uint8_t>& send_token);
+
 // What importing either kind of card yields. `bundle` is set for v2 cards only; a contact
 // added from a card without one has an encryption key nobody has verified.
 struct ImportedCard {
@@ -67,9 +75,10 @@ struct ImportedCard {
     std::vector<uint8_t> pub_dsa;
     std::string server;              // optional suggested relay; "" if none
     std::optional<IdentityBundle> bundle;
+    std::vector<uint8_t> send_token;  // v3 cards: lets you deposit to this contact's mailbox; empty otherwise
 };
 
-// Decodes a v2 or v1 card (v2 preferred if both appear). On failure returns std::nullopt and,
+// Decodes a v3, v2 or v1 card (the newest version present wins). On failure returns std::nullopt and,
 // if `error` is non-null, a message suitable for showing to the user.
 std::optional<ImportedCard> decode_any_contact_card(const std::string& text, std::string* error = nullptr);
 

@@ -250,6 +250,35 @@ The link or ID lets anyone download the encrypted file, but only the recipient c
 
 Click **Receive File** and paste the share link (or the bare transfer ID). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
 
+### Messaging: one-to-one Saved chats
+
+The **Chats** tab sends messages through a mailbox relay. Messages are end-to-end encrypted and signed, work when the other person is offline (the relay holds them until they connect), and are kept in an encrypted history on your computer.
+
+**1. Set up messaging (once).** Click **Set up messaging…** and paste the invite string the relay's operator gave you (see [the mailbox relay](#the-mailbox-relay)). The app shows the relay's identity, pins it, and creates your mailbox. Nothing the relay learns can be tied to your name or your identity keys: your mailbox has its own random ID and its own key.
+
+**2. Give each person their own card.** Use **Copy My Contact Card** on the Files tab. With messaging set up it asks who the card is for, then makes a card that carries a permission to message you that exists only for that card. Revoke one card and only that card stops working. Under **Cards issued…** you can see every card, whether it has been used, and by whom. If a card is first used by one person and later by another, you are warned that it was probably passed on.
+
+**3. Add each other.** Add the card you were given with **+** as before, including the fingerprint check. Cards from before version 0.7 don't carry a messaging address: ask for a new one. Importing it updates the contact in place.
+
+**4. Chat.** Pick a contact and write. Each message shows its state: waiting to send, sent (the relay has it), delivered (their app stored it), read. Both kinds of receipt can be turned off per chat, and each person controls the receipts they send. A message you write while the relay or the other person is unreachable waits in a queue and goes out by itself.
+
+**Message requests.** If someone writes to you who isn't a contact (they had a card of yours), it arrives as a **message request**: you see their fingerprint, the name they gave themselves and what they wrote, and nothing else happens until you decide. **Accept** asks you to verify their fingerprint first, then adds them and delivers what they sent. **Decline** deletes it.
+
+**Revoking.** On a chat, **Revoke access…** removes every card and permission that person has been given. They can no longer send you anything until you give them a new card. Their earlier messages stay in your history.
+
+**What protects your messages.**
+
+- Each message is a record signed with the sender's identity key: who sent it, to whom, in which conversation, when, and what they had already sent and received. The recipient checks the signature against the sender's key, and checks the record is for exactly these two people, so a message can't be forged, edited or redirected to someone else.
+- Each envelope is encrypted to the recipient alone with a fresh key. The sender's identity is inside it, so the relay can't see who is writing to whom, and sizes are padded to 4, 16 or 64 KiB.
+- Your history is encrypted on disk, row by row, with a key derived from your identity's private key. It is locked by the same passphrase as your keys and stays readable when you change that passphrase. A copy of `history.db` is useless without your keys.
+- A message whose sender's earlier message never arrived is shown, flagged as following a gap.
+
+**What it doesn't do yet.**
+
+- **No forward secrecy.** Envelopes are encrypted to your long-term key, so anyone who later gets your private key and a recorded envelope can read it. One-time prekeys and an X25519 hybrid are a later milestone.
+- **History lives only on your computer.** Back up your keys folder *and* `history.db` (both in `~/.pq-file-transfer/`; the file is useless without the keys). Restoring history on a new device, a relay-held archive, and deleting chats by mutual agreement come in a later milestone.
+- **One device per identity, one relay, no groups, no files in chats yet.**
+
 ## Tests
 
 The tests need liboqs but not Qt:
@@ -263,6 +292,9 @@ ctest --test-dir build --output-on-failure
 - `sharing` checks server addresses, contact cards (both versions) and share links, and signed identity bundles, including damaged and hostile input and the key-swap attack above.
 - `contacts` checks verified and unverified contacts and the rules for importing newer, older and rotated bundles (Linux and macOS only).
 - `keys` checks the passphrase protection: the encrypted file format (including tampering, swapped files and hostile settings) and locking, unlocking, changing and removing the passphrase, including a crash in the middle of protecting (Linux and macOS only).
+- `chat_formats` checks the signed message records (every bit of the signed body, forgery, redirection, receipts) and the sealed envelope (tampering with every byte, the wrong recipient, size padding).
+- `history` checks the encrypted history store: nothing readable on disk, a wrong key reads nothing, rows copied into other rows or conversations are rejected, statuses only move forward, and the outgoing queue, requests and issued tokens (Linux and macOS only).
+- `chat` starts a real relay and several simulated users and checks the whole flow: setup, cards and per-contact tokens, messages both ways with receipts, offline delivery, restarts, hostile envelopes (garbage, forged senders, strangers, replays, redirected and gapped records), message requests, a passed-on card, revoking and recovering, receipt settings, the relay going away and coming back, and locked keys (Linux and macOS only).
 - `relay_protocol` checks the v3 message encodings, every truncation and 3000 random corruptions of each, and the signing inputs.
 - `relay_store` checks the relay's database with a controlled clock: invites, mailbox limits, send tokens, ordering, expiry, quotas, acknowledgement scoping and persistence (Linux and macOS only).
 - `relay` starts a real relay and checks registration and invites, sign-in (including replayed and mis-bound signatures), deposits, offline delivery, push, restarts, expiry, rate limits and hijack attempts, then runs a scripted hostile relay against the client: wrong key, replayed answers, silence, duplicated and malformed envelopes, and a frame declaring 4 GiB (Linux and macOS only).

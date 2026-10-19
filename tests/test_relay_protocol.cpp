@@ -105,10 +105,12 @@ int main() {
         CHECK(encode(max).size() <= MAX_MESSAGE_PAYLOAD, "a maximum-size deposit fits in a maximum-size message");
     }
     {
-        StoredEnvelope s{fill(1, ENVELOPE_ID_BYTES), 1700000000, fill(2, 300)};
+        StoredEnvelope s{fill(1, ENVELOPE_ID_BYTES), 1700000000, fill(3, HASH_BYTES), fill(2, 300)};
         auto e = encode(s);
         auto d = decode_stored_envelope(e);
-        CHECK(d && d->id == s.id && d->deposited_at == s.deposited_at && d->envelope == s.envelope, "stored envelope round trip");
+        CHECK(d && d->id == s.id && d->deposited_at == s.deposited_at && d->token_hash == s.token_hash && d->envelope == s.envelope, "stored envelope round trip");
+        StoredEnvelope short_hash = s; short_hash.token_hash = fill(3, 5);
+        CHECK(!decode_stored_envelope(encode(short_hash)), "stored envelope: a token hash of the wrong length is rejected");
         check_framing("stored envelope", e, decode_stored_envelope);
         fuzz("stored envelope", e, decode_stored_envelope);
     }

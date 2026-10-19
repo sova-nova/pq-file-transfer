@@ -46,13 +46,16 @@ public:
     // --- Envelopes ---
     enum class DepositResult { Ok, MailboxFull };
     // Refuses if the mailbox's unexpired envelopes plus this one would exceed quota_bytes.
+    // `token_hash` records which send token was used, so the owner can later tell which card a
+    // deposit came through.
     DepositResult deposit(const Bytes& mailbox_id, const Bytes& envelope_id, const Bytes& envelope,
-                          int64_t now, uint32_t ttl_seconds, size_t quota_bytes);
+                          const Bytes& token_hash, int64_t now, uint32_t ttl_seconds, size_t quota_bytes);
 
     struct Stored {
         int64_t seq = 0;  // arrival order within the relay; only used to page through a mailbox
         Bytes id;
         int64_t deposited_at = 0;
+        Bytes token_hash;  // 32 bytes; all zero for envelopes stored before this was recorded
         Bytes envelope;
     };
     // Unexpired envelopes of one mailbox with seq greater than `after_seq`, oldest first.

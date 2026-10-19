@@ -9,6 +9,8 @@
 #include <iostream>
 #include <string>
 
+using Bytes = std::vector<uint8_t>;
+
 static int failures = 0;
 #define CHECK(cond, msg)                                              \
     do {                                                              \
@@ -277,6 +279,64 @@ static void test_contact_cards_v2() {
     CHECK(!decode_any_contact_card("hello world", &err) && !err.empty(), "non-card text is rejected with a message");
 }
 
+
+static void test_mailbox_bundles_and_cards_v3() {
+    std::cout << "Mailbox addresses in bundles, and contact cards version 3\n";
+    Identity alice = make_identity(), mallory = make_identity();
+    Bytes relay_id = CryptoEngine::random_bytes(32), mailbox = CryptoEngine::random_bytes(16), token = CryptoEngine::random_bytes(32);
+    BundleAddress addr{"10.8.0.1:9000", relay_id, mailbox};
+    auto raw = create_identity_bundle(alice.sig.public_key, alice.kem.public_key, "Alice", addr, 1700000000, alice.sig.private_key);
+
+    std::string err;
+    auto b = parse_identity_bundle(raw, &err);
+    CHECK(b && b->has_mailbox() && b->relay_hint == "10.8.0.1:9000" && b->relay_id == relay_id && b->mailbox_id == mailbox, "a bundle carries a signed mailbox address " + err);
+    auto plain = parse_identity_bundle(bundle_of(alice));
+    CHECK(plain && !plain->has_mailbox(), "a bundle without one has none");
+
+    auto tampered = raw;
+    CHECK(overwrite(tampered, mailbox, CryptoEngine::random_bytes(16)) && !parse_identity_bundle(tampered), "changing the mailbox ID breaks the signature");
+    auto swapped_relay = raw;
+    CHECK(overwrite(swapped_relay, relay_id, CryptoEngine::random_bytes(32)) && !parse_identity_bundle(swapped_relay), "changing the relay ID breaks the signature");
+
+    bool threw = false;
+    try { create_identity_bundle(alice.sig.public_key, alice.kem.public_key, "A", BundleAddress{"10.8.0.1:9000", relay_id, {}}, 1, alice.sig.private_key); } catch (...) { threw = true; }
+    CHECK(threw, "a half-specified mailbox address is refused at creation");
+    std::vector<std::pair<uint32_t, Bytes>> base = {{1, alice.sig.public_key}, {2, alice.kem.public_key}};
+    auto only_id = base; only_id.push_back({5, relay_id});
+    CHECK(!parse_identity_bundle(hand_made_bundle(alice, only_id)), "a signed bundle with only part of an address is rejected");
+    auto short_relay = base; short_relay.push_back({5, Bytes(31, 1)}); short_relay.push_back({6, mailbox}); short_relay.push_back({16, Bytes{'a', ':', '1'}});
+    CHECK(!parse_identity_bundle(hand_made_bundle(alice, short_relay)), "a relay ID of the wrong length is rejected even when signed");
+    auto duplicated = base; duplicated.push_back({6, mailbox}); duplicated.push_back({6, mailbox});
+    CHECK(!parse_identity_bundle(hand_made_bundle(alice, duplicated)), "a duplicated mailbox field is rejected");
+
+    // Cards version 3.
+    std::string card = encode_contact_card_v3(raw, token);
+    CHECK(card.rfind("pqft-contact-3:", 0) == 0 && card.find_first_of(" \n\t") == std::string::npos && looks_like_contact_card(card), "v3 prefix, one line, recognised");
+    auto d = decode_any_contact_card(card, &err);
+    CHECK(d && d->bundle && d->bundle->has_mailbox() && d->send_token == token && d->pub_dsa == alice.sig.public_key && d->server == "10.8.0.1:9000", "round trip with the send token " + err);
+
+    std::string wrapped;
+    for (size_t i = 0; i < card.size(); i += 70) wrapped += card.substr(i, 70) + "\n   ";
+    CHECK(decode_any_contact_card(wrapped).has_value(), "survives wrapping");
+    int undetected = 0;
+    for (size_t pos : {20u, 400u, 2000u, 3500u, (unsigned)card.size() - 1}) { std::string bad = card; bad[pos] = bad[pos] == 'A' ? 'B' : 'A'; if (decode_any_contact_card(bad)) undetected++; }
+    CHECK(undetected == 0, "single-character corruption is detected");
+
+    auto forged_raw = raw;
+    overwrite(forged_raw, alice.kem.public_key, mallory.kem.public_key);
+    CHECK(!decode_any_contact_card(encode_contact_card_v3(forged_raw, token), &err) && err.find("signature") != std::string::npos, "the key-swap attack on a v3 card is refused: " + err);
+
+    auto no_token = decode_any_contact_card(encode_contact_card_v3(raw, {}));
+    CHECK(no_token && no_token->send_token.empty() && no_token->bundle, "a card without a token is valid (it just can't be used to deposit)");
+    CHECK(!decode_any_contact_card(encode_contact_card_v3(raw, Bytes(5, 1))), "a token of the wrong length is rejected");
+
+    // The token is deliberately outside the signature: someone could swap it, and the effect is only that deposits are refused.
+    auto other_token = decode_any_contact_card(encode_contact_card_v3(raw, CryptoEngine::random_bytes(32)));
+    CHECK(other_token && other_token->bundle && other_token->bundle->raw == raw, "the identity bundle inside is untouched by whatever token travels with it");
+
+    CHECK(decode_any_contact_card("old: " + encode_contact_card_v2(bundle_of(alice, "Old")) + " new: " + card)->bundle->has_mailbox(), "when several versions are present, the newest is used");
+}
+
 static void test_names() {
     std::cout << "Contact name sanitising\n";
     for (std::string raw : std::vector<std::string>{"Alice", "../keys", "..", ".hidden", "CON", "self", "Zo\xC3\xAB",
@@ -296,6 +356,7 @@ int main() {
     test_contact_cards();
     test_identity_bundle();
     test_contact_cards_v2();
+    test_mailbox_bundles_and_cards_v3();
     test_names();
     std::cout << (failures ? "\nFAILURES: " : "\nAll checks passed. ") << failures << "\n";
     return failures ? 1 : 0;

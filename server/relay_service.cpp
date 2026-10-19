@@ -170,7 +170,7 @@ bool RelayService::push_pending(socket_t sock, const Bytes& mailbox, int64_t& la
         auto batch = store_->fetch(mailbox, last_seq, unix_now(), 32);
         if (batch.empty()) return true;
         for (auto& e : batch) {
-            StoredEnvelope out{e.id, static_cast<uint64_t>(e.deposited_at), e.envelope};
+            StoredEnvelope out{e.id, static_cast<uint64_t>(e.deposited_at), e.token_hash, e.envelope};
             if (!send_message(sock, MessageType::RELAY_ENVELOPE, encode(out))) return false;
             last_seq = e.seq;
         }
@@ -196,8 +196,8 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
 
     std::optional<Bytes> mailbox;  // set once the client has proven it owns one
     auto kick = std::make_shared<std::atomic<bool>>(false);
-    auto release = make_scope_exit([&] { if (mailbox) release_owner(*mailbox, kick); });
-    bool challenge_used = false, collecting = false;
+    bool challenge_used = false, collecting = false, is_owner = false;
+    auto release = make_scope_exit([&] { if (mailbox && is_owner) release_owner(*mailbox, kick); });
     int64_t last_seq = 0;
     auto last_activity = std::chrono::steady_clock::now();
 
@@ -256,7 +256,6 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                         return;
                     }
                     mailbox = m->mailbox_id;
-                    install_owner(*mailbox, kick);
                     if (!send_message(sock, MessageType::RELAY_AUTH_OK, {})) return;
                     break;
                 }
@@ -273,7 +272,7 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
 
                     Bytes envelope_id = CryptoEngine::random_bytes(ENVELOPE_ID_BYTES);
                     uint32_t ttl = m->ttl_seconds > MAX_TTL_SECONDS ? MAX_TTL_SECONDS : m->ttl_seconds;
-                    if (store_->deposit(m->mailbox_id, envelope_id, m->envelope, now, ttl, limits_.mailbox_quota_bytes) ==
+                    if (store_->deposit(m->mailbox_id, envelope_id, m->envelope, token_hash, now, ttl, limits_.mailbox_quota_bytes) ==
                         RelayStore::DepositResult::MailboxFull) {
                         send_error(sock, "Mailbox is full");
                         break;
@@ -284,6 +283,9 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
 
                 case MessageType::RELAY_COLLECT:
                     if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    // Only the connection that receives deliveries is "the" owner connection: a newer one
+                    // replaces it. Other signed-in connections (acknowledging, managing tokens) coexist.
+                    if (!is_owner) { install_owner(*mailbox, kick); is_owner = true; }
                     collecting = true;
                     last_seq = 0;  // a new collect re-sends anything not yet acknowledged
                     if (!push_pending(sock, *mailbox, last_seq)) return;

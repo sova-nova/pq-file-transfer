@@ -139,6 +139,27 @@ CryptoEngine::SessionKeys CryptoEngine::derive_session_keys(const std::vector<ui
     return keys;
 }
 
+std::vector<uint8_t> CryptoEngine::hkdf_sha256(const std::vector<uint8_t>& ikm, const std::vector<uint8_t>& salt,
+                                               const std::string& info, size_t length) {
+    if (ikm.empty() || length == 0 || length > 255 * 32) throw std::runtime_error("Invalid key derivation input");
+    static const uint8_t no_salt = 0;
+    PkeyCtxPtr pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), &EVP_PKEY_CTX_free);
+    if (!pctx ||
+        EVP_PKEY_derive_init(pctx.get()) <= 0 ||
+        EVP_PKEY_CTX_set_hkdf_md(pctx.get(), EVP_sha256()) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_salt(pctx.get(), salt.empty() ? &no_salt : salt.data(), static_cast<int>(salt.size())) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_key(pctx.get(), ikm.data(), static_cast<int>(ikm.size())) <= 0 ||
+        EVP_PKEY_CTX_add1_hkdf_info(pctx.get(), reinterpret_cast<const unsigned char*>(info.data()), static_cast<int>(info.size())) <= 0)
+        throw std::runtime_error("HKDF setup failed");
+    std::vector<uint8_t> out(length);
+    size_t out_len = out.size();
+    if (EVP_PKEY_derive(pctx.get(), out.data(), &out_len) <= 0 || out_len != out.size()) {
+        secure_wipe(out);
+        throw std::runtime_error("HKDF derivation failed");
+    }
+    return out;
+}
+
 std::vector<uint8_t> CryptoEngine::encrypt(const std::vector<uint8_t>& key,
                                            const std::vector<uint8_t>& nonce,
                                            const std::vector<uint8_t>& plaintext,

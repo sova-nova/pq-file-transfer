@@ -59,6 +59,12 @@ public:
     static SessionKeys derive_session_keys(const std::vector<uint8_t>& shared_secret,
                                            const std::vector<uint8_t>& salt);
 
+    // General HKDF-SHA256. `info` is a label separating different uses of the same input key.
+    static std::vector<uint8_t> hkdf_sha256(const std::vector<uint8_t>& ikm,
+                                            const std::vector<uint8_t>& salt,
+                                            const std::string& info,
+                                            size_t length);
+
     // AES-256-GCM. Output is ciphertext || 16-byte tag.
     static std::vector<uint8_t> encrypt(const std::vector<uint8_t>& key,
                                         const std::vector<uint8_t>& nonce,
