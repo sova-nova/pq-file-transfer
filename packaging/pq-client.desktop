@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PQ File Transfer
+Comment=Post-quantum end-to-end encrypted file transfer
+Exec=pq-client
+Icon=pq-client
+Categories=Network;FileTransfer;
+Terminal=false

@@ -1,0 +1,170 @@
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]        # e.g. git tag v0.2.0 && git push origin v0.2.0
+  workflow_dispatch:     # manual run: builds everything but does not publish
+
+env:
+  # liboqs release tag to build. Must include ML-KEM-768 and ML-DSA-65 (0.12.0+ recommended).
+  LIBOQS_VERSION: "0.12.0"
+  QT_VERSION: "6.7.*"
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04   # oldest runner image = widest glibc compatibility
+    env:
+      APPIMAGE_EXTRACT_AND_RUN: 1   # lets linuxdeploy run without FUSE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libfontconfig1 libdbus-1-3
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Restore liboqs
+        id: oqs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/liboqs-install
+          key: liboqs-${{ runner.os }}-${{ env.LIBOQS_VERSION }}-v1
+
+      - name: Build liboqs (static, minimal)
+        if: steps.oqs-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/liboqs-install" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOQS_DIST_BUILD=ON \
+            -DOQS_USE_OPENSSL=OFF \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65"
+          cmake --build liboqs/build -j"$(nproc)"
+          cmake --install liboqs/build
+
+      - name: Build pq-client and pq-server
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$HOME/liboqs-install"
+          cmake --build build -j"$(nproc)"
+
+      - name: Package AppImage
+        run: |
+          BASE=https://github.com/linuxdeploy
+          wget -q $BASE/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q $BASE/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:$LD_LIBRARY_PATH"
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --executable build/pq-client \
+            --desktop-file packaging/pq-client.desktop \
+            --icon-file packaging/pq-client.png \
+            --plugin qt --output appimage
+          mkdir dist
+          mv PQ_File_Transfer*.AppImage dist/PQ-File-Transfer-linux-x86_64.AppImage
+          cp build/pq-server dist/pq-server-linux-x86_64
+          chmod +x dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: OpenSSL (static, via vcpkg)
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openssl:x64-windows-static-md
+
+      - name: Restore liboqs
+        id: oqs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/liboqs-install
+          key: liboqs-${{ runner.os }}-${{ env.LIBOQS_VERSION }}-v1
+
+      - name: Build liboqs (static, minimal)
+        if: steps.oqs-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git
+          cmake -S liboqs -B liboqs/build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$HOME")/liboqs-install" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DOQS_DIST_BUILD=ON \
+            -DOQS_USE_OPENSSL=OFF \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65"
+          cmake --build liboqs/build --config Release
+          cmake --install liboqs/build --config Release
+
+      - name: Build pq-client and pq-server
+        run: |
+          QT="$(cygpath -m "$QT_ROOT_DIR")"
+          OQS="$(cygpath -m "$HOME")/liboqs-install"
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$QT;$OQS" \
+            -DCMAKE_TOOLCHAIN_FILE="$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          cmake --build build --config Release
+
+      - name: Package zip
+        run: |
+          mkdir -p PQ-File-Transfer
+          cp build/Release/pq-client.exe build/Release/pq-server.exe PQ-File-Transfer/
+          windeployqt --release --no-translations --compiler-runtime PQ-File-Transfer/pq-client.exe
+          mkdir dist
+          7z a -tzip dist/PQ-File-Transfer-windows-x64.zip PQ-File-Transfer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  release:
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          ls -l
+          gh release create "$GITHUB_REF_NAME" * \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
