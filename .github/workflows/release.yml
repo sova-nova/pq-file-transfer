@@ -16,7 +16,7 @@ jobs:
     env:
       APPIMAGE_EXTRACT_AND_RUN: 1   # lets linuxdeploy run without FUSE
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: System packages
         run: |
@@ -33,7 +33,7 @@ jobs:
 
       - name: Restore liboqs
         id: oqs-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/liboqs-install
           key: liboqs-${{ runner.os }}-${{ env.LIBOQS_VERSION }}-v1
@@ -77,7 +77,7 @@ jobs:
           cp build/pq-server dist/pq-server-linux-x86_64
           chmod +x dist/*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
@@ -88,7 +88,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -103,7 +103,7 @@ jobs:
 
       - name: Restore liboqs
         id: oqs-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/liboqs-install
           key: liboqs-${{ runner.os }}-${{ env.LIBOQS_VERSION }}-v1
@@ -140,7 +140,7 @@ jobs:
           mkdir dist
           7z a -tzip dist/PQ-File-Transfer-windows-x64.zip PQ-File-Transfer
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
@@ -152,7 +152,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
