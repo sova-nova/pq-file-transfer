@@ -53,11 +53,15 @@ jobs:
           cmake --build liboqs/build -j"$(nproc)"
           cmake --install liboqs/build
 
-      - name: Build pq-client and pq-server
+      - name: Build pq-client, pq-server and tests
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPQ_BUILD_TESTS=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$HOME/liboqs-install"
           cmake --build build -j"$(nproc)"
+
+      # Runs against the real liboqs. A failing test stops the release.
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
 
       - name: Package AppImage
         run: |

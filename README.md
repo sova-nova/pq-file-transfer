@@ -122,10 +122,12 @@ The Windows build has not been tested yet.
 ### 1. Run the relay server
 
 ```bash
-./pq-server [--port 9000] [--storage DIR] [--quota-gb 50]
+./pq-server [--port 9000] [--bind ADDR] [--storage DIR] [--quota-gb 50]
 ```
 
-The server listens on TCP port 9000. Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or after 24 hours. Complete transfers survive a server restart.
+The server listens on TCP port 9000. Transfers are kept in a per-user temporary directory, which you can override with `--storage` or `PQ_STORAGE_DIR`. Each transfer is deleted once its recipient confirms it, or 24 hours after it was uploaded. Complete transfers survive a server restart, and their 24 hours keep counting while the server is down: anything already past it is deleted at startup.
+
+`--bind ADDR` limits the server to one IPv4 address. If you reach it over WireGuard, bind it to the tunnel address (for example `--bind 10.8.0.1`) so that it never listens on your LAN or the internet, even if a firewall rule is wrong. The default, `0.0.0.0`, listens on every interface.
 
 To reach the server over the internet, forward its port, or run it on a small VPS. Traffic to the server is not TLS-encrypted, but everything sensitive is already end-to-end encrypted. An observer can see sizes, timing and transfer IDs.
 
@@ -135,19 +137,43 @@ Run `./pq-client`. On first run it generates your keypairs in `~/.pq-file-transf
 
 **Back up your `keys` folder.** If you lose it, you can't receive anything sent to your old keys, and every contact has to re-add you.
 
-### 3. Exchange keys with a contact
+### 3. Add a contact
 
-- Click **Export My Public Keys…** and send the two `.key` files to your contact. They are public, so any channel is fine.
-- Click **+**, enter a name, and select their two key files.
-- **Compare the fingerprint shown with your contact over a call or in person** before confirming.
+The easiest way is a **contact card**: one line of text that holds a name, both public keys and your relay server.
+
+1. **Copy My Contact Card**, then paste it into a message to your contact.
+2. They click **+** and choose **Paste contact card…**. (If a card is already on their clipboard it is filled in for them.)
+3. **Compare the fingerprint shown with your contact over a call or in person** before confirming. A card is public and anyone could have made one, so this check is what makes it trustworthy.
+4. If the card names a relay server different from theirs, the app asks before switching. It never switches silently.
+
+Do this in both directions: each of you needs the other as a contact, so that you can send to them and recognise files from them.
+
+The older method still works: **Export Key Files…** saves two `.key` files, and **+** → **Choose key files…** adds them.
 
 ### 4. Send a file
 
-Choose the contact under **Send to**, click **Send File**, and pick a file. Then click **Copy Transfer ID** and send the ID to the recipient.
+Choose the contact under **Send to**, click **Send File**, and pick a file. Then click **Copy Share Link** and send the link to the recipient. It looks like `pqft://10.8.0.1/0123abcd…` and includes the relay server. **Copy Transfer ID** gives just the 32-character ID if you prefer.
+
+The link or ID lets anyone download the encrypted file, but only the recipient can decrypt it. Send it over any channel.
 
 ### 5. Receive a file
 
-Click **Receive File** and paste the transfer ID. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
+Click **Receive File** and paste the share link (or the bare transfer ID). If the link names a different relay server than yours, the app asks which one to use. The file is verified, decrypted, and saved to the `downloads` folder (click **Open Downloads** to view it). Existing files are never overwritten. A new copy is saved as `name (1).ext`.
+
+## Tests
+
+The tests need liboqs but not Qt:
+
+```bash
+cmake -S . -B build -DPQ_BUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+- `sharing` checks server addresses, contact cards and share links, including damaged and hostile input.
+- `e2e` starts a real `pq-server` and runs transfers between three simulated users (Linux and macOS only). It covers wrong recipients, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
+
+The release workflow runs the same tests against the real liboqs before it publishes anything.
 
 ## Protocol version
 

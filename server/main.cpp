@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -118,6 +119,18 @@ static void remove_dir_quietly(const fs::path& dir) {
 // Bytes a transfer occupies on disk (ciphertext + tags + header), used for the quota.
 static uint64_t storage_cost(const FileHeader& h, size_t header_bytes) {
     return h.file_size + static_cast<uint64_t>(h.total_chunks) * AEAD_TAG_SIZE + header_bytes;
+}
+
+// How long ago a transfer was uploaded, judged by its header file's modification
+// time. Used on startup so that restarting the server doesn't give every stored
+// transfer a fresh 24 hours.
+static Clock::duration transfer_age_on_disk(const fs::path& header_file) {
+    std::error_code ec;
+    auto mtime = fs::last_write_time(header_file, ec);
+    if (ec) return Clock::duration::zero();
+    auto age = fs::file_time_type::clock::now() - mtime;
+    if (age < decltype(age)::zero()) return Clock::duration::zero();
+    return std::chrono::duration_cast<Clock::duration>(age);
 }
 
 // --- Upload ---
@@ -420,7 +433,7 @@ static void restore_transfers() {
         if (entry.is_directory(ec) && is_lower_hex(name, TRANSFER_ID_HEX_LEN)) dirs.push_back(entry.path());
     }
 
-    size_t restored = 0, removed = 0;
+    size_t restored = 0, removed = 0, expired = 0;
     for (const auto& dir : dirs) {
         std::string id = dir.filename().string();
         auto bytes = read_whole_file(dir / "header.bin", MAX_HEADER_MESSAGE);
@@ -434,8 +447,14 @@ static void restore_transfers() {
         }
 
         if (complete) {
+            Clock::duration age = transfer_age_on_disk(dir / "header.bin");
+            if (age > TRANSFER_TTL) {
+                remove_dir_quietly(dir);
+                expired++;
+                continue;
+            }
             uint64_t cost = storage_cost(*header, bytes->size());
-            g_transfers[id] = StoredTransfer{*header, dir, Clock::now(), cost, false};
+            g_transfers[id] = StoredTransfer{*header, dir, Clock::now() - age, cost, false};
             g_reserved_bytes += cost;
             restored++;
         } else {
@@ -443,21 +462,27 @@ static void restore_transfers() {
             removed++;
         }
     }
-    if (restored || removed)
-        std::cout << "Restored " << restored << " transfer(s), removed " << removed << " incomplete" << std::endl;
+    if (restored || removed || expired)
+        std::cout << "Restored " << restored << " transfer(s), removed " << removed
+                  << " incomplete and " << expired << " expired" << std::endl;
 }
 
 // --- Main ---
 
 static void print_usage(const char* prog) {
-    std::cout << "Usage: " << prog << " [--port N] [--storage DIR] [--quota-gb N]\n"
+    std::cout << "Usage: " << prog << " [--port N] [--bind ADDR] [--storage DIR] [--quota-gb N]\n"
               << "  --port N       TCP port to listen on (default " << DEFAULT_PORT << ")\n"
+              << "  --bind ADDR    IPv4 address to listen on (default 0.0.0.0, all interfaces).\n"
+              << "                 Use your WireGuard address, e.g. 10.8.0.1, to accept tunnel traffic only\n"
               << "  --storage DIR  where encrypted transfers are kept (default: temp dir, or $PQ_STORAGE_DIR)\n"
               << "  --quota-gb N   max total storage in GiB (default " << DEFAULT_QUOTA_GB << ")\n";
 }
 
 int main(int argc, char* argv[]) {
     uint16_t port = DEFAULT_PORT;
+    std::string bind_text = "0.0.0.0";
+    in_addr bind_addr{};
+    bind_addr.s_addr = htonl(INADDR_ANY);
     const char* env_dir = std::getenv("PQ_STORAGE_DIR");
     g_storage_dir = (env_dir && *env_dir) ? fs::path(env_dir) : default_storage_dir();
 
@@ -469,6 +494,10 @@ int main(int argc, char* argv[]) {
                 unsigned long p = std::stoul(argv[++i]);
                 if (p == 0 || p > 65535) throw std::out_of_range("port");
                 port = static_cast<uint16_t>(p);
+            } else if (arg == "--bind" && has_value) {
+                bind_text = argv[++i];
+                if (inet_pton(AF_INET, bind_text.c_str(), &bind_addr) != 1)
+                    throw std::invalid_argument("bind");
             } else if (arg == "--storage" && has_value) {
                 g_storage_dir = fs::path(argv[++i]);
             } else if (arg == "--quota-gb" && has_value) {
@@ -504,11 +533,11 @@ int main(int argc, char* argv[]) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr = bind_addr;
     addr.sin_port = htons(port);
 
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR_VAL) {
-        std::cerr << "Failed to bind to port " << port << std::endl;
+        std::cerr << "Failed to bind to " << bind_text << ":" << port << std::endl;
         close_socket(server_fd);
         platform_cleanup();
         return 1;
@@ -523,7 +552,9 @@ int main(int argc, char* argv[]) {
 
     std::thread(cleanup_loop).detach();
 
-    std::cout << "PQ Relay Server listening on port " << port << std::endl;
+    std::cout << "PQ Relay Server listening on " << bind_text << ":" << port << std::endl;
+    if (bind_text == "0.0.0.0")
+        std::cout << "Note: listening on all interfaces. Use --bind to restrict it (e.g. to a WireGuard address)." << std::endl;
     std::cout << "Press Ctrl+C to stop." << std::endl;
 
     while (true) {

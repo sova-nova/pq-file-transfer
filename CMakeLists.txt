@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pq-file-transfer VERSION 0.2.0 LANGUAGES CXX)
+project(pq-file-transfer VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,8 @@ endif()
 # The relay server has no GUI or liboqs dependency, so it can be built alone
 # on a headless machine with -DPQ_BUILD_CLIENT=OFF.
 option(PQ_BUILD_CLIENT "Build the Qt client" ON)
+# Tests need liboqs (but not Qt). Run them with: ctest --test-dir build --output-on-failure
+option(PQ_BUILD_TESTS "Build the test suite" OFF)
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL 1.1.1 REQUIRED)
@@ -40,11 +42,8 @@ add_executable(pq-server server/main.cpp)
 target_link_libraries(pq-server PRIVATE protocol Threads::Threads OpenSSL::Crypto)
 pq_warnings(pq-server)
 
-# --- Client (Qt 6 + liboqs + OpenSSL) ---
-if(PQ_BUILD_CLIENT)
-    set(CMAKE_AUTOMOC ON)
-    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
-
+# --- Client core (everything except the GUI): needs liboqs + OpenSSL ---
+if(PQ_BUILD_CLIENT OR PQ_BUILD_TESTS)
     # Prefer liboqs's installed CMake package; fall back to a manual search.
     find_package(liboqs CONFIG QUIET)
     if(TARGET OQS::oqs)
@@ -63,22 +62,47 @@ if(PQ_BUILD_CLIENT)
         set(PQ_OQS pq_oqs)
     endif()
 
+    add_library(pq_core STATIC
+        client/crypto_engine.cpp
+        client/key_store.cpp
+        client/transfer_engine.cpp
+        client/sharing.cpp
+    )
+    target_include_directories(pq_core PUBLIC ${CMAKE_SOURCE_DIR}/client)
+    target_link_libraries(pq_core PUBLIC protocol Threads::Threads ${PQ_OQS} OpenSSL::Crypto)
+    pq_warnings(pq_core)
+endif()
+
+# --- Qt GUI client ---
+if(PQ_BUILD_CLIENT)
+    set(CMAKE_AUTOMOC ON)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+
     add_executable(pq-client
         client/main.cpp
         client/main_window.h
         client/main_window.cpp
-        client/transfer_engine.cpp
-        client/crypto_engine.cpp
-        client/key_store.cpp
     )
-    target_link_libraries(pq-client PRIVATE
-        protocol
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Widgets
-        Threads::Threads
-        ${PQ_OQS}
-        OpenSSL::Crypto
-    )
+    target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets)
     pq_warnings(pq-client)
+endif()
+
+# --- Tests ---
+if(PQ_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(pq-test-sharing tests/test_sharing.cpp)
+    target_link_libraries(pq-test-sharing PRIVATE pq_core)
+    pq_warnings(pq-test-sharing)
+    add_test(NAME sharing COMMAND pq-test-sharing)
+
+    # The end-to-end test starts a real pq-server and uses fork/exec, so POSIX only.
+    if(NOT WIN32)
+        add_executable(pq-test-e2e tests/test_e2e.cpp)
+        target_link_libraries(pq-test-e2e PRIVATE pq_core)
+        pq_warnings(pq-test-e2e)
+        add_dependencies(pq-test-e2e pq-server)
+        add_test(NAME e2e COMMAND pq-test-e2e $<TARGET_FILE:pq-server>)
+        set_tests_properties(e2e PROPERTIES TIMEOUT 120)
+    endif()
 endif()

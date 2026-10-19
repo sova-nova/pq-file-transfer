@@ -1,0 +1,8 @@
+set(__QT_DEPLOY_TARGET_protocol_FILE /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/libprotocol.a)
+set(__QT_DEPLOY_TARGET_protocol_TYPE STATIC_LIBRARY)
+set(__QT_DEPLOY_TARGET_pq-server_FILE /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/pq-server)
+set(__QT_DEPLOY_TARGET_pq-server_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_pq_core_FILE /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/libpq_core.a)
+set(__QT_DEPLOY_TARGET_pq_core_TYPE STATIC_LIBRARY)
+set(__QT_DEPLOY_TARGET_pq-client_FILE /home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/pq-client)
+set(__QT_DEPLOY_TARGET_pq-client_TYPE EXECUTABLE)

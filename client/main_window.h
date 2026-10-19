@@ -6,10 +6,12 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "key_store.h"
+#include "sharing.h"
 #include "transfer_engine.h"
 
 class QComboBox;
@@ -32,10 +34,12 @@ private:
     QComboBox* recipient_combo_ = nullptr;
     QPushButton* add_contact_button_ = nullptr;
     QPushButton* remove_contact_button_ = nullptr;
+    QPushButton* copy_card_button_ = nullptr;
     QPushButton* export_keys_button_ = nullptr;
     QPushButton* send_button_ = nullptr;
     QPushButton* receive_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
+    QPushButton* copy_link_button_ = nullptr;
     QPushButton* copy_id_button_ = nullptr;
     QPushButton* open_downloads_button_ = nullptr;
     QProgressBar* progress_bar_ = nullptr;
@@ -46,12 +50,23 @@ private:
     std::thread worker_thread_;
     std::atomic<bool> busy_{false};
     QString current_transfer_id_;
+    QString current_share_link_;
+    ServerAddress last_server_;  // relay used for the most recent upload
 
     void start_send();
     void start_receive();
     void add_contact();
+    void add_contact_from_card();
+    void add_contact_from_files();
+    std::optional<QString> ask_contact_name(const QString& suggested);
+    void finish_add_contact(const QString& name,
+                            const std::vector<uint8_t>& pub_kem,
+                            const std::vector<uint8_t>& pub_dsa,
+                            const std::string& card_server);
     void remove_contact();
+    void copy_contact_card();
     void export_keys();
+    void copy_share_link();
     void copy_transfer_id();
     void open_downloads();
     void refresh_contacts();
