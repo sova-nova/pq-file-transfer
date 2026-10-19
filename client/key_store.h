@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "identity_bundle.h"
+
 // Manages this user's keypairs and the public keys of their contacts.
 //
 // Layout (POSIX: ~/.pq-file-transfer, Windows: %USERPROFILE%\pq-file-transfer):
@@ -25,6 +27,12 @@ public:
         std::vector<uint8_t> pub_kem;
         std::vector<uint8_t> pub_dsa;
         std::string fingerprint;  // SHA-256 of pub_dsa, lowercase hex
+
+        // True if pub_kem is bound to pub_dsa by a valid signed identity bundle. Contacts added
+        // from an older (v1) card or from key files are false: their encryption key could have
+        // been swapped in transit without the fingerprint check noticing.
+        bool kem_verified = false;
+        uint64_t bundle_issued_at = 0;  // when the bundle was made; 0 if there is none
     };
 
     // Throws std::runtime_error if no home directory can be determined.
@@ -87,10 +95,37 @@ public:
     static bool is_valid_contact_name(const std::string& name);
 
     // Validates the name and key sizes; throws std::runtime_error with a
-    // user-facing message on failure. Overwrites an existing contact.
+    // user-facing message on failure. Overwrites an existing contact. The contact is saved as
+    // "encryption key not verified", and any bundle stored for a previous version is removed.
     void save_contact(const std::string& name,
                       const std::vector<uint8_t>& pub_kem,
                       const std::vector<uint8_t>& pub_dsa);
+
+    // Saves a contact from a verified identity bundle (see parse_identity_bundle), with the
+    // encryption key marked verified. Overwrites an existing contact of that name.
+    void save_contact_bundle(const std::string& name, const IdentityBundle& bundle);
+
+    // Signs a fresh bundle of this user's public keys. Needs the private signing key, so the
+    // keys must be unlocked; throws with a user-facing message otherwise.
+    std::vector<uint8_t> make_own_bundle(const std::string& display_name,
+                                         const std::string& relay_hint = std::string()) const;
+
+    // What to do with a bundle whose signing key may already belong to a contact.
+    enum class BundleImportResult {
+        UnknownIdentity,  // nobody saved has this signing key; the caller adds a new contact
+        Updated,          // a newer bundle from a known identity replaced the old one
+        Unchanged,        // already have this bundle, or a newer one with the same keys
+        Stale             // older than what is saved and with a different encryption key: ignored
+    };
+    struct BundleImport {
+        BundleImportResult result = BundleImportResult::UnknownIdentity;
+        std::string contact_name;
+        bool encryption_key_changed = false;  // the saved encryption key was replaced
+        bool was_unverified = false;          // the contact had no bundle before
+    };
+    // A newer bundle signed by an already-saved signing key updates that contact without
+    // asking: only the owner of the signing key can produce one.
+    BundleImport import_bundle_for_known_identity(const IdentityBundle& bundle);
 
     // Returns std::nullopt if the contact is missing or its keys are invalid.
     std::optional<Contact> load_contact(const std::string& name) const;

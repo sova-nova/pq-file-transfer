@@ -2,7 +2,12 @@ pq-client_autogen/timestamp: \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/CMakeFiles/4.3.0/CMakeCXXCompiler.cmake \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/CMakeFiles/4.3.0/CMakeSystem.cmake \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/CMakeLists.txt \
+	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/identity_bundle.h \
+	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/key_dialogs.cpp \
+	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/key_dialogs.h \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/key_store.h \
+	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/keychain.cpp \
+	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/keychain.h \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main.cpp \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.cpp \
 	/home/sokosova/personal/projects/coding-projects/pq-file-transfer/pq-file-transfer/client/main_window.h \

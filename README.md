@@ -179,16 +179,20 @@ Nothing needs configuring. The one catch is Linux: a keyring service must be run
 
 ### 3. Add a contact
 
-The easiest way is a **contact card**: one line of text that holds a name, both public keys and your relay server.
+The easiest way is a **contact card**: one line of text that holds a name, your public keys and your relay server, signed with your identity key.
 
 1. **Copy My Contact Card**, then paste it into a message to your contact.
 2. They click **+** and choose **Paste contact card…**. (If a card is already on their clipboard it is filled in for them.)
-3. **Compare the fingerprint shown with your contact over a call or in person** before confirming. A card is public and anyone could have made one, so this check is what makes it trustworthy.
+3. **Compare the fingerprint shown with your contact over a call or in person** before confirming. A signature proves a card wasn't altered on the way, but not who made it, so this check is what makes it trustworthy.
 4. If the card names a relay server different from theirs, the app asks before switching. It never switches silently.
 
 Do this in both directions: each of you needs the other as a contact, so that you can send to them and recognise files from them.
 
-The older method still works: **Export Key Files…** saves two `.key` files, and **+** → **Choose key files…** adds them.
+**Why cards are signed.** Your fingerprint is a hash of your signing key. Before version 0.5, a card carried the encryption key unsigned, so someone who altered a card in transit could keep your signing key (the fingerprint still matched) and substitute their own encryption key, and then read files sent to you. Now the card is a signed *identity bundle* that binds the two keys together, and any change to the encryption key breaks the signature. Fingerprints did not change, so contacts you already verified stay verified.
+
+**Older contacts.** Contacts added from a version 1 card or from key files show **(key not verified)** in the list, and the app asks you to confirm before sending to them. Ask them to update and send a new card. Importing it repairs the contact in place, with no new fingerprint check needed (the signing key is the same), and replaces the saved encryption key if it was different. Newer cards from people you already have are applied the same way, which also covers someone rotating their encryption key. A card with a different signing key is a key change, and the app asks you to verify the new fingerprint again.
+
+The older method still works: **Export Key Files…** saves two `.key` files, and **+** → **Choose key files…** adds them. Contacts added that way are marked as not verified.
 
 ### 4. Send a file
 
@@ -210,7 +214,8 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-- `sharing` checks server addresses, contact cards and share links, including damaged and hostile input.
+- `sharing` checks server addresses, contact cards (both versions) and share links, and signed identity bundles, including damaged and hostile input and the key-swap attack above.
+- `contacts` checks verified and unverified contacts and the rules for importing newer, older and rotated bundles (Linux and macOS only).
 - `keys` checks the passphrase protection: the encrypted file format (including tampering, swapped files and hostile settings) and locking, unlocking, changing and removing the passphrase, including a crash in the middle of protecting (Linux and macOS only).
 - `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
 

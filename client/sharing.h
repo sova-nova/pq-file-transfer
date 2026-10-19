@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "identity_bundle.h"
+
 // Everything about turning identities and transfers into text that can be
 // pasted into a chat or email: server addresses, contact cards and share links.
 // No GUI dependencies, so it can be unit-tested.
@@ -47,7 +49,29 @@ std::string encode_contact_card(const ContactCard& card);
 // (if `error` is non-null) a message suitable for showing to the user.
 std::optional<ContactCard> decode_contact_card(const std::string& text, std::string* error = nullptr);
 
-bool looks_like_contact_card(const std::string& text);
+bool looks_like_contact_card(const std::string& text);  // either version
+
+// --- Contact cards, version 2 ---
+//
+// "pqft-contact-2:<base64url>" holds a signed identity bundle (see identity_bundle.h) plus the
+// same copy/paste checksum. Unlike a v1 card, its encryption key is bound to the signing key,
+// so altering it in transit breaks the signature.
+
+std::string encode_contact_card_v2(const std::vector<uint8_t>& bundle_raw);
+
+// What importing either kind of card yields. `bundle` is set for v2 cards only; a contact
+// added from a card without one has an encryption key nobody has verified.
+struct ImportedCard {
+    std::string name;                // suggested name (untrusted text)
+    std::vector<uint8_t> pub_kem;
+    std::vector<uint8_t> pub_dsa;
+    std::string server;              // optional suggested relay; "" if none
+    std::optional<IdentityBundle> bundle;
+};
+
+// Decodes a v2 or v1 card (v2 preferred if both appear). On failure returns std::nullopt and,
+// if `error` is non-null, a message suitable for showing to the user.
+std::optional<ImportedCard> decode_any_contact_card(const std::string& text, std::string* error = nullptr);
 
 // Turns an untrusted display name into something KeyStore accepts as a contact name.
 std::string sanitize_contact_name(const std::string& raw);

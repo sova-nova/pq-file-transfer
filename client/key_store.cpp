@@ -3,6 +3,7 @@
 #include "scope_exit.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -308,6 +309,7 @@ KeyStore::Contact KeyStore::self_contact() const {
     c.pub_kem = load_public_kem();
     c.pub_dsa = load_public_dsa();
     c.fingerprint = CryptoEngine::fingerprint(c.pub_dsa);
+    c.kem_verified = true;  // our own keys
     return c;
 }
 
@@ -362,8 +364,65 @@ void KeyStore::save_contact(const std::string& name,
     fs::create_directories(dir, ec);
     if (ec) throw std::runtime_error("Cannot create contact folder: " + ec.message());
 
+    // Remove any bundle first: after this the keys are unverified, and a crash in between must
+    // leave "unverified", never a stale bundle that no longer matches.
+    fs::remove(dir / "bundle", ec);
     write_file_atomic(dir / "pub_kem", pub_kem, false);
     write_file_atomic(dir / "pub_dsa", pub_dsa, false);
+}
+
+void KeyStore::save_contact_bundle(const std::string& name, const IdentityBundle& bundle) {
+    if (!is_valid_contact_name(name))
+        throw std::runtime_error("Invalid contact name. Use 1-64 letters, digits, spaces, '-', '_' or '.'");
+    if (bundle.raw.empty() || bundle.signing_key.size() != CryptoEngine::sig_public_key_size() ||
+        bundle.encryption_key.size() != CryptoEngine::kem_public_key_size())
+        throw std::runtime_error("This is not a valid identity bundle");
+
+    fs::path dir = *contact_dir(name);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) throw std::runtime_error("Cannot create contact folder: " + ec.message());
+
+    // Keys first, bundle last: if we crash in between, the old bundle no longer matches the new
+    // keys, so the contact reads as unverified rather than wrongly verified.
+    write_file_atomic(dir / "pub_kem", bundle.encryption_key, false);
+    write_file_atomic(dir / "pub_dsa", bundle.signing_key, false);
+    write_file_atomic(dir / "bundle", bundle.raw, false);
+}
+
+std::vector<uint8_t> KeyStore::make_own_bundle(const std::string& display_name,
+                                               const std::string& relay_hint) const {
+    auto signing_private = load_private_dsa();
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(signing_private); });
+    if (signing_private.size() != CryptoEngine::sig_secret_key_size())
+        throw std::runtime_error("Your keys are locked. Unlock them first");
+
+    auto signing_public = load_public_dsa();
+    auto encryption_public = load_public_kem();
+    return create_identity_bundle(signing_public, encryption_public, display_name, relay_hint,
+                                  static_cast<uint64_t>(std::time(nullptr)), signing_private);
+}
+
+KeyStore::BundleImport KeyStore::import_bundle_for_known_identity(const IdentityBundle& bundle) {
+    BundleImport result;
+    auto existing = find_contact_by_fingerprint(bundle.fingerprint());
+    if (!existing) return result;  // UnknownIdentity
+
+    result.contact_name = existing->name;
+    result.was_unverified = !existing->kem_verified;
+
+    if (existing->kem_verified && bundle.issued_at <= existing->bundle_issued_at) {
+        // Not newer than what we have. Harmless if it carries the same encryption key; if it
+        // carries a different one it is an old key being replayed, so it is ignored.
+        result.result = bundle.encryption_key == existing->pub_kem ? BundleImportResult::Unchanged
+                                                                   : BundleImportResult::Stale;
+        return result;
+    }
+
+    result.encryption_key_changed = bundle.encryption_key != existing->pub_kem;
+    save_contact_bundle(existing->name, bundle);
+    result.result = BundleImportResult::Updated;
+    return result;
 }
 
 std::optional<KeyStore::Contact> KeyStore::load_contact(const std::string& name) const {
@@ -378,6 +437,16 @@ std::optional<KeyStore::Contact> KeyStore::load_contact(const std::string& name)
         c.pub_dsa.size() != CryptoEngine::sig_public_key_size())
         return std::nullopt;
     c.fingerprint = CryptoEngine::fingerprint(c.pub_dsa);
+
+    // Verified only if a bundle exists, its signature is valid, and it names exactly these keys.
+    auto raw_bundle = read_file_bytes(*dir / "bundle");
+    if (!raw_bundle.empty()) {
+        auto bundle = parse_identity_bundle(raw_bundle);
+        if (bundle && bundle->signing_key == c.pub_dsa && bundle->encryption_key == c.pub_kem) {
+            c.kem_verified = true;
+            c.bundle_issued_at = bundle->issued_at;
+        }
+    }
     return c;
 }
 

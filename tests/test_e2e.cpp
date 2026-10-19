@@ -5,6 +5,7 @@
 #include "sharing.h"
 #include "transfer_engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -107,15 +108,19 @@ static Result recv(const std::string& user, const std::string& id) {
 
 static KeyStore::Contact contact_of(const std::string& user) { as(user); return KeyStore().self_contact(); }
 
-// Adds `user` to `owner`'s contacts the way the app does: through a contact card.
+// Adds `user` to `owner`'s contacts the way the app does: through a signed v2 contact card.
 static void add_contact_via_card(const std::string& owner, const std::string& name, const std::string& user) {
-    auto c = contact_of(user);
-    ContactCard card{name, c.pub_kem, c.pub_dsa, "127.0.0.1"};
+    as(user);
+    KeyStore local;
+    const KeyStore& ks = session_of(user) ? *session_of(user) : local;
+    std::string card = encode_contact_card_v2(ks.make_own_bundle(name, "127.0.0.1"));
+
     std::string err;
-    auto decoded = decode_contact_card(encode_contact_card(card), &err);
-    if (!decoded) { std::cout << "card decode failed: " << err << "\n"; failures++; return; }
+    auto decoded = decode_any_contact_card(card, &err);
+    if (!decoded || !decoded->bundle) { std::cout << "card decode failed: " << err << "\n"; failures++; return; }
     as(owner);
-    KeyStore().save_contact(sanitize_contact_name(decoded->name), decoded->pub_kem, decoded->pub_dsa);
+    KeyStore owner_ks;
+    owner_ks.save_contact_bundle(sanitize_contact_name(decoded->name), *decoded->bundle);
 }
 
 static bool no_part_files(const std::string& user) {
@@ -187,6 +192,13 @@ int main(int argc, char** argv) {
     add_contact_via_card("bob", "Alice", "alice");
     add_contact_via_card("alice", "Bob", "bob");
     auto bob = contact_of("bob");
+    {
+        as("bob");
+        auto a = KeyStore().load_contact("Alice");
+        as("alice");
+        auto b = KeyStore().load_contact("Bob");
+        CHECK(a && a->kem_verified && b && b->kem_verified, "contacts added from v2 cards have a verified encryption key");
+    }
 
     std::vector<uint8_t> big = CryptoEngine::random_bytes(300000);
     spit(ROOT / "big.bin", big);
@@ -312,7 +324,47 @@ int main(int argc, char** argv) {
         CHECK(d2.ok && slurp(d2.path) == big, "after unlocking, the kept transfer downloads fine (" + d2.error + ")");
     }
 
-    std::cout << "14. Key store hardening\n";
+    std::cout << "14. A man in the middle swaps the encryption key on a contact card\n";
+    {
+        // Mallory (Eve's keys) alters Alice's card on its way to a new contact, Dave.
+        as("alice");
+        KeyStore* alice_ks = session_of("alice");
+        auto genuine = alice_ks->make_own_bundle("Alice", "127.0.0.1");
+        auto eve_contact = contact_of("eve");
+        auto alice_contact = contact_of("alice");
+        auto forged_raw = genuine;
+        auto it = std::search(forged_raw.begin(), forged_raw.end(), alice_contact.pub_kem.begin(), alice_contact.pub_kem.end());
+        CHECK(it != forged_raw.end(), "(test setup) found the encryption key inside the card");
+        std::copy(eve_contact.pub_kem.begin(), eve_contact.pub_kem.end(), it);
+
+        std::string err;
+        auto forged = decode_any_contact_card(encode_contact_card_v2(forged_raw), &err);
+        CHECK(!forged, "the altered v2 card is refused (attacker even fixed the checksum): " + err);
+
+        // Same attack on a v1 card: accepted, same fingerprint, but flagged as unverified.
+        as("dave");
+        KeyStore().initialize_keys();
+        ContactCard old_style{"Alice", eve_contact.pub_kem, alice_contact.pub_dsa, ""};
+        auto imported = decode_any_contact_card(encode_contact_card(old_style), &err);
+        CHECK(imported && !imported->bundle, "the same attack on a v1 card gets through the importer, with no bundle");
+        if (imported) {
+            KeyStore dave;
+            dave.save_contact("Alice", imported->pub_kem, imported->pub_dsa);
+            auto c = dave.load_contact("Alice");
+            CHECK(c && !c->kem_verified && c->fingerprint == alice_contact.fingerprint,
+                  "Dave's app would show Alice's real fingerprint, but marks her encryption key NOT verified");
+
+            // Dave later receives Alice's genuine v2 card: the bad key is replaced.
+            auto genuine_card = decode_any_contact_card(encode_contact_card_v2(genuine), &err);
+            auto outcome = dave.import_bundle_for_known_identity(*genuine_card->bundle);
+            c = dave.load_contact("Alice");
+            CHECK(outcome.result == KeyStore::BundleImportResult::Updated && outcome.encryption_key_changed &&
+                      c && c->kem_verified && c->pub_kem == alice_contact.pub_kem,
+                  "importing her genuine card repairs it, and the key is now verified");
+        }
+    }
+
+    std::cout << "15. Key store hardening\n";
     as("bob");
     auto perms = fs::status(ROOT / "bob/.pq-file-transfer/keys/private_kem").permissions();
     CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none, "private keys are owner-only");

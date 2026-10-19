@@ -454,11 +454,14 @@ void MainWindow::refresh_contacts() {
         auto contact = keystore_->load_contact(name);
         QString label = qstr(name);
         if (!contact) label += " (invalid keys)";
+        else if (!contact->kem_verified) label += " (key not verified)";
         recipient_combo_->addItem(label, qstr(name));
         if (contact) {
-            recipient_combo_->setItemData(recipient_combo_->count() - 1,
-                                          "Fingerprint:\n" + formatted_fingerprint(contact->fingerprint),
-                                          Qt::ToolTipRole);
+            QString tip = "Fingerprint:\n" + formatted_fingerprint(contact->fingerprint);
+            if (!contact->kem_verified)
+                tip += "\n\nTheir encryption key is not verified. Ask them to send a new contact card "
+                       "from the latest version.";
+            recipient_combo_->setItemData(recipient_combo_->count() - 1, tip, Qt::ToolTipRole);
         }
     }
 
@@ -494,7 +497,11 @@ std::optional<QString> MainWindow::ask_contact_name(const QString& suggested) {
         return std::nullopt;
     }
     if (keystore_->contact_exists(name_str) &&
-        QMessageBox::question(this, "Add Contact", "A contact named \"" + name + "\" already exists. Replace their keys?") !=
+        QMessageBox::question(this, "Add Contact",
+                              "A contact named \"" + name + "\" already exists.\n\n"
+                              "If the keys you are adding differ from the saved ones, that is a key change: " + name +
+                              " has a new identity, or this is someone else's card. You must check the new "
+                              "fingerprint with them again before trusting it.\n\nReplace the saved keys?") !=
             QMessageBox::Yes) {
         return std::nullopt;
     }
@@ -512,15 +519,59 @@ void MainWindow::add_contact_from_card() {
     if (!ok || text.trimmed().isEmpty()) return;
 
     std::string error;
-    auto card = decode_contact_card(text.toStdString(), &error);
+    auto card = decode_any_contact_card(text.toStdString(), &error);
     if (!card) {
         QMessageBox::warning(this, "Add Contact", qstr(error));
         return;
     }
 
+    if (card->bundle) {
+        // A card from someone you already have is an update. Only the owner of the signing key
+        // can make a valid newer one, so it is applied without asking.
+        auto outcome = keystore_->import_bundle_for_known_identity(*card->bundle);
+        using Result = KeyStore::BundleImportResult;
+        if (outcome.result != Result::UnknownIdentity) {
+            refresh_contacts();
+            const QString who = qstr(outcome.contact_name);
+            if (outcome.result == Result::Updated) {
+                QString msg = "Updated " + who + "'s contact card.";
+                if (outcome.was_unverified) msg += " Their encryption key is now verified.";
+                update_status(msg.toStdString());
+                if (outcome.was_unverified && outcome.encryption_key_changed) {
+                    QMessageBox warn(QMessageBox::Warning, "Encryption key replaced",
+                                     "The encryption key you had saved for " + who + " did not match the key in "
+                                     "their signed card, so it was replaced with the signed one.\n\nThe earlier "
+                                     "card may have been altered on its way to you. If so, files you sent them "
+                                     "before now could have been readable by someone else.",
+                                     QMessageBox::Ok, this);
+                    warn.setTextFormat(Qt::PlainText);
+                    warn.exec();
+                }
+            } else if (outcome.result == Result::Unchanged) {
+                update_status("You already have this contact card for " + who.toStdString());
+            } else {
+                QMessageBox::warning(this, "Add Contact",
+                                     "This card for " + who + " is older than the one you have, and uses a "
+                                     "different encryption key. It was ignored.");
+            }
+            return;
+        }
+    } else {
+        QMessageBox old_card(QMessageBox::Warning, "Older contact card",
+                             "This card comes from an older version of the app. It cannot prove that the "
+                             "encryption key belongs to the person: someone who altered it on the way could "
+                             "read the files you send, even if the fingerprint matches.\n\nAsk the sender to "
+                             "update the app and send a new card. You can add them now, and they will be marked "
+                             "\"encryption key not verified\" until you do.\n\nAdd them anyway?",
+                             QMessageBox::Yes | QMessageBox::No, this);
+        old_card.setTextFormat(Qt::PlainText);
+        old_card.setDefaultButton(QMessageBox::No);
+        if (old_card.exec() != QMessageBox::Yes) return;
+    }
+
     auto name = ask_contact_name(qstr(sanitize_contact_name(card->name)));
     if (!name) return;
-    finish_add_contact(*name, card->pub_kem, card->pub_dsa, card->server);
+    finish_add_contact(*name, card->pub_kem, card->pub_dsa, card->server, card->bundle ? &*card->bundle : nullptr);
 }
 
 void MainWindow::add_contact_from_files() {
@@ -545,14 +596,15 @@ void MainWindow::add_contact_from_files() {
                                      "(expected %1 and %2 bytes).").arg(static_cast<qulonglong>(kem_size)).arg(static_cast<qulonglong>(dsa_size)));
         return;
     }
-    finish_add_contact(*name, pub_kem, pub_dsa, std::string());
+    finish_add_contact(*name, pub_kem, pub_dsa, std::string(), nullptr);
 }
 
 // Shared by both ways of adding a contact: sanity checks, fingerprint confirmation, save.
 void MainWindow::finish_add_contact(const QString& name,
                                     const std::vector<uint8_t>& pub_kem,
                                     const std::vector<uint8_t>& pub_dsa,
-                                    const std::string& card_server) {
+                                    const std::string& card_server,
+                                    const IdentityBundle* bundle) {
     std::string name_str = name.toStdString();
     std::string fp = CryptoEngine::fingerprint(pub_dsa);
     if (fp == keystore_->own_fingerprint()) {
@@ -565,19 +617,25 @@ void MainWindow::finish_add_contact(const QString& name,
         return;
     }
 
+    const QString risk = bundle
+        ? "This card is signed, so its keys can't be altered on the way without being noticed. A signature "
+          "can't say who made the card, though. If someone else made it, they could read the files you send "
+          "and pretend to be " + name + "."
+        : "A contact card or key files can be swapped on the way to you. If that happened, the sender could "
+          "read the files you send and pretend to be " + name + ". This one has no signature on its encryption "
+          "key, so it will be marked \"encryption key not verified\".";
     QMessageBox confirm(QMessageBox::Question, "Verify Fingerprint",
                         "Before trusting these keys, confirm with " + name +
                         " over a channel you trust (in person, or a phone or video call where you "
                         "recognise them) that their fingerprint is:\n\n" + formatted_fingerprint(fp) +
-                        "\n\nA contact card or key files can be swapped on the way to you. If that "
-                        "happened, the sender could read the files you send and pretend to be " + name +
-                        ".\n\nDoes the fingerprint match?",
+                        "\n\n" + risk + "\n\nDoes the fingerprint match?",
                         QMessageBox::Yes | QMessageBox::No, this);
     confirm.setTextFormat(Qt::PlainText);
     if (confirm.exec() != QMessageBox::Yes) return;
 
     try {
-        keystore_->save_contact(name_str, pub_kem, pub_dsa);
+        if (bundle) keystore_->save_contact_bundle(name_str, *bundle);
+        else keystore_->save_contact(name_str, pub_kem, pub_dsa);
     } catch (const std::exception& e) {
         QMessageBox::warning(this, "Add Contact", qstr(e.what()));
         return;
@@ -635,22 +693,24 @@ void MainWindow::copy_contact_card() {
     }
     settings.setValue("display_name", name);
 
-    ContactCard card;
-    card.name = name.toStdString();
-    card.pub_kem = keystore_->load_public_kem();
-    card.pub_dsa = keystore_->load_public_dsa();
-    if (card.pub_kem.empty() || card.pub_dsa.empty()) {
-        QMessageBox::warning(this, "Contact Card", "Your public keys could not be read.");
+    std::string relay_hint;
+    if (auto server = configured_server(server_edit_)) relay_hint = format_server_address(*server);
+
+    std::vector<uint8_t> bundle;
+    try {
+        bundle = keystore_->make_own_bundle(name.toStdString(), relay_hint);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Contact Card", qstr(e.what()));
         return;
     }
-    if (auto server = configured_server(server_edit_)) card.server = format_server_address(*server);
-
-    QGuiApplication::clipboard()->setText(qstr(encode_contact_card(card)));
+    QGuiApplication::clipboard()->setText(qstr(encode_contact_card_v2(bundle)));
 
     QMessageBox info(QMessageBox::Information, "Contact Card",
                      "Your contact card is on the clipboard. Paste it into a message to your contact.\n\n"
-                     "It contains only public information. Because anyone could have made a card, ask your "
-                     "contact to check this fingerprint with you in person or on a call when they add you:\n\n" +
+                     "It contains only public information, and it is signed with your identity key, so it "
+                     "can't be altered on the way without being noticed. A signature can't say who made a "
+                     "card, though, so ask your contact to check this fingerprint with you in person or on a "
+                     "call when they add you:\n\n" +
                      formatted_fingerprint(keystore_->own_fingerprint()),
                      QMessageBox::Ok, this);
     info.setTextFormat(Qt::PlainText);
@@ -701,6 +761,17 @@ void MainWindow::start_send() {
     if (!recipient) {
         QMessageBox::warning(this, "Send File", "The keys for " + contact_name + " are missing or invalid.");
         return;
+    }
+    if (!recipient->kem_verified) {
+        QMessageBox warn(QMessageBox::Warning, "Encryption key not verified",
+                         contact_name + "'s encryption key came from an older card or from key files, so nothing "
+                         "proves it is really theirs. If it was altered on the way to you, whoever did it could "
+                         "read this file.\n\nAsk " + contact_name + " to update the app and send you a new "
+                         "contact card, then add it with +.\n\nSend anyway?",
+                         QMessageBox::Yes | QMessageBox::No, this);
+        warn.setTextFormat(Qt::PlainText);
+        warn.setDefaultButton(QMessageBox::No);
+        if (warn.exec() != QMessageBox::Yes) return;
     }
 
     QString filepath = QFileDialog::getOpenFileName(this, "Select File to Send");

@@ -71,10 +71,12 @@ private:
     void add_contact_from_card();
     void add_contact_from_files();
     std::optional<QString> ask_contact_name(const QString& suggested);
+    // `bundle` is set when the contact came from a v2 card, whose encryption key is signed.
     void finish_add_contact(const QString& name,
                             const std::vector<uint8_t>& pub_kem,
                             const std::vector<uint8_t>& pub_dsa,
-                            const std::string& card_server);
+                            const std::string& card_server,
+                            const IdentityBundle* bundle);
     void remove_contact();
     void copy_contact_card();
     void export_keys();

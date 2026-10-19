@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pq-file-transfer VERSION 0.4.0 LANGUAGES CXX)
+project(pq-file-transfer VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,6 +70,7 @@ if(PQ_BUILD_CLIENT OR PQ_BUILD_TESTS)
         client/key_store.cpp
         client/transfer_engine.cpp
         client/sharing.cpp
+        client/identity_bundle.cpp
     )
     target_include_directories(pq_core PUBLIC ${CMAKE_SOURCE_DIR}/client)
     target_link_libraries(pq_core PUBLIC protocol Threads::Threads ${PQ_OQS} OpenSSL::Crypto)
@@ -135,6 +136,11 @@ if(PQ_BUILD_TESTS)
         target_link_libraries(pq-test-keys PRIVATE pq_core)
         pq_warnings(pq-test-keys)
         add_test(NAME keys COMMAND pq-test-keys)
+
+        add_executable(pq-test-contacts tests/test_contacts.cpp)
+        target_link_libraries(pq-test-contacts PRIVATE pq_core)
+        pq_warnings(pq-test-contacts)
+        add_test(NAME contacts COMMAND pq-test-contacts)
 
         add_executable(pq-test-e2e tests/test_e2e.cpp)
         target_link_libraries(pq-test-e2e PRIVATE pq_core)
