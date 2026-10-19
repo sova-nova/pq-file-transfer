@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -34,6 +36,15 @@ static int failures = 0;
     } while (0)
 
 static bool contains(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
+
+// Users with passphrase-protected keys get a long-lived, unlocked KeyStore, the way the GUI
+// holds one. Users without an entry exercise the engine's own key-loading fallback.
+static std::map<std::string, std::unique_ptr<KeyStore>> sessions;
+static KeyStore* session_of(const std::string& user) {
+    auto it = sessions.find(user);
+    return it == sessions.end() ? nullptr : it->second.get();
+}
+static std::string passphrase_of(const std::string& user) { return "passphrase for " + user; }
 
 // --- helpers ---
 
@@ -77,6 +88,7 @@ struct Result { bool ok = false; std::string error, id, path; };
 
 static Result send(const std::string& user, const fs::path& file, const KeyStore::Contact& to) {
     as(user); Result r; TransferEngine e;
+    if (auto* ks = session_of(user)) e.set_keystore(ks);
     e.on_error = [&](const std::string& m) { r.error = m; };
     e.on_transfer_id = [&](const std::string& id) { r.id = id; };
     e.on_complete = [&](const std::string&) { r.ok = true; };
@@ -86,6 +98,7 @@ static Result send(const std::string& user, const fs::path& file, const KeyStore
 
 static Result recv(const std::string& user, const std::string& id) {
     as(user); Result r; TransferEngine e;
+    if (auto* ks = session_of(user)) e.set_keystore(ks);
     e.on_error = [&](const std::string& m) { r.error = m; };
     e.on_complete = [&](const std::string& p) { r.ok = true; r.path = p; };
     e.download_file(id, "127.0.0.1", static_cast<uint16_t>(PORT), (ROOT / user / "dl").u8string());
@@ -121,7 +134,9 @@ static void age_transfer(const std::string& id, std::chrono::hours age) {
 // malicious or buggy sender). Mirrors TransferEngine's upload.
 static std::string raw_upload_with_filename(const std::string& sender, const KeyStore::Contact& to,
                                             const std::string& filename, const std::vector<uint8_t>& data) {
-    as(sender); KeyStore ks;
+    as(sender);
+    KeyStore local;
+    const KeyStore& ks = session_of(sender) ? *session_of(sender) : local;
     FileHeader h; h.file_size = data.size(); h.chunk_size = DEFAULT_CHUNK_SIZE;
     h.total_chunks = expected_total_chunks(h.file_size, h.chunk_size); h.nonce = CryptoEngine::random_bytes(12);
     auto enc = CryptoEngine::encapsulate(to.pub_kem); h.kem_ciphertext = enc.ciphertext;
@@ -160,7 +175,15 @@ int main(int argc, char** argv) {
 
     if (!start_server()) { std::cout << "FAIL could not start " << SERVER_BIN << "\n"; return 1; }
 
-    for (auto u : {"alice", "bob", "eve"}) { as(u); KeyStore().initialize_keys(); }
+    // Alice and Bob protect their keys with a passphrase; Eve doesn't.
+    for (std::string u : {"alice", "bob"}) {
+        as(u);
+        auto ks = std::make_unique<KeyStore>();
+        ks->set_kdf_cost(10);  // fast for tests
+        ks->initialize_keys(passphrase_of(u));
+        sessions[u] = std::move(ks);
+    }
+    as("eve"); KeyStore().initialize_keys();
     add_contact_via_card("bob", "Alice", "alice");
     add_contact_via_card("alice", "Bob", "bob");
     auto bob = contact_of("bob");
@@ -256,7 +279,40 @@ int main(int argc, char** argv) {
     CHECK(!r_stale.ok && contains(r_stale.error, "not found"), "25-hour-old transfer is gone: " + r_stale.error);
     CHECK(!fs::exists(STORE / stale.id), "expired transfer's files were deleted from disk");
 
-    std::cout << "13. Key store hardening\n";
+    std::cout << "13. Passphrase-protected keys\n";
+    CHECK(CryptoEngine::is_protected_blob(slurp(ROOT / "alice/.pq-file-transfer/keys/private_dsa")) &&
+          CryptoEngine::is_protected_blob(slurp(ROOT / "bob/.pq-file-transfer/keys/private_kem")),
+          "Alice's and Bob's private keys are encrypted on disk");
+    CHECK(!CryptoEngine::is_protected_blob(slurp(ROOT / "eve/.pq-file-transfer/keys/private_dsa")), "Eve's are not (her choice)");
+    {
+        // A locked key store (e.g. app started but never unlocked) must refuse, before touching the network.
+        as("alice");
+        KeyStore locked; locked.initialize_keys();
+        CHECK(locked.private_keys_locked(), "a fresh KeyStore on Alice's folder is locked");
+        Result r; TransferEngine e; e.set_keystore(&locked);
+        e.on_error = [&](const std::string& m) { r.error = m; };
+        e.on_complete = [&](const std::string&) { r.ok = true; };
+        e.upload_file((ROOT / "big.bin").u8string(), "127.0.0.1", static_cast<uint16_t>(PORT), bob);
+        CHECK(!r.ok && contains(r.error, "locked"), "sending with locked keys is refused: " + r.error);
+
+        auto pending = send("alice", ROOT / "big.bin", bob);
+        as("bob");
+        KeyStore bob_locked; bob_locked.initialize_keys();
+        Result d; TransferEngine e2; e2.set_keystore(&bob_locked);
+        e2.on_error = [&](const std::string& m) { d.error = m; };
+        e2.on_complete = [&](const std::string&) { d.ok = true; };
+        e2.download_file(pending.id, "127.0.0.1", static_cast<uint16_t>(PORT), (ROOT / "bob" / "dl").u8string());
+        CHECK(!d.ok && contains(d.error, "locked"), "receiving with locked keys is refused: " + d.error);
+        CHECK(!bob_locked.unlock("not the passphrase"), "wrong passphrase doesn't unlock");
+        CHECK(bob_locked.unlock(passphrase_of("bob")), "right passphrase unlocks");
+        Result d2; TransferEngine e3; e3.set_keystore(&bob_locked);
+        e3.on_error = [&](const std::string& m) { d2.error = m; };
+        e3.on_complete = [&](const std::string& p) { d2.ok = true; d2.path = p; };
+        e3.download_file(pending.id, "127.0.0.1", static_cast<uint16_t>(PORT), (ROOT / "bob" / "dl").u8string());
+        CHECK(d2.ok && slurp(d2.path) == big, "after unlocking, the kept transfer downloads fine (" + d2.error + ")");
+    }
+
+    std::cout << "14. Key store hardening\n";
     as("bob");
     auto perms = fs::status(ROOT / "bob/.pq-file-transfer/keys/private_kem").permissions();
     CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none, "private keys are owner-only");

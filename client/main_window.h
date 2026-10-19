@@ -34,6 +34,8 @@ private:
     QComboBox* recipient_combo_ = nullptr;
     QPushButton* add_contact_button_ = nullptr;
     QPushButton* remove_contact_button_ = nullptr;
+    QLabel* key_status_label_ = nullptr;
+    QPushButton* key_protection_button_ = nullptr;
     QPushButton* copy_card_button_ = nullptr;
     QPushButton* export_keys_button_ = nullptr;
     QPushButton* send_button_ = nullptr;
@@ -55,6 +57,16 @@ private:
 
     void start_send();
     void start_receive();
+    bool setup_keys(std::string& problem);
+    bool unlock_keys(std::string& problem);
+    std::string keychain_account() const;
+    void remember_passphrase(const std::string& passphrase);
+    void update_key_status();
+    void set_passphrase_action();
+    void change_passphrase_action();
+    void remove_passphrase_action();
+    void forget_saved_passphrase();
+
     void add_contact();
     void add_contact_from_card();
     void add_contact_from_files();

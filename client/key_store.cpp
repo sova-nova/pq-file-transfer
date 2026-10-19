@@ -1,5 +1,6 @@
 #include "key_store.h"
 #include "crypto_engine.h"
+#include "scope_exit.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -81,7 +82,16 @@ KeyStore::KeyStore() {
     contacts_dir_ = app_dir_ / "contacts";
 }
 
-void KeyStore::initialize_keys() {
+KeyStore::~KeyStore() { lock(); }
+
+bool KeyStore::keys_exist() const {
+    std::error_code ec;
+    for (const char* name : {"public_kem", "private_kem", "public_dsa", "private_dsa"})
+        if (!fs::exists(keys_dir_ / name, ec)) return false;
+    return true;
+}
+
+void KeyStore::initialize_keys(const std::string& passphrase) {
     std::error_code ec;
     fs::create_directories(keys_dir_, ec);
     if (!ec) fs::create_directories(contacts_dir_, ec);
@@ -96,11 +106,16 @@ void KeyStore::initialize_keys() {
         if (fs::exists(f, ec)) present++;
 
     if (present == 4) {
-        // Validate now so a corrupt key fails at startup, not mid-transfer.
+        // Validate now so a corrupt key fails at startup, not mid-transfer. Protected private
+        // keys can't be size-checked until they are unlocked, which unlock() does.
+        auto private_ok = [&](const fs::path& path, size_t expected) {
+            auto raw = read_file_bytes(path);
+            return !raw.empty() && (CryptoEngine::is_protected_blob(raw) || raw.size() == expected);
+        };
         if (load_public_kem().size() != CryptoEngine::kem_public_key_size() ||
-            load_private_kem().size() != CryptoEngine::kem_secret_key_size() ||
             load_public_dsa().size() != CryptoEngine::sig_public_key_size() ||
-            load_private_dsa().size() != CryptoEngine::sig_secret_key_size()) {
+            !private_ok(files[1], CryptoEngine::kem_secret_key_size()) ||
+            !private_ok(files[3], CryptoEngine::sig_secret_key_size())) {
             throw std::runtime_error("Key files in " + keys_dir_.u8string() +
                                      " are corrupt or from an incompatible version");
         }
@@ -118,14 +133,23 @@ void KeyStore::initialize_keys() {
             "new public keys).");
     }
 
+    if (!passphrase.empty() && !is_acceptable_passphrase(passphrase))
+        throw std::runtime_error("The passphrase is too short (use at least " +
+                                 std::to_string(MIN_PASSPHRASE_BYTES) + " characters)");
+
     std::cout << "Generating new keypairs..." << std::endl;
     auto kem = CryptoEngine::generate_kem_keypair();
     auto sig = CryptoEngine::generate_sig_keypair();
 
-    write_file_atomic(files[1], kem.private_key, true);
-    write_file_atomic(files[3], sig.private_key, true);
     write_file_atomic(files[0], kem.public_key, false);
     write_file_atomic(files[2], sig.public_key, false);
+    if (passphrase.empty()) {
+        write_file_atomic(files[1], kem.private_key, true);
+        write_file_atomic(files[3], sig.private_key, true);
+    } else {
+        write_protected(kem.private_key, sig.private_key, passphrase);
+        set_cache(kem.private_key, sig.private_key);  // a fresh install starts unlocked
+    }
 
     CryptoEngine::secure_wipe(kem.private_key);
     CryptoEngine::secure_wipe(sig.private_key);
@@ -133,9 +157,146 @@ void KeyStore::initialize_keys() {
 }
 
 std::vector<uint8_t> KeyStore::load_public_kem() const { return read_file_bytes(keys_dir_ / "public_kem"); }
-std::vector<uint8_t> KeyStore::load_private_kem() const { return read_file_bytes(keys_dir_ / "private_kem"); }
+std::vector<uint8_t> KeyStore::load_private_kem() const { return load_private(keys_dir_ / "private_kem", cache_kem_); }
 std::vector<uint8_t> KeyStore::load_public_dsa() const { return read_file_bytes(keys_dir_ / "public_dsa"); }
-std::vector<uint8_t> KeyStore::load_private_dsa() const { return read_file_bytes(keys_dir_ / "private_dsa"); }
+std::vector<uint8_t> KeyStore::load_private_dsa() const { return load_private(keys_dir_ / "private_dsa", cache_dsa_); }
+
+// --- Passphrase protection ---
+
+namespace {
+const char KEM_LABEL[] = "private_kem";
+const char DSA_LABEL[] = "private_dsa";
+}  // namespace
+
+bool KeyStore::is_acceptable_passphrase(const std::string& passphrase) {
+    return passphrase.size() >= MIN_PASSPHRASE_BYTES;
+}
+
+// Raw bytes for an unprotected key; the in-memory copy for a protected one (empty while locked).
+std::vector<uint8_t> KeyStore::load_private(const fs::path& path, const std::vector<uint8_t>& cache) const {
+    auto raw = read_file_bytes(path);
+    if (raw.empty() || !CryptoEngine::is_protected_blob(raw)) return raw;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache;
+}
+
+bool KeyStore::private_keys_protected() const {
+    return CryptoEngine::is_protected_blob(read_file_bytes(keys_dir_ / "private_kem")) ||
+           CryptoEngine::is_protected_blob(read_file_bytes(keys_dir_ / "private_dsa"));
+}
+
+bool KeyStore::private_keys_locked() const {
+    bool kem_protected = CryptoEngine::is_protected_blob(read_file_bytes(keys_dir_ / "private_kem"));
+    bool dsa_protected = CryptoEngine::is_protected_blob(read_file_bytes(keys_dir_ / "private_dsa"));
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (kem_protected && cache_kem_.empty()) || (dsa_protected && cache_dsa_.empty());
+}
+
+void KeyStore::set_cache(const std::vector<uint8_t>& kem, const std::vector<uint8_t>& dsa) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    CryptoEngine::secure_wipe(cache_kem_);
+    CryptoEngine::secure_wipe(cache_dsa_);
+    cache_kem_ = kem;
+    cache_dsa_ = dsa;
+}
+
+void KeyStore::lock() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    CryptoEngine::secure_wipe(cache_kem_);
+    CryptoEngine::secure_wipe(cache_dsa_);
+}
+
+// Reads both private keys, decrypting the protected ones. Returns false on a wrong passphrase.
+bool KeyStore::read_private_keys(const std::string& passphrase, std::vector<uint8_t>& kem,
+                                 std::vector<uint8_t>& dsa, bool& any_protected, bool& any_plain) const {
+    struct Item { fs::path path; const char* label; std::vector<uint8_t>* out; size_t expected; };
+    Item items[] = {{keys_dir_ / "private_kem", KEM_LABEL, &kem, CryptoEngine::kem_secret_key_size()},
+                    {keys_dir_ / "private_dsa", DSA_LABEL, &dsa, CryptoEngine::sig_secret_key_size()}};
+    any_protected = any_plain = false;
+    for (auto& item : items) {
+        auto raw = read_file_bytes(item.path);
+        if (raw.empty()) throw std::runtime_error("Cannot read " + item.path.u8string());
+        if (CryptoEngine::is_protected_blob(raw)) {
+            any_protected = true;
+            auto plain = CryptoEngine::unprotect_secret(raw, passphrase, item.label);
+            if (!plain) return false;
+            *item.out = std::move(*plain);
+        } else {
+            any_plain = true;
+            *item.out = std::move(raw);
+        }
+        if (item.out->size() != item.expected)
+            throw std::runtime_error(item.path.u8string() + " is corrupt or from an incompatible version");
+    }
+    return true;
+}
+
+void KeyStore::write_protected(const std::vector<uint8_t>& kem, const std::vector<uint8_t>& dsa,
+                               const std::string& passphrase) {
+    auto kem_blob = CryptoEngine::protect_secret(kem, passphrase, KEM_LABEL, kdf_log2_n_);
+    auto dsa_blob = CryptoEngine::protect_secret(dsa, passphrase, DSA_LABEL, kdf_log2_n_);
+    write_file_atomic(keys_dir_ / "private_kem", kem_blob, true);
+    write_file_atomic(keys_dir_ / "private_dsa", dsa_blob, true);
+}
+
+bool KeyStore::unlock(const std::string& passphrase) {
+    if (passphrase.empty()) return false;
+    std::vector<uint8_t> kem, dsa;
+    auto wipe = make_scope_exit([&] {
+        CryptoEngine::secure_wipe(kem);
+        CryptoEngine::secure_wipe(dsa);
+    });
+    bool any_protected = false, any_plain = false;
+    if (!read_private_keys(passphrase, kem, dsa, any_protected, any_plain)) return false;
+
+    set_cache(kem, dsa);
+    // One file protected and one not means an earlier protect step was interrupted: finish it.
+    if (any_protected && any_plain) write_protected(kem, dsa, passphrase);
+    return true;
+}
+
+bool KeyStore::verify_passphrase(const std::string& passphrase) const {
+    if (passphrase.empty()) return false;
+    std::vector<uint8_t> kem, dsa;
+    auto wipe = make_scope_exit([&] {
+        CryptoEngine::secure_wipe(kem);
+        CryptoEngine::secure_wipe(dsa);
+    });
+    bool any_protected = false, any_plain = false;
+    return read_private_keys(passphrase, kem, dsa, any_protected, any_plain) && any_protected;
+}
+
+void KeyStore::set_passphrase(const std::string& passphrase) {
+    if (!is_acceptable_passphrase(passphrase))
+        throw std::runtime_error("The passphrase is too short (use at least " +
+                                 std::to_string(MIN_PASSPHRASE_BYTES) + " characters)");
+    auto kem = load_private_kem();
+    auto dsa = load_private_dsa();
+    auto wipe = make_scope_exit([&] {
+        CryptoEngine::secure_wipe(kem);
+        CryptoEngine::secure_wipe(dsa);
+    });
+    if (kem.size() != CryptoEngine::kem_secret_key_size() || dsa.size() != CryptoEngine::sig_secret_key_size())
+        throw std::runtime_error("Your keys are locked. Unlock them first");
+
+    write_protected(kem, dsa, passphrase);
+    set_cache(kem, dsa);  // the session stays unlocked
+}
+
+void KeyStore::remove_passphrase() {
+    auto kem = load_private_kem();
+    auto dsa = load_private_dsa();
+    auto wipe = make_scope_exit([&] {
+        CryptoEngine::secure_wipe(kem);
+        CryptoEngine::secure_wipe(dsa);
+    });
+    if (kem.size() != CryptoEngine::kem_secret_key_size() || dsa.size() != CryptoEngine::sig_secret_key_size())
+        throw std::runtime_error("Your keys are locked. Unlock them first");
+
+    write_file_atomic(keys_dir_ / "private_kem", kem, true);
+    write_file_atomic(keys_dir_ / "private_dsa", dsa, true);
+    lock();  // unprotected keys are read straight from disk; nothing to cache
+}
 
 std::string KeyStore::own_fingerprint() const {
     return CryptoEngine::fingerprint(load_public_dsa());

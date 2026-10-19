@@ -186,6 +186,12 @@ void TransferEngine::download_file(const std::string& transfer_id, const std::st
     }
 }
 
+const KeyStore& TransferEngine::active_keystore(std::unique_ptr<KeyStore>& fallback) const {
+    if (keystore_) return *keystore_;
+    fallback = std::make_unique<KeyStore>();
+    return *fallback;
+}
+
 void TransferEngine::cancel() {
     cancel_flag_ = true;
     std::lock_guard<std::mutex> lock(socket_mutex_);
@@ -247,7 +253,9 @@ void TransferEngine::release_socket(socket_t sock) {
 void TransferEngine::upload_impl(const std::string& filepath, const std::string& host, uint16_t port,
                                  const KeyStore::Contact& recipient) {
     status("Loading keys...");
-    KeyStore keystore;
+    std::unique_ptr<KeyStore> fallback_store;
+    const KeyStore& keystore = active_keystore(fallback_store);
+    if (keystore.private_keys_locked()) throw TransferError("Your keys are locked. Unlock them first");
     auto priv_dsa = keystore.load_private_dsa();
     auto pub_dsa = keystore.load_public_dsa();
     auto wipe_key = make_scope_exit([&] { CryptoEngine::secure_wipe(priv_dsa); });
@@ -372,7 +380,9 @@ void TransferEngine::download_impl(const std::string& raw_id, const std::string&
     if (!is_lower_hex(transfer_id, TRANSFER_ID_HEX_LEN))
         throw TransferError("That doesn't look like a transfer ID (expected 32 hex characters)");
 
-    KeyStore keystore;
+    std::unique_ptr<KeyStore> fallback_store;
+    const KeyStore& keystore = active_keystore(fallback_store);
+    if (keystore.private_keys_locked()) throw TransferError("Your keys are locked. Unlock them first");
     auto priv_kem = keystore.load_private_kem();
     auto own_pub_dsa = keystore.load_public_dsa();
     auto wipe_key = make_scope_exit([&] { CryptoEngine::secure_wipe(priv_kem); });

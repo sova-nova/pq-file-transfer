@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -33,6 +34,11 @@ public:
     // Thread-safe. Aborts the running transfer promptly (closes its socket).
     void cancel();
 
+    // The key store to take this user's keys from. Must outlive any running transfer. Needed
+    // when the private keys are protected by a passphrase, because only the app's key store
+    // holds them unlocked. Without it, each transfer opens the key files itself.
+    void set_keystore(const KeyStore* keystore) { keystore_ = keystore; }
+
     std::function<void(double fraction)> on_progress;
     std::function<void(const std::string& msg)> on_status;
     std::function<void(const std::string& error)> on_error;
@@ -40,6 +46,9 @@ public:
     std::function<void(const std::string& transfer_id)> on_transfer_id;
 
 private:
+    const KeyStore* keystore_ = nullptr;
+    const KeyStore& active_keystore(std::unique_ptr<KeyStore>& fallback) const;
+
     std::atomic<bool> cancel_flag_{false};
     std::mutex socket_mutex_;
     socket_t active_socket_ = INVALID_SOCKET_VAL;

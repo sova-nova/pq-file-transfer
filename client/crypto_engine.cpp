@@ -260,6 +260,94 @@ void CryptoEngine::secure_wipe(std::vector<uint8_t>& data) {
     data.clear();
 }
 
+// --- Passphrase protection of secret keys at rest ---
+
+namespace {
+
+constexpr char PROTECTED_MAGIC[4] = {'P', 'Q', 'K', 'E'};
+constexpr uint8_t PROTECTED_VERSION = 1;
+constexpr uint8_t KDF_SCRYPT = 1;
+constexpr uint8_t SCRYPT_R = 8;
+constexpr uint8_t SCRYPT_P = 1;
+constexpr size_t PROTECTED_SALT_SIZE = 16;
+constexpr size_t PROTECTED_NONCE_SIZE = 12;
+constexpr size_t PROTECTED_HEADER_SIZE = 4 + 1 + 1 + 1 + 1 + 1 + PROTECTED_SALT_SIZE + PROTECTED_NONCE_SIZE;  // 37
+
+std::vector<uint8_t> scrypt_key(const std::string& passphrase, const uint8_t* salt,
+                                uint8_t log2_n, uint8_t r, uint8_t p) {
+    const uint64_t n = 1ull << log2_n;
+    // OpenSSL refuses to use more than `maxmem`; allow twice what scrypt really needs.
+    const uint64_t maxmem = 256ull * n * r;
+    std::vector<uint8_t> key(CryptoEngine::AES_KEY_SIZE);
+    if (EVP_PBE_scrypt(passphrase.data(), passphrase.size(), salt, PROTECTED_SALT_SIZE, n, r, p, maxmem,
+                       key.data(), key.size()) != 1)
+        throw std::runtime_error("Key derivation (scrypt) failed");
+    return key;
+}
+
+std::vector<uint8_t> protected_aad(const uint8_t* header, const std::string& label) {
+    std::vector<uint8_t> aad(header, header + PROTECTED_HEADER_SIZE);
+    aad.insert(aad.end(), label.begin(), label.end());
+    return aad;
+}
+
+}  // namespace
+
+bool CryptoEngine::is_protected_blob(const std::vector<uint8_t>& data) {
+    return data.size() >= sizeof(PROTECTED_MAGIC) &&
+           std::memcmp(data.data(), PROTECTED_MAGIC, sizeof(PROTECTED_MAGIC)) == 0;
+}
+
+std::vector<uint8_t> CryptoEngine::protect_secret(const std::vector<uint8_t>& secret,
+                                                  const std::string& passphrase,
+                                                  const std::string& label,
+                                                  uint8_t scrypt_log2_n) {
+    if (passphrase.empty()) throw std::runtime_error("The passphrase is empty");
+    if (scrypt_log2_n < MIN_SCRYPT_LOG2_N || scrypt_log2_n > MAX_SCRYPT_LOG2_N)
+        throw std::runtime_error("Key derivation cost is out of range");
+
+    std::vector<uint8_t> blob(PROTECTED_MAGIC, PROTECTED_MAGIC + sizeof(PROTECTED_MAGIC));
+    blob.push_back(PROTECTED_VERSION);
+    blob.push_back(KDF_SCRYPT);
+    blob.push_back(scrypt_log2_n);
+    blob.push_back(SCRYPT_R);
+    blob.push_back(SCRYPT_P);
+    auto salt = random_bytes(PROTECTED_SALT_SIZE);
+    auto nonce = random_bytes(PROTECTED_NONCE_SIZE);
+    blob.insert(blob.end(), salt.begin(), salt.end());
+    blob.insert(blob.end(), nonce.begin(), nonce.end());
+
+    auto key = scrypt_key(passphrase, salt.data(), scrypt_log2_n, SCRYPT_R, SCRYPT_P);
+    auto ciphertext = encrypt(key, nonce, secret, protected_aad(blob.data(), label));
+    secure_wipe(key);
+    blob.insert(blob.end(), ciphertext.begin(), ciphertext.end());
+    return blob;
+}
+
+std::optional<std::vector<uint8_t>> CryptoEngine::unprotect_secret(const std::vector<uint8_t>& blob,
+                                                                   const std::string& passphrase,
+                                                                   const std::string& label) {
+    if (!is_protected_blob(blob) || blob.size() < PROTECTED_HEADER_SIZE + 16)
+        throw std::runtime_error("The protected key file is damaged");
+    const uint8_t* h = blob.data();
+    if (h[4] != PROTECTED_VERSION || h[5] != KDF_SCRYPT)
+        throw std::runtime_error("The protected key file was made by an incompatible version");
+    const uint8_t log2_n = h[6], r = h[7], p = h[8];
+    if (log2_n < MIN_SCRYPT_LOG2_N || log2_n > MAX_SCRYPT_LOG2_N || r != SCRYPT_R || p != SCRYPT_P)
+        throw std::runtime_error("The protected key file uses unsupported key derivation settings");
+    if (passphrase.empty()) return std::nullopt;
+
+    const uint8_t* salt = h + 9;
+    const uint8_t* nonce_ptr = salt + PROTECTED_SALT_SIZE;
+    std::vector<uint8_t> nonce(nonce_ptr, nonce_ptr + PROTECTED_NONCE_SIZE);
+    std::vector<uint8_t> ciphertext(blob.begin() + PROTECTED_HEADER_SIZE, blob.end());
+
+    auto key = scrypt_key(passphrase, salt, log2_n, r, p);
+    auto plain = decrypt(key, nonce, ciphertext, protected_aad(h, label));
+    secure_wipe(key);
+    return plain;
+}
+
 std::string CryptoEngine::fingerprint(const std::vector<uint8_t>& pub_dsa) {
     static const char digits[] = "0123456789abcdef";
     auto digest = sha256(pub_dsa);

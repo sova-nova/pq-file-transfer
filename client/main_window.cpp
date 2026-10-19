@@ -1,6 +1,9 @@
 #include "main_window.h"
 #include "crypto_engine.h"
+#include "key_dialogs.h"
+#include "keychain.h"
 
+#include <QAction>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDesktopServices>
@@ -12,6 +15,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QProgressBar>
@@ -53,6 +57,25 @@ QString default_display_name() {
     return name;
 }
 
+const char* const KEY_PROTECTION_DECIDED = "key_protection_decided";
+
+// Explains key protection, and what the keychain does for convenience, before asking.
+QString protection_explanation(const QString& heading) {
+    QString text = heading +
+        "\n\nYour private keys let you read files that are sent to you and prove that files from you "
+        "are really yours. If someone copies them, for example from a stolen laptop or an unprotected "
+        "backup, they can read everything sent to you. A passphrase locks them.\n\n";
+    if (keychain::available()) {
+        text += "With \"Remember on this computer\" ticked, the passphrase is kept in your system's "
+                "keychain (Windows Credential Manager, macOS Keychain or the Linux keyring). You will "
+                "rarely have to type it again, typically only after reinstalling or on a new computer.\n\n";
+    } else {
+        text += "You will be asked for the passphrase each time you start the app.\n\n";
+    }
+    text += "A forgotten passphrase cannot be recovered. Use at least 8 characters; a few random words work well.";
+    return text;
+}
+
 QLabel* plain_label(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setTextFormat(Qt::PlainText);  // never interpret server/sender text as HTML
@@ -77,9 +100,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     status_label_ = plain_label("Status: Ready", this);
 
+    std::string key_problem;
     try {
         keystore_ = std::make_unique<KeyStore>();
-        keystore_->initialize_keys();
+        if (!setup_keys(key_problem)) {
+            keystore_.reset();
+            layout->addWidget(status_label_);
+            layout->addStretch();
+            show_error(key_problem);
+            return;
+        }
     } catch (const std::exception& e) {
         keystore_.reset();
         layout->addWidget(status_label_);
@@ -87,6 +117,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         show_error(std::string("Key setup failed: ") + e.what());
         return;
     }
+    engine_.set_keystore(keystore_.get());  // transfers use the unlocked keys held by the app
 
     // --- Identity ---
     layout->addWidget(plain_label("Your fingerprint. Contacts should check it with you before trusting your keys:", this));
@@ -103,6 +134,30 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     identity_layout->addWidget(copy_card_button_);
     identity_layout->addWidget(export_keys_button_);
     layout->addLayout(identity_layout);
+
+    key_status_label_ = plain_label("", this);
+    layout->addWidget(key_status_label_);
+    key_protection_button_ = new QPushButton("Key Protection…", this);
+    auto* key_menu = new QMenu(key_protection_button_);
+    QAction* set_action = key_menu->addAction("Set a passphrase…");
+    QAction* change_action = key_menu->addAction("Change passphrase…");
+    QAction* remove_action = key_menu->addAction("Remove passphrase (less secure)…");
+    key_menu->addSeparator();
+    QAction* forget_action = key_menu->addAction("Forget saved passphrase");
+    connect(set_action, &QAction::triggered, this, [this] { set_passphrase_action(); });
+    connect(change_action, &QAction::triggered, this, [this] { change_passphrase_action(); });
+    connect(remove_action, &QAction::triggered, this, [this] { remove_passphrase_action(); });
+    connect(forget_action, &QAction::triggered, this, [this] { forget_saved_passphrase(); });
+    connect(key_menu, &QMenu::aboutToShow, this, [this, set_action, change_action, remove_action, forget_action] {
+        const bool protected_keys = keystore_->private_keys_protected();
+        set_action->setEnabled(!protected_keys);
+        change_action->setEnabled(protected_keys);
+        remove_action->setEnabled(protected_keys);
+        forget_action->setEnabled(protected_keys && keychain::available());
+    });
+    key_protection_button_->setMenu(key_menu);
+    layout->addWidget(key_protection_button_);
+    update_key_status();
     layout->addSpacing(10);
 
     // --- Server ---
@@ -203,6 +258,187 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() {
     engine_.cancel();
     if (worker_thread_.joinable()) worker_thread_.join();
+    if (keystore_) keystore_->lock();  // wipe the decrypted keys from memory
+}
+
+// --- Key protection ---
+
+std::string MainWindow::keychain_account() const {
+    // One entry per identity, so several key folders on one computer don't collide.
+    return "key-passphrase-" + keystore_->own_fingerprint().substr(0, 16);
+}
+
+void MainWindow::remember_passphrase(const std::string& passphrase) {
+    if (!keychain::store(keychain_account(), passphrase)) {
+        QMessageBox::warning(this, "Keychain",
+                             "The passphrase could not be saved to your system's keychain (is a keyring "
+                             "service running?). Your keys are still protected; you will be asked for the "
+                             "passphrase each time you start the app.");
+    }
+}
+
+// Runs before the window is shown: creates, validates and (if needed) unlocks the keys.
+bool MainWindow::setup_keys(std::string& problem) {
+    QSettings settings;
+
+    if (!keystore_->keys_exist()) {
+        auto choice = ask_new_passphrase(this, "Welcome to PQ File Transfer",
+                                         protection_explanation("Let's set up your keys. Protect them with a passphrase?"),
+                                         true);
+        if (choice.outcome == DialogOutcome::Cancelled) {
+            problem = "Setup was cancelled. Restart the app to set up your keys.";
+            return false;
+        }
+        const bool protect = choice.outcome == DialogOutcome::Accepted;
+        keystore_->initialize_keys(protect ? choice.passphrase : std::string());
+        settings.setValue(KEY_PROTECTION_DECIDED, true);
+        if (protect && choice.remember) remember_passphrase(choice.passphrase);
+        return true;
+    }
+
+    keystore_->initialize_keys();  // validates the existing keys
+    if (keystore_->private_keys_locked()) return unlock_keys(problem);
+
+    // Keys from an earlier version are unprotected. Offer protection once; respect a "skip".
+    if (!keystore_->private_keys_protected() && !settings.value(KEY_PROTECTION_DECIDED, false).toBool()) {
+        auto choice = ask_new_passphrase(
+            this, "Protect your keys?",
+            protection_explanation("Your keys are currently stored on this computer without a passphrase. "
+                                   "Protecting them doesn't change your fingerprint, so your contacts "
+                                   "don't need to do anything."),
+            true);
+        if (choice.outcome == DialogOutcome::Accepted) {
+            try {
+                keystore_->set_passphrase(choice.passphrase);
+            } catch (const std::exception& e) {
+                QMessageBox::warning(this, "Key Protection", qstr(e.what()));
+                return true;  // keys still work, just unprotected; ask again next time
+            }
+            settings.setValue(KEY_PROTECTION_DECIDED, true);
+            if (choice.remember) remember_passphrase(choice.passphrase);
+        } else if (choice.outcome == DialogOutcome::Skipped) {
+            settings.setValue(KEY_PROTECTION_DECIDED, true);  // their choice; don't nag
+        }
+        // Cancelled (window closed): carry on unprotected and ask again next start.
+    }
+    return true;
+}
+
+bool MainWindow::unlock_keys(std::string& problem) {
+    const std::string account = keychain_account();
+
+    // The keychain first: this is what makes unlocking invisible on a normal day.
+    if (auto saved = keychain::load(account)) {
+        try {
+            if (keystore_->unlock(*saved)) return true;
+        } catch (const std::exception& e) {
+            problem = e.what();
+            return false;
+        }
+        keychain::remove(account);  // stale (e.g. the keys were replaced); fall through to asking
+    }
+
+    QString message = "Enter your passphrase to unlock your keys.";
+    while (true) {
+        auto choice = ask_existing_passphrase(this, "Unlock your keys", message, true);
+        if (choice.outcome != DialogOutcome::Accepted) {
+            problem = "Your keys are locked. Restart the app and enter your passphrase to continue.";
+            return false;
+        }
+        try {
+            if (keystore_->unlock(choice.passphrase)) {
+                if (choice.remember) remember_passphrase(choice.passphrase);
+                return true;
+            }
+        } catch (const std::exception& e) {
+            problem = e.what();
+            return false;
+        }
+        message = "That passphrase is wrong. Try again.";
+    }
+}
+
+void MainWindow::update_key_status() {
+    if (keystore_->private_keys_protected()) {
+        key_status_label_->setText("Keys: protected by a passphrase");
+        key_status_label_->setStyleSheet("color: #2e7d32;");
+    } else {
+        key_status_label_->setText("Keys: not protected by a passphrase");
+        key_status_label_->setStyleSheet("color: #b26a00;");
+    }
+}
+
+void MainWindow::set_passphrase_action() {
+    auto choice = ask_new_passphrase(this, "Set a passphrase",
+                                     protection_explanation("Protect your keys with a passphrase."), false);
+    if (choice.outcome != DialogOutcome::Accepted) return;
+    try {
+        keystore_->set_passphrase(choice.passphrase);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Key Protection", qstr(e.what()));
+        return;
+    }
+    QSettings().setValue(KEY_PROTECTION_DECIDED, true);
+    if (choice.remember) remember_passphrase(choice.passphrase);
+    update_key_status();
+    update_status("Your keys are now protected by a passphrase");
+}
+
+void MainWindow::change_passphrase_action() {
+    auto current = ask_existing_passphrase(this, "Change passphrase", "Enter your current passphrase.", false, "Continue");
+    if (current.outcome != DialogOutcome::Accepted) return;
+    if (!keystore_->verify_passphrase(current.passphrase)) {
+        QMessageBox::warning(this, "Change passphrase", "That passphrase is wrong.");
+        return;
+    }
+    auto fresh = ask_new_passphrase(this, "Change passphrase", "Choose a new passphrase.", false);
+    if (fresh.outcome != DialogOutcome::Accepted) return;
+    try {
+        keystore_->set_passphrase(fresh.passphrase);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Key Protection", qstr(e.what()));
+        return;
+    }
+    if (keychain::available()) {
+        if (fresh.remember) remember_passphrase(fresh.passphrase);
+        else keychain::remove(keychain_account());
+    }
+    update_key_status();
+    update_status("Passphrase changed");
+}
+
+void MainWindow::remove_passphrase_action() {
+    QMessageBox warn(QMessageBox::Warning, "Remove passphrase",
+                     "Your private keys will be stored on this computer without protection. Anyone who "
+                     "can copy your key files, for example from a stolen laptop or a backup, will be able "
+                     "to read files sent to you.\n\nRemove the passphrase anyway?",
+                     QMessageBox::Yes | QMessageBox::No, this);
+    warn.setTextFormat(Qt::PlainText);
+    warn.setDefaultButton(QMessageBox::No);
+    if (warn.exec() != QMessageBox::Yes) return;
+
+    auto current = ask_existing_passphrase(this, "Remove passphrase", "Enter your current passphrase to confirm.",
+                                           false, "Remove");
+    if (current.outcome != DialogOutcome::Accepted) return;
+    if (!keystore_->verify_passphrase(current.passphrase)) {
+        QMessageBox::warning(this, "Remove passphrase", "That passphrase is wrong.");
+        return;
+    }
+    try {
+        keystore_->remove_passphrase();
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Key Protection", qstr(e.what()));
+        return;
+    }
+    keychain::remove(keychain_account());
+    QSettings().setValue(KEY_PROTECTION_DECIDED, true);
+    update_key_status();
+    update_status("The passphrase was removed. Your keys are stored without protection");
+}
+
+void MainWindow::forget_saved_passphrase() {
+    keychain::remove(keychain_account());
+    update_status("Saved passphrase removed. You will be asked for it next time you start the app");
 }
 
 // --- Contacts ---
@@ -566,6 +802,7 @@ void MainWindow::set_busy(bool busy) {
     receive_button_->setEnabled(!busy);
     add_contact_button_->setEnabled(!busy);
     remove_contact_button_->setEnabled(!busy);
+    key_protection_button_->setEnabled(!busy);
     copy_card_button_->setEnabled(!busy);
     export_keys_button_->setEnabled(!busy);
     server_edit_->setEnabled(!busy);

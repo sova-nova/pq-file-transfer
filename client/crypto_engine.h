@@ -83,6 +83,32 @@ public:
     static std::vector<uint8_t> random_bytes(size_t count);
     static void secure_wipe(std::vector<uint8_t>& data);
 
+    // --- Passphrase protection of secret keys at rest ---
+    //
+    // Blob layout (all fixed-size header fields are authenticated as AES-GCM AAD):
+    //   "PQKE" | version=1 | kdf=1 (scrypt) | log2(N) | r | p | salt[16] | nonce[12] | ciphertext || tag
+    // The key is scrypt(passphrase, salt). `label` ("private_kem" / "private_dsa") is also
+    // authenticated, so one protected key file can't be passed off as another.
+    static constexpr uint8_t DEFAULT_SCRYPT_LOG2_N = 17;  // 128 MiB, ~0.3 s on a desktop
+    static constexpr uint8_t MIN_SCRYPT_LOG2_N = 10;      // accepted when reading (tests use this)
+    static constexpr uint8_t MAX_SCRYPT_LOG2_N = 18;      // refuse absurd memory demands from a file
+
+    // True if `data` starts with the protected-key magic.
+    static bool is_protected_blob(const std::vector<uint8_t>& data);
+
+    // Throws std::runtime_error if the passphrase is empty or the KDF cost is out of range.
+    static std::vector<uint8_t> protect_secret(const std::vector<uint8_t>& secret,
+                                               const std::string& passphrase,
+                                               const std::string& label,
+                                               uint8_t scrypt_log2_n = DEFAULT_SCRYPT_LOG2_N);
+
+    // Returns std::nullopt for a wrong passphrase, wrong label or any tampering (these are
+    // indistinguishable by design). Throws std::runtime_error for blobs that are malformed
+    // or use unsupported parameters.
+    static std::optional<std::vector<uint8_t>> unprotect_secret(const std::vector<uint8_t>& blob,
+                                                                const std::string& passphrase,
+                                                                const std::string& label);
+
     // Identity fingerprint: SHA-256 of an ML-DSA public key, 64 lowercase hex chars.
     static std::string fingerprint(const std::vector<uint8_t>& pub_dsa);
     // "abcd ef01 ..." for display and reading aloud.

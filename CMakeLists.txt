@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pq-file-transfer VERSION 0.3.0 LANGUAGES CXX)
+project(pq-file-transfer VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,9 @@ endif()
 # The relay server has no GUI or liboqs dependency, so it can be built alone
 # on a headless machine with -DPQ_BUILD_CLIENT=OFF.
 option(PQ_BUILD_CLIENT "Build the Qt client" ON)
+# Make the build fail if QtKeychain (OS keychain support) can't be found, instead of quietly
+# building a client that can't remember the passphrase. The release workflow turns this on.
+option(PQ_REQUIRE_KEYCHAIN "Fail if QtKeychain is not found" OFF)
 # Tests need liboqs (but not Qt). Run them with: ctest --test-dir build --output-on-failure
 option(PQ_BUILD_TESTS "Build the test suite" OFF)
 
@@ -82,9 +85,39 @@ if(PQ_BUILD_CLIENT)
         client/main.cpp
         client/main_window.h
         client/main_window.cpp
+        client/key_dialogs.cpp
+        client/keychain.cpp
     )
     target_link_libraries(pq-client PRIVATE pq_core Qt6::Core Qt6::Gui Qt6::Widgets)
     pq_warnings(pq-client)
+
+    # Optional: remember the key passphrase in the OS keychain via QtKeychain
+    # (https://github.com/frankosterfeld/qtkeychain, built with -DBUILD_WITH_QT6=ON).
+    find_package(Qt6 QUIET OPTIONAL_COMPONENTS DBus)  # QtKeychain's Linux backend needs it
+    find_package(Qt6Keychain CONFIG QUIET)
+    set(PQ_KEYCHAIN_TARGET "")
+    if(TARGET Qt6Keychain::Qt6Keychain)
+        set(PQ_KEYCHAIN_TARGET Qt6Keychain::Qt6Keychain)
+    elseif(TARGET qt6keychain)
+        set(PQ_KEYCHAIN_TARGET qt6keychain)
+    elseif(QTKEYCHAIN_LIBRARIES)
+        set(PQ_KEYCHAIN_TARGET ${QTKEYCHAIN_LIBRARIES})
+    endif()
+
+    if(PQ_KEYCHAIN_TARGET)
+        target_link_libraries(pq-client PRIVATE ${PQ_KEYCHAIN_TARGET})
+        target_compile_definitions(pq-client PRIVATE PQ_HAVE_KEYCHAIN)
+        if(QTKEYCHAIN_INCLUDE_DIRS)
+            target_include_directories(pq-client PRIVATE ${QTKEYCHAIN_INCLUDE_DIRS})
+        endif()
+        message(STATUS "OS keychain support: ON (${PQ_KEYCHAIN_TARGET})")
+    elseif(PQ_REQUIRE_KEYCHAIN)
+        message(FATAL_ERROR "QtKeychain for Qt 6 was not found, but PQ_REQUIRE_KEYCHAIN is ON. "
+                            "Install it or add its install prefix to CMAKE_PREFIX_PATH.")
+    else()
+        message(STATUS "OS keychain support: OFF (the passphrase will be asked for at every start; "
+                       "install QtKeychain for Qt 6 to enable remembering it)")
+    endif()
 endif()
 
 # --- Tests ---
@@ -96,8 +129,13 @@ if(PQ_BUILD_TESTS)
     pq_warnings(pq-test-sharing)
     add_test(NAME sharing COMMAND pq-test-sharing)
 
-    # The end-to-end test starts a real pq-server and uses fork/exec, so POSIX only.
+    # These switch $HOME and start processes (fork/exec), so POSIX only.
     if(NOT WIN32)
+        add_executable(pq-test-keys tests/test_keys.cpp)
+        target_link_libraries(pq-test-keys PRIVATE pq_core)
+        pq_warnings(pq-test-keys)
+        add_test(NAME keys COMMAND pq-test-keys)
+
         add_executable(pq-test-e2e tests/test_e2e.cpp)
         target_link_libraries(pq-test-e2e PRIVATE pq_core)
         pq_warnings(pq-test-e2e)

@@ -35,7 +35,7 @@ A transfer works like this. The sender uploads and receives a **transfer ID**, t
 - **Integrity**: any change to the header or chunks, or any truncation, is detected, and no partial output is kept.
 - **Metadata privacy**: the server sees file size, timing and IP addresses, but not file names or sender identity.
 - **Per-transfer keys**: each transfer uses a fresh encapsulation, so the keys of one transfer reveal nothing about another.
-- **No forward secrecy**: transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. Protect your key files.
+- **No forward secrecy**: transfers are encrypted to the recipient's long-term key. Anyone who later obtains a recipient's `private_kem` file, together with a stored ciphertext, can decrypt it. That is why the private keys can be protected by a passphrase (see below).
 
 ### Trust model
 
@@ -49,7 +49,8 @@ Anyone who has a transfer ID can download the ciphertext, but they can't decrypt
 |---|---|---|
 | Qt 6 | GUI (client only) | 6.2+ |
 | liboqs | ML-KEM-768, ML-DSA-65 (client only) | 0.10+ |
-| OpenSSL | AES-GCM, HKDF, SHA-256, RNG | 1.1.1+ (3.x recommended) |
+| OpenSSL | AES-GCM, HKDF, scrypt, SHA-256, RNG | 1.1.1+ (3.x recommended) |
+| QtKeychain | Remembering the passphrase in the OS keychain (client only, optional) | 0.14+ built for Qt 6 |
 | CMake | Build system | 3.16+ |
 | C++17 compiler | GCC 9+, Clang 10+, MSVC 2019+ | |
 
@@ -95,6 +96,17 @@ cmake --build . -j
 
 To build only the relay server, for example on a headless machine without Qt or liboqs, use `cmake -DPQ_BUILD_CLIENT=OFF ..`.
 
+**Optional: OS keychain support.** If QtKeychain for Qt 6 is installed, CMake finds it and the client can remember your key passphrase. Without it the client still works and just asks for the passphrase at every start. To build it yourself:
+
+```bash
+sudo apt install libsecret-1-dev      # Linux only
+git clone https://github.com/frankosterfeld/qtkeychain.git
+cmake -S qtkeychain -B qtkeychain/build -DBUILD_WITH_QT6=ON -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build qtkeychain/build -j && sudo cmake --install qtkeychain/build
+```
+
+Add `-DPQ_REQUIRE_KEYCHAIN=ON` when configuring the client to make the build fail instead of silently leaving it out. The configure output says `OS keychain support: ON` or `OFF`.
+
 ### Windows
 
 1. Install Visual Studio 2022 (with the "Desktop development with C++" workload), CMake, Git, Qt 6 for MSVC 2022 64-bit, and [OpenSSL for Windows](https://slproweb.com/products/Win32OpenSSL.html) (Win64 v3.x, full installer).
@@ -133,9 +145,37 @@ To reach the server over the internet, forward its port, or run it on a small VP
 
 ### 2. Start the client and set the server
 
-Run `./pq-client`. On first run it generates your keypairs in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows). Enter the relay server as `host:port` in the **Relay server** field; it's remembered between sessions.
+Run `./pq-client`. On first run it generates your keypairs in `~/.pq-file-transfer/keys/` (`%USERPROFILE%\pq-file-transfer\keys\` on Windows), after asking whether to protect them with a passphrase (see below). Enter the relay server as `host:port` in the **Relay server** field; it's remembered between sessions.
 
-**Back up your `keys` folder.** If you lose it, you can't receive anything sent to your old keys, and every contact has to re-add you.
+**Back up your `keys` folder, and your passphrase if you set one.** If you lose either, you can't receive anything sent to your old keys, and every contact has to re-add you.
+
+### Protecting your keys with a passphrase
+
+Your private keys let you read files sent to you. If someone copies them, from a stolen laptop or an unprotected backup, they can read everything ever sent to you. A passphrase encrypts the key files on disk, so a copied file is useless without it.
+
+- **First run:** the app explains this and asks you to choose a passphrase (at least 8 characters; a few random words work well).
+- **Upgrading from an earlier version:** the app offers to protect your existing keys. Your fingerprint doesn't change, so contacts don't need to do anything.
+- **Skipping is allowed.** It's your computer and your choice. **Skip (not recommended)** leaves the keys unprotected, and the app won't keep asking. You can protect them later from **Key Protection…**.
+- **Key Protection…** lets you set, change or remove the passphrase at any time. The status line above it shows whether your keys are currently protected.
+- **A forgotten passphrase cannot be recovered.** There is no reset: the keys are encrypted with it.
+
+The passphrase is turned into an encryption key with scrypt (128 MiB of memory, so guessing is slow and expensive even for an attacker with a lot of hardware), and the keys are encrypted with AES-256-GCM. Each protected file also authenticates which key it holds, so the two files can't be swapped. While the app is open, the decrypted keys are held in memory, and they are wiped when you close it.
+
+### Remembering the passphrase (OS keychain)
+
+If the app was built with keychain support, the passphrase prompt has a **Remember on this computer** checkbox (ticked by default). The passphrase is then kept in your operating system's own secret store, so the app unlocks your keys without asking. In normal use you only type the passphrase again after reinstalling, or on a new computer.
+
+| System | Where it is kept |
+|---|---|
+| Windows | Credential Manager |
+| macOS | Keychain (you may see a one-time "allow access" prompt) |
+| Linux | Secret Service: GNOME Keyring, KWallet, or any compatible keyring |
+
+Nothing needs configuring. The one catch is Linux: a keyring service must be running. That is normal on Ubuntu, Fedora and KDE desktops but not on minimal window managers or over SSH. If there isn't one, the app tells you the passphrase couldn't be saved and simply asks for it at each start.
+
+**What this does and doesn't protect against.** The keychain is unlocked by your operating-system login. A copied key file, a stolen disk or an unencrypted backup stays useless, because the passphrase isn't in the file. It does *not* protect against malware running as you, or someone using your logged-in session, which holds for any desktop app. You can remove the saved passphrase at any time from **Key Protection… → Forget saved passphrase**.
+
+**Limits.** The passphrase and unlocked keys sit in ordinary process memory while the app runs, so this doesn't defend against someone who can read that memory, or against a swap file or hibernation image on an unencrypted disk. Full-disk encryption covers that.
 
 ### 3. Add a contact
 
@@ -171,7 +211,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 - `sharing` checks server addresses, contact cards and share links, including damaged and hostile input.
-- `e2e` starts a real `pq-server` and runs transfers between three simulated users (Linux and macOS only). It covers wrong recipients, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
+- `keys` checks the passphrase protection: the encrypted file format (including tampering, swapped files and hostile settings) and locking, unlocking, changing and removing the passphrase, including a crash in the middle of protecting (Linux and macOS only).
+- `e2e` starts a real `pq-server` and runs transfers between three simulated users, two of whom use passphrase-protected keys (Linux and macOS only). It covers wrong recipients, locked keys, unknown senders, tampering, truncation, hostile file names, and server restarts and expiry.
 
 The release workflow runs the same tests against the real liboqs before it publishes anything.
 

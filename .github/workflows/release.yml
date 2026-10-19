@@ -9,6 +9,8 @@ env:
   # liboqs release tag to build. Must include ML-KEM-768 and ML-DSA-65 (0.12.0+ recommended).
   LIBOQS_VERSION: "0.12.0"
   QT_VERSION: "6.7.*"
+  # QtKeychain lets the app remember the key passphrase in the OS keychain. Tag names have no "v".
+  QTKEYCHAIN_VERSION: "0.15.0"
 
 jobs:
   linux:
@@ -21,7 +23,7 @@ jobs:
       - name: System packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ libssl-dev libgl1-mesa-dev libglu1-mesa-dev \
+          sudo apt-get install -y cmake g++ libssl-dev libsecret-1-dev libgl1-mesa-dev libglu1-mesa-dev \
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libfontconfig1 libdbus-1-3
 
@@ -53,10 +55,29 @@ jobs:
           cmake --build liboqs/build -j"$(nproc)"
           cmake --install liboqs/build
 
+      - name: Restore QtKeychain
+        id: kc-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/qtkeychain-install
+          key: qtkeychain-${{ runner.os }}-${{ env.QTKEYCHAIN_VERSION }}-qt${{ env.QT_VERSION }}-v1
+
+      - name: Build QtKeychain (static)
+        if: steps.kc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$QTKEYCHAIN_VERSION" https://github.com/frankosterfeld/qtkeychain.git
+          cmake -S qtkeychain -B qtkeychain/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/qtkeychain-install" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DBUILD_WITH_QT6=ON -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF
+          cmake --build qtkeychain/build -j"$(nproc)"
+          cmake --install qtkeychain/build
+
       - name: Build pq-client, pq-server and tests
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPQ_BUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$HOME/liboqs-install"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPQ_BUILD_TESTS=ON -DPQ_REQUIRE_KEYCHAIN=ON \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$HOME/liboqs-install;$HOME/qtkeychain-install"
           cmake --build build -j"$(nproc)"
 
       # Runs against the real liboqs. A failing test stops the release.
@@ -126,12 +147,33 @@ jobs:
           cmake --build liboqs/build --config Release
           cmake --install liboqs/build --config Release
 
+      - name: Restore QtKeychain
+        id: kc-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/qtkeychain-install
+          key: qtkeychain-${{ runner.os }}-${{ env.QTKEYCHAIN_VERSION }}-qt${{ env.QT_VERSION }}-v1
+
+      - name: Build QtKeychain (static)
+        if: steps.kc-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$QTKEYCHAIN_VERSION" https://github.com/frankosterfeld/qtkeychain.git
+          cmake -S qtkeychain -B qtkeychain/build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_INSTALL_PREFIX="$(cygpath -m "$HOME")/qtkeychain-install" \
+            -DCMAKE_PREFIX_PATH="$(cygpath -m "$QT_ROOT_DIR")" \
+            -DBUILD_WITH_QT6=ON -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF
+          cmake --build qtkeychain/build --config Release
+          cmake --install qtkeychain/build --config Release
+
       - name: Build pq-client and pq-server
         run: |
           QT="$(cygpath -m "$QT_ROOT_DIR")"
           OQS="$(cygpath -m "$HOME")/liboqs-install"
+          KC="$(cygpath -m "$HOME")/qtkeychain-install"
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_PREFIX_PATH="$QT;$OQS" \
+            -DPQ_REQUIRE_KEYCHAIN=ON \
+            -DCMAKE_PREFIX_PATH="$QT;$OQS;$KC" \
             -DCMAKE_TOOLCHAIN_FILE="$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
           cmake --build build --config Release
