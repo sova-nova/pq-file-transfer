@@ -182,6 +182,58 @@ struct KeyringChunk {
     std::vector<uint8_t> data;
 };
 
+// --- Attachments ---
+//
+// A file is encrypted by the sender under its own random key, cut into chunks and uploaded to the sender's
+// relay, which can't read it. Each recipient has a random download token (the relay keeps only its hash).
+// Fetching needs no mailbox, just the token; only a separate "redeem", sent after the recipient has
+// decrypted and checked the file, uses the token up, so an interrupted download can be retried. The relay
+// deletes the file when every token is redeemed, when the sender withdraws it, or when it expires.
+constexpr size_t FILE_ID_BYTES = 16;
+constexpr size_t FILE_TOKEN_BYTES = 32;
+constexpr size_t MAX_FILE_TOKENS = 16;
+constexpr size_t MAX_FILE_CHUNK_BYTES = 64 * 1024;  // of ciphertext, so one chunk fits one relay message
+constexpr size_t MIN_FILE_CHUNK_BYTES = 4096;       // unless the whole file is smaller
+constexpr uint64_t MAX_FILE_BYTES = 16ull * 1024 * 1024 * 1024;  // the most the format allows; a relay sets a lower limit
+constexpr uint32_t FILE_ACK_WINDOW = 64;            // the relay confirms every this many chunks
+
+struct FileBegin {
+    std::vector<uint8_t> file_id;   // FILE_ID_BYTES
+    uint64_t total_size = 0;        // ciphertext bytes, all chunks together
+    uint32_t chunk_size = 0;        // ciphertext bytes in every chunk but the last
+    uint32_t chunk_count = 0;       // must be what total_size and chunk_size need
+    uint64_t expires_at = 0;        // unix seconds
+    std::vector<std::vector<uint8_t>> token_hashes;  // one per recipient: 1 to MAX_FILE_TOKENS, HASH_BYTES each, all different
+};
+struct FileChunk {
+    uint32_t index = 0;
+    std::vector<uint8_t> data;      // 1 to MAX_FILE_CHUNK_BYTES
+};
+struct FileDownload {
+    std::vector<uint8_t> file_id;
+    std::vector<uint8_t> token;     // FILE_TOKEN_BYTES: the secret itself
+    uint32_t from_chunk = 0;        // where to start, to carry on after an interruption
+};
+struct FileInfo {
+    uint64_t total_size = 0;
+    uint32_t chunk_size = 0;
+    uint32_t chunk_count = 0;
+    uint64_t expires_at = 0;
+};
+struct FileRedeem {
+    std::vector<uint8_t> file_id;
+    std::vector<uint8_t> token;
+};
+struct FileRef {                    // cancel and status
+    std::vector<uint8_t> file_id;
+};
+struct FileStatus {
+    uint32_t tokens_total = 0;
+    uint32_t tokens_redeemed = 0;
+    uint64_t expires_at = 0;
+    bool ready = false;             // fully uploaded
+};
+
 // --- Encoding. decode_* validate every length and reject trailing bytes. ---
 
 std::vector<uint8_t> encode(const Hello&);
@@ -202,6 +254,13 @@ std::vector<uint8_t> encode(const ArchiveFetch&);
 std::vector<uint8_t> encode(const ArchiveEntry&);
 std::vector<uint8_t> encode(const KeyringChunk&);
 std::vector<uint8_t> encode(const ArchiveDelete&);
+std::vector<uint8_t> encode(const FileBegin&);
+std::vector<uint8_t> encode(const FileChunk&);
+std::vector<uint8_t> encode(const FileDownload&);
+std::vector<uint8_t> encode(const FileInfo&);
+std::vector<uint8_t> encode(const FileRedeem&);
+std::vector<uint8_t> encode(const FileRef&);
+std::vector<uint8_t> encode(const FileStatus&);
 
 std::optional<Hello> decode_hello(const std::vector<uint8_t>&);
 std::optional<HelloReply> decode_hello_reply(const std::vector<uint8_t>&);
@@ -224,6 +283,15 @@ std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>&);
 // means "no keyring".
 std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>&);
 std::optional<ArchiveDelete> decode_archive_delete(const std::vector<uint8_t>&);
+// A begin is valid only if its numbers fit together: the chunk count is what the total and chunk size
+// need, chunks are neither tiny nor over a message's worth, and every recipient's token hash is different.
+std::optional<FileBegin> decode_file_begin(const std::vector<uint8_t>&);
+std::optional<FileChunk> decode_file_chunk(const std::vector<uint8_t>&);
+std::optional<FileDownload> decode_file_download(const std::vector<uint8_t>&);
+std::optional<FileInfo> decode_file_info(const std::vector<uint8_t>&);
+std::optional<FileRedeem> decode_file_redeem(const std::vector<uint8_t>&);
+std::optional<FileRef> decode_file_ref(const std::vector<uint8_t>&);
+std::optional<FileStatus> decode_file_status(const std::vector<uint8_t>&);
 
 // --- What gets signed. Each starts with its own label, and includes the relay ID, so a
 // signature made for one purpose or one relay can't be accepted for another. ---

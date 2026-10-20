@@ -33,6 +33,11 @@ struct RelayLimits {
     size_t archive_quota_bytes = 512ull * 1024 * 1024;   // of ciphertext, per archive
     int64_t archive_join_window_seconds = 30ll * 24 * 3600;  // members must register their keys within this
     size_t keyring_max_bytes = 4ull * 1024 * 1024;       // one mailbox's keyring (each chat's key alone is about 4 KB)
+    // Attachments (M5).
+    uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;     // one file
+    uint64_t attachment_quota_bytes = 4096ull * 1024 * 1024;   // all of one mailbox's stored files together
+    int64_t attachment_max_seconds = 30ll * 24 * 3600;         // how far ahead a file's expiry may be
+    int64_t abandoned_upload_seconds = 3600;                   // an upload not finished by then is thrown away
     int idle_timeout_seconds = 180;                    // clients ping every minute or so
     int poll_millis = 250;                             // how often a connected owner is checked for news
 };
@@ -99,6 +104,9 @@ private:
     };
 
     void load_or_create_identity(const std::filesystem::path& data_dir);
+    std::filesystem::path file_path(const Bytes& file_id, const char* extension) const;
+    void remove_file_bytes(const Bytes& file_id);
+    std::filesystem::path files_dir_;
     void log(const std::string& line) const { if (log_) log_(line); }
     bool push_pending(socket_t sock, const Bytes& mailbox, int64_t& last_seq);
 

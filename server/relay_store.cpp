@@ -50,6 +50,16 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  token_hash BLOB);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at);"
+         // Version 7: attachments. A file's record and its recipients' token hashes (the bytes are on disk).
+         "CREATE TABLE IF NOT EXISTS files("
+         "  id BLOB PRIMARY KEY,"
+         "  owner BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,"
+         "  total_size INTEGER NOT NULL, chunk_size INTEGER NOT NULL, chunk_count INTEGER NOT NULL,"
+         "  expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, ready INTEGER NOT NULL DEFAULT 0);"
+         "CREATE TABLE IF NOT EXISTS file_tokens("
+         "  file_id BLOB NOT NULL REFERENCES files(id) ON DELETE CASCADE,"
+         "  token_hash BLOB NOT NULL, redeemed INTEGER NOT NULL DEFAULT 0,"
+         "  PRIMARY KEY(file_id, token_hash));"
          // Version 5: one encrypted keyring per mailbox, removed with it.
          "CREATE TABLE IF NOT EXISTS keyrings("
          "  mailbox_id BLOB PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,"
@@ -85,8 +95,8 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  PRIMARY KEY(archive_id, number))");
 
     // Schema versions: 1 = the first release (envelopes without token_hash), 2 = token hashes,
-    // 3 = invites and mailboxes remember who vouched, 4 = chat archives, 5 = keyrings, 6 = current (a
-    // redacted flag on archive entries). A brand-new database is created at the current shape and starts at 0.
+    // 3 = invites and mailboxes remember who vouched, 4 = chat archives, 5 = keyrings, 6 = a redacted flag on
+    // archive entries, 7 = current (attachments; new tables only). A brand-new database is created at the current shape and starts at 0.
     int64_t version = 0;
     {
         Stmt v(db_, "PRAGMA user_version");
@@ -98,7 +108,7 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
         exec(db_, "ALTER TABLE mailboxes ADD COLUMN invited_by BLOB");
     }
     if (version == 4 || version == 5) exec(db_, "ALTER TABLE archive_entries ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0");
-    if (version < 6) exec(db_, "PRAGMA user_version=6");
+    if (version < 7) exec(db_, "PRAGMA user_version=7");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -325,6 +335,144 @@ size_t RelayStore::envelope_count(const Bytes& mailbox_id) {
 }
 
 // --- Chat archives ---
+
+RelayStore::BeginFileResult RelayStore::begin_file(const Bytes& owner, const Bytes& file_id, uint64_t total_size, uint32_t chunk_size, uint32_t chunk_count,
+                                                   int64_t expires_at, const std::vector<Bytes>& token_hashes, int64_t now, uint64_t quota_bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    {
+        Stmt m(db_, "SELECT 1 FROM mailboxes WHERE id = ?");
+        m.blob(1, owner);
+        if (!m.step()) return BeginFileResult::NoSuchMailbox;
+    }
+    {
+        Stmt e(db_, "SELECT 1 FROM files WHERE id = ?");
+        e.blob(1, file_id);
+        if (e.step()) return BeginFileResult::Exists;
+    }
+    uint64_t stored = 0;
+    {
+        Stmt s(db_, "SELECT COALESCE(SUM(total_size), 0) FROM files WHERE owner = ?");
+        s.blob(1, owner);
+        if (s.step()) stored = static_cast<uint64_t>(s.column_i64(0));
+    }
+    if (stored + total_size > quota_bytes) return BeginFileResult::QuotaExceeded;
+    Stmt(db_, "INSERT INTO files(id, owner, total_size, chunk_size, chunk_count, expires_at, created_at, ready) VALUES(?, ?, ?, ?, ?, ?, ?, 0)")
+        .blob(1, file_id).blob(2, owner).i64(3, static_cast<int64_t>(total_size)).i64(4, chunk_size).i64(5, chunk_count).i64(6, expires_at).i64(7, now).step();
+    for (const auto& h : token_hashes) Stmt(db_, "INSERT INTO file_tokens(file_id, token_hash, redeemed) VALUES(?, ?, 0)").blob(1, file_id).blob(2, h).step();
+    tx.commit();
+    return BeginFileResult::Ok;
+}
+
+void RelayStore::finish_file(const Bytes& file_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE files SET ready = 1 WHERE id = ?").blob(1, file_id).step();
+}
+
+std::optional<RelayStore::FileMeta> RelayStore::file(const Bytes& file_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT owner, total_size, chunk_size, chunk_count, expires_at, ready, "
+                "(SELECT COUNT(*) FROM file_tokens t WHERE t.file_id = files.id), "
+                "(SELECT COUNT(*) FROM file_tokens t WHERE t.file_id = files.id AND t.redeemed = 1) FROM files WHERE id = ?");
+    s.blob(1, file_id);
+    if (!s.step()) return std::nullopt;
+    FileMeta m;
+    m.id = file_id;
+    m.owner = s.column_blob(0);
+    m.total_size = static_cast<uint64_t>(s.column_i64(1));
+    m.chunk_size = static_cast<uint32_t>(s.column_i64(2));
+    m.chunk_count = static_cast<uint32_t>(s.column_i64(3));
+    m.expires_at = s.column_i64(4);
+    m.ready = s.column_i64(5) != 0;
+    m.tokens_total = static_cast<uint32_t>(s.column_i64(6));
+    m.tokens_redeemed = static_cast<uint32_t>(s.column_i64(7));
+    return m;
+}
+
+RelayStore::TokenCheck RelayStore::check_file_token(const Bytes& file_id, const Bytes& token_hash, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int64_t expires = 0, ready = 0;
+    {
+        Stmt f(db_, "SELECT expires_at, ready FROM files WHERE id = ?");
+        f.blob(1, file_id);
+        if (!f.step()) return TokenCheck::NoSuchFile;
+        expires = f.column_i64(0);
+        ready = f.column_i64(1);
+    }
+    Stmt t(db_, "SELECT redeemed FROM file_tokens WHERE file_id = ? AND token_hash = ?");
+    t.blob(1, file_id).blob(2, token_hash);
+    if (!t.step()) return TokenCheck::BadToken;
+    if (t.column_i64(0)) return TokenCheck::AlreadyRedeemed;
+    if (!ready) return TokenCheck::NotReady;
+    if (expires <= now) return TokenCheck::Expired;
+    return TokenCheck::Ok;
+}
+
+RelayStore::RedeemResult RelayStore::redeem_file_token(const Bytes& file_id, const Bytes& token_hash, bool* all_redeemed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    if (all_redeemed) *all_redeemed = false;
+    {
+        Stmt f(db_, "SELECT 1 FROM files WHERE id = ?");
+        f.blob(1, file_id);
+        if (!f.step()) return RedeemResult::NoSuchFile;
+    }
+    {
+        Stmt t(db_, "SELECT redeemed FROM file_tokens WHERE file_id = ? AND token_hash = ?");
+        t.blob(1, file_id).blob(2, token_hash);
+        if (!t.step()) return RedeemResult::BadToken;
+        if (t.column_i64(0)) return RedeemResult::AlreadyRedeemed;
+    }
+    Stmt(db_, "UPDATE file_tokens SET redeemed = 1 WHERE file_id = ? AND token_hash = ?").blob(1, file_id).blob(2, token_hash).step();
+    int64_t left = 0;
+    {
+        Stmt n(db_, "SELECT COUNT(*) FROM file_tokens WHERE file_id = ? AND redeemed = 0");
+        n.blob(1, file_id);
+        if (n.step()) left = n.column_i64(0);
+    }
+    if (left == 0) {
+        Stmt(db_, "DELETE FROM files WHERE id = ?").blob(1, file_id).step();  // its tokens go with it
+        if (all_redeemed) *all_redeemed = true;
+    }
+    tx.commit();
+    return RedeemResult::Ok;
+}
+
+bool RelayStore::delete_file(const Bytes& file_id, const Bytes& owner) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (owner.empty()) Stmt(db_, "DELETE FROM files WHERE id = ?").blob(1, file_id).step();
+    else Stmt(db_, "DELETE FROM files WHERE id = ? AND owner = ?").blob(1, file_id).blob(2, owner).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+std::vector<Bytes> RelayStore::sweep_files(int64_t now, int64_t abandoned_before) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    std::vector<Bytes> gone;
+    {
+        Stmt s(db_, "SELECT id FROM files WHERE expires_at <= ? OR (ready = 0 AND created_at <= ?)");
+        s.i64(1, now).i64(2, abandoned_before);
+        while (s.step()) gone.push_back(s.column_blob(0));
+    }
+    for (const auto& id : gone) Stmt(db_, "DELETE FROM files WHERE id = ?").blob(1, id).step();
+    tx.commit();
+    return gone;
+}
+
+std::vector<Bytes> RelayStore::all_file_ids() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT id FROM files");
+    std::vector<Bytes> out;
+    while (s.step()) out.push_back(s.column_blob(0));
+    return out;
+}
+
+uint64_t RelayStore::owner_file_bytes(const Bytes& owner) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT COALESCE(SUM(total_size), 0) FROM files WHERE owner = ?");
+    s.blob(1, owner);
+    return s.step() ? static_cast<uint64_t>(s.column_i64(0)) : 0;
+}
 
 void RelayStore::put_keyring(const Bytes& mailbox_id, const Bytes& blob, int64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);

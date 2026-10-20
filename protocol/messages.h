@@ -86,6 +86,21 @@ enum class MessageType : uint8_t {
     ARCHIVE_FETCH      = 0x49,  // member → relay: send entries from a number onwards
     ARCHIVE_ENTRY      = 0x4A,  // relay → member: one entry
     ARCHIVE_FETCH_END  = 0x4B,  // relay → member: that was all; here is the head
+    // --- Attachments (M5): an encrypted file parked on the sender's relay, fetched once by each recipient ---
+    FILE_UPLOAD_BEGIN  = 0x60,  // mailbox owner → relay: a file is coming (size, chunking, expiry, one token hash per recipient)
+    FILE_UPLOAD_OK     = 0x61,
+    FILE_CHUNK         = 0x62,  // owner → relay: one chunk of ciphertext
+    FILE_CHUNK_OK      = 0x63,  // relay → owner: that many chunks are stored (sent every few chunks, and after the last)
+    FILE_DOWNLOAD      = 0x64,  // anyone with a recipient's token → relay: send me the file (no mailbox needed)
+    FILE_INFO          = 0x65,  // relay → downloader: size and chunking
+    FILE_DATA          = 0x66,  // relay → downloader: one chunk
+    FILE_DOWNLOAD_END  = 0x67,
+    FILE_REDEEM        = 0x68,  // downloader → relay: I have it, verified: use up my token
+    FILE_REDEEM_OK     = 0x69,
+    FILE_CANCEL        = 0x6A,  // owner → relay: withdraw this file
+    FILE_CANCEL_OK     = 0x6B,
+    FILE_STATUS        = 0x6C,  // owner → relay: how many recipients have fetched it?
+    FILE_STATUS_OK     = 0x6D,
     // --- Deleting a chat's archive, or redacting entries, by agreement of every member ---
     ARCHIVE_DELETE     = 0x50,  // member → relay: an order signed by every registered member key
     ARCHIVE_DELETE_OK  = 0x51,

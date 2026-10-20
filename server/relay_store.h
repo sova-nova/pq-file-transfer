@@ -97,6 +97,39 @@ public:
     size_t ack(const Bytes& mailbox_id, const std::vector<Bytes>& envelope_ids);
     size_t envelope_count(const Bytes& mailbox_id);
 
+    // --- Attachments: encrypted files, fetched once by each recipient. The bytes live on disk; this holds
+    // who may fetch them and when they go. ---
+    struct FileMeta {
+        Bytes id;
+        Bytes owner;  // the mailbox that uploaded it: needed to enforce quotas and to let only them withdraw it
+        uint64_t total_size = 0;
+        uint32_t chunk_size = 0;
+        uint32_t chunk_count = 0;
+        int64_t expires_at = 0;
+        bool ready = false;  // fully uploaded
+        uint32_t tokens_total = 0;
+        uint32_t tokens_redeemed = 0;
+    };
+    enum class BeginFileResult { Ok, Exists, QuotaExceeded, NoSuchMailbox };
+    // Records a file about to be uploaded (not yet fetchable). `quota_bytes` bounds what this mailbox may have stored.
+    BeginFileResult begin_file(const Bytes& owner, const Bytes& file_id, uint64_t total_size, uint32_t chunk_size, uint32_t chunk_count,
+                               int64_t expires_at, const std::vector<Bytes>& token_hashes, int64_t now, uint64_t quota_bytes);
+    void finish_file(const Bytes& file_id);  // the last chunk has arrived: it can be fetched now
+    std::optional<FileMeta> file(const Bytes& file_id);
+    enum class TokenCheck { Ok, NoSuchFile, NotReady, Expired, BadToken, AlreadyRedeemed };
+    TokenCheck check_file_token(const Bytes& file_id, const Bytes& token_hash, int64_t now);
+    enum class RedeemResult { Ok, NoSuchFile, BadToken, AlreadyRedeemed };
+    // Uses the token up. When that was the last one, the file's record is removed and `*all_redeemed` is true:
+    // the caller then deletes the bytes.
+    RedeemResult redeem_file_token(const Bytes& file_id, const Bytes& token_hash, bool* all_redeemed);
+    // Removes a file's record. With a non-empty `owner`, only that mailbox's file. True if there was one.
+    bool delete_file(const Bytes& file_id, const Bytes& owner);
+    // Removes expired files and uploads abandoned before `abandoned_before`; returns their IDs so the caller can
+    // delete the bytes.
+    std::vector<Bytes> sweep_files(int64_t now, int64_t abandoned_before);
+    std::vector<Bytes> all_file_ids();
+    uint64_t owner_file_bytes(const Bytes& owner);
+
     // --- Keyring: one opaque encrypted blob per mailbox, replaced as a whole ---
     void put_keyring(const Bytes& mailbox_id, const Bytes& blob, int64_t now);
     std::optional<Bytes> get_keyring(const Bytes& mailbox_id);

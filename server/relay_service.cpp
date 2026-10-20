@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <ctime>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 
 #ifndef _WIN32
@@ -118,6 +119,18 @@ RelayService::RelayService(const fs::path& data_dir, const RelayLimits& limits) 
 
     load_or_create_identity(data_dir);
     store_ = std::make_unique<RelayStore>(data_dir / "relay.db");
+    files_dir_ = data_dir / "files";
+    fs::create_directories(files_dir_, ec);
+    if (ec) throw std::runtime_error("Cannot create " + files_dir_.string() + ": " + ec.message());
+    fs::permissions(files_dir_, fs::perms::owner_all, fs::perm_options::replace, ec);
+}
+
+fs::path RelayService::file_path(const Bytes& file_id, const char* extension) const { return files_dir_ / (bytes_to_hex(file_id) + extension); }
+
+void RelayService::remove_file_bytes(const Bytes& file_id) {
+    std::error_code ec;
+    fs::remove(file_path(file_id, ".bin"), ec);
+    fs::remove(file_path(file_id, ".part"), ec);
 }
 
 RelayService::~RelayService() {
@@ -181,6 +194,21 @@ std::string RelayService::create_invite() {
 size_t RelayService::sweep_once() {
     auto swept = store_->sweep(unix_now());
     rate_.prune(unix_now());
+    // Files that have expired, and uploads that were never finished; then any bytes with no record at all
+    // (their mailbox was removed, or the relay stopped part way through).
+    size_t files = 0;
+    for (const auto& id : store_->sweep_files(unix_now(), unix_now() - limits_.abandoned_upload_seconds)) {
+        remove_file_bytes(id);
+        files++;
+    }
+    {
+        std::set<std::string> known;
+        for (const auto& id : store_->all_file_ids()) known.insert(bytes_to_hex(id));
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(files_dir_, ec))
+            if (!known.count(entry.path().stem().string())) fs::remove(entry.path(), ec);
+    }
+    if (files) log("Expired " + std::to_string(files) + " attachment(s)");
     if (swept.envelopes || swept.invites || swept.archives)
         log("Expired " + std::to_string(swept.envelopes) + " envelope(s), " + std::to_string(swept.invites) + " invite(s), " +
             std::to_string(swept.archives) + " abandoned archive(s)");
@@ -253,6 +281,23 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
     auto kick = std::make_shared<std::atomic<bool>>(false);
     bool challenge_used = false, collecting = false, is_owner = false;
     std::optional<std::pair<Bytes, Bytes>> archive_session;  // (archive ID, key hash) once signed in to an archive
+    struct FileUploadState {  // an attachment arriving: written to a temporary file, and only made fetchable when the last chunk is in
+        bool active = false;
+        Bytes id;
+        uint32_t count = 0, next = 0, chunk_size = 0;
+        uint64_t total = 0;
+        std::ofstream out;
+        fs::path part;
+    } upload;
+    auto abort_upload = [&] {
+        if (!upload.active) return;
+        upload.out.close();
+        std::error_code ec;
+        fs::remove(upload.part, ec);
+        store_->delete_file(upload.id, Bytes());
+        upload.active = false;
+    };
+    auto upload_guard = make_scope_exit([&] { abort_upload(); });  // a connection that drops half way leaves nothing behind
     struct KeyringUpload {  // a keyring arriving in chunks: kept apart until the last one, so a dropped connection changes nothing
         bool active = false;
         uint32_t total = 0, count = 0, next = 0;
@@ -518,6 +563,143 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     auto info = store_->archive_info(archive_id, now);
                     if (!info) { send_error(sock, "Unknown archive"); break; }
                     if (!send_message(sock, MessageType::ARCHIVE_FETCH_END, encode(ArchiveHead{info->head.number, info->head.hash}))) return;
+                    break;
+                }
+
+                case MessageType::FILE_UPLOAD_BEGIN: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_file_begin(msg->payload);
+                    if (!m) { send_error(sock, "Malformed file request"); return; }
+                    abort_upload();  // starting another replaces one that was begun and never finished
+                    if (!rate_.allow("file-up:" + hex_of(*mailbox), 30, now)) { send_error(sock, "Too many requests, try again later"); break; }
+                    if (m->total_size > limits_.max_attachment_bytes) {
+                        send_error(sock, "That file is larger than this relay allows (" + std::to_string(limits_.max_attachment_bytes / (1024 * 1024)) + " MiB)");
+                        break;
+                    }
+                    if (static_cast<int64_t>(m->expires_at) < now + 60 || static_cast<int64_t>(m->expires_at) > now + limits_.attachment_max_seconds) {
+                        send_error(sock, "A file's expiry must be between a minute and " + std::to_string(limits_.attachment_max_seconds / 86400) + " days from now");
+                        break;
+                    }
+                    auto began = store_->begin_file(*mailbox, m->file_id, m->total_size, m->chunk_size, m->chunk_count, static_cast<int64_t>(m->expires_at), m->token_hashes, now,
+                                                    limits_.attachment_quota_bytes);
+                    if (began == RelayStore::BeginFileResult::Exists) { send_error(sock, "That file already exists"); break; }
+                    if (began == RelayStore::BeginFileResult::QuotaExceeded) {
+                        send_error(sock, "Your stored attachments would go over this relay's limit (" + std::to_string(limits_.attachment_quota_bytes / (1024 * 1024)) + " MiB)");
+                        break;
+                    }
+                    if (began != RelayStore::BeginFileResult::Ok) { send_error(sock, "Unknown mailbox"); break; }
+                    upload = FileUploadState();
+                    upload.id = m->file_id;
+                    upload.count = m->chunk_count;
+                    upload.chunk_size = m->chunk_size;
+                    upload.total = m->total_size;
+                    upload.part = file_path(m->file_id, ".part");
+                    upload.out.open(upload.part, std::ios::binary | std::ios::trunc);
+                    if (!upload.out) {
+                        store_->delete_file(m->file_id, Bytes());
+                        send_error(sock, "The relay can't store files right now");
+                        break;
+                    }
+                    upload.active = true;
+                    if (!send_message(sock, MessageType::FILE_UPLOAD_OK, {})) return;
+                    break;
+                }
+
+                case MessageType::FILE_CHUNK: {
+                    if (!upload.active) { send_error(sock, "No upload in progress"); break; }
+                    auto m = decode_file_chunk(msg->payload);
+                    if (!m) { abort_upload(); send_error(sock, "Malformed file request"); return; }
+                    const uint64_t expected = upload.next + 1 < upload.count ? upload.chunk_size : upload.total - static_cast<uint64_t>(upload.chunk_size) * (upload.count - 1);
+                    if (m->index != upload.next || m->data.size() != expected) {
+                        abort_upload();
+                        send_error(sock, "File chunks out of order, or of the wrong size");
+                        break;
+                    }
+                    upload.out.write(reinterpret_cast<const char*>(m->data.data()), static_cast<std::streamsize>(m->data.size()));
+                    if (!upload.out) { abort_upload(); send_error(sock, "The relay can't store files right now"); break; }
+                    upload.next++;
+                    const bool last = upload.next == upload.count;
+                    if (last) {
+                        upload.out.close();
+                        std::error_code ec;
+                        fs::rename(upload.part, file_path(upload.id, ".bin"), ec);
+                        if (ec) { abort_upload(); send_error(sock, "The relay can't store files right now"); break; }
+                        store_->finish_file(upload.id);
+                        log("Attachment stored by " + short_id(*mailbox));
+                        upload.active = false;  // done: the guard has nothing to undo
+                    }
+                    if (last || upload.next % FILE_ACK_WINDOW == 0) {
+                        Bytes ack;
+                        write_u32(ack, last ? m->index + 1 : upload.next);
+                        if (!send_message(sock, MessageType::FILE_CHUNK_OK, ack)) return;
+                    }
+                    break;
+                }
+
+                case MessageType::FILE_DOWNLOAD: {
+                    // Anyone holding a recipient's token, with no mailbox. The same refusal for "no such file" and "wrong token".
+                    auto m = decode_file_download(msg->payload);
+                    if (!m) { send_error(sock, "Malformed file request"); return; }
+                    if (!rate_.allow("file-dl:" + peer_ip, limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many attempts, try again later"); break; }
+                    switch (store_->check_file_token(m->file_id, CryptoEngine::sha256(m->token), now)) {
+                        case RelayStore::TokenCheck::Ok: break;
+                        case RelayStore::TokenCheck::Expired: send_error(sock, "That file has expired"); continue;
+                        case RelayStore::TokenCheck::AlreadyRedeemed: send_error(sock, "That file was already downloaded with this token"); continue;
+                        case RelayStore::TokenCheck::NotReady: send_error(sock, "That file isn't ready yet"); continue;
+                        default: send_error(sock, "No such file, or that token isn't valid"); continue;
+                    }
+                    auto meta = store_->file(m->file_id);
+                    if (!meta || m->from_chunk >= meta->chunk_count) { send_error(sock, "No such file, or that token isn't valid"); break; }
+                    std::ifstream in(file_path(m->file_id, ".bin"), std::ios::binary);
+                    if (!in) { send_error(sock, "That file is no longer available"); break; }
+                    if (!send_message(sock, MessageType::FILE_INFO, encode(FileInfo{meta->total_size, meta->chunk_size, meta->chunk_count, static_cast<uint64_t>(meta->expires_at)}))) return;
+                    for (uint32_t i = m->from_chunk; i < meta->chunk_count; i++) {
+                        const uint64_t offset = static_cast<uint64_t>(i) * meta->chunk_size;
+                        const size_t size = static_cast<size_t>(std::min<uint64_t>(meta->chunk_size, meta->total_size - offset));
+                        Bytes data(size);
+                        in.seekg(static_cast<std::streamoff>(offset));
+                        in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
+                        if (!in) { send_error(sock, "That file is no longer available"); return; }
+                        if (!send_message(sock, MessageType::FILE_DATA, encode(FileChunk{i, std::move(data)}))) return;
+                    }
+                    if (!send_message(sock, MessageType::FILE_DOWNLOAD_END, {})) return;
+                    break;
+                }
+
+                case MessageType::FILE_REDEEM: {
+                    auto m = decode_file_redeem(msg->payload);
+                    if (!m) { send_error(sock, "Malformed file request"); return; }
+                    if (!rate_.allow("file-dl:" + peer_ip, limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many attempts, try again later"); break; }
+                    bool all_done = false;
+                    switch (store_->redeem_file_token(m->file_id, CryptoEngine::sha256(m->token), &all_done)) {
+                        case RelayStore::RedeemResult::Ok:
+                            if (all_done) remove_file_bytes(m->file_id);  // the last recipient has it: the relay's copy goes
+                            if (!send_message(sock, MessageType::FILE_REDEEM_OK, {})) return;
+                            break;
+                        case RelayStore::RedeemResult::AlreadyRedeemed: send_error(sock, "That token was already used"); break;
+                        default: send_error(sock, "No such file, or that token isn't valid"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::FILE_CANCEL: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_file_ref(msg->payload);
+                    if (!m) { send_error(sock, "Malformed file request"); return; }
+                    if (!store_->delete_file(m->file_id, *mailbox)) { send_error(sock, "That isn't one of your files"); break; }
+                    remove_file_bytes(m->file_id);
+                    log("Attachment withdrawn by " + short_id(*mailbox));
+                    if (!send_message(sock, MessageType::FILE_CANCEL_OK, {})) return;
+                    break;
+                }
+
+                case MessageType::FILE_STATUS: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_file_ref(msg->payload);
+                    if (!m) { send_error(sock, "Malformed file request"); return; }
+                    auto meta = store_->file(m->file_id);
+                    if (!meta || meta->owner != *mailbox) { send_error(sock, "That isn't one of your files"); break; }
+                    if (!send_message(sock, MessageType::FILE_STATUS_OK, encode(FileStatus{meta->tokens_total, meta->tokens_redeemed, static_cast<uint64_t>(meta->expires_at), meta->ready}))) return;
                     break;
                 }
 

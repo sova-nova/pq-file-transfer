@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <deque>
 #include <set>
 #include <string>
@@ -71,6 +72,22 @@ public:
     bool list_invites(relay::InviteStatus& status, std::string& error);
     // Needs sign-in. Cancels one of your unused invites, named by the hash the list gave.
     bool cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error);
+
+    // --- Attachments (see relay_protocol.h). Chunks are passed one at a time, so a file is never held whole in memory. ---
+    // Gives chunk `index` (of ciphertext); false stops the transfer.
+    using FileChunkSource = std::function<bool(uint32_t index, std::vector<uint8_t>& chunk)>;
+    // Receives chunk `index`; false stops the transfer.
+    using FileChunkSink = std::function<bool(uint32_t index, const std::vector<uint8_t>& chunk)>;
+    // Needs a mailbox sign-in. Uploads a file whose chunking and one-token-per-recipient are in `begin`.
+    bool upload_file(const relay::FileBegin& begin, const FileChunkSource& source, std::string& error);
+    // Needs no sign-in: the token is the permission. Fetches from `from_chunk` onwards. This does NOT use the token up:
+    // call redeem_file once the file has been decrypted and checked.
+    bool download_file(const std::vector<uint8_t>& file_id, const std::vector<uint8_t>& token, uint32_t from_chunk, relay::FileInfo& info,
+                       const FileChunkSink& sink, std::string& error);
+    bool redeem_file(const std::vector<uint8_t>& file_id, const std::vector<uint8_t>& token, std::string& error);
+    // Need a mailbox sign-in, and the file to be this mailbox's.
+    bool cancel_file(const std::vector<uint8_t>& file_id, std::string& error);
+    bool file_status(const std::vector<uint8_t>& file_id, relay::FileStatus& status, std::string& error);
 
     // --- Keyring (needs a mailbox sign-in): one encrypted blob per mailbox, sent in chunks ---
     bool put_keyring(const std::vector<uint8_t>& blob, std::string& error);

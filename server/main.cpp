@@ -497,6 +497,9 @@ static void print_usage(const char* prog) {
               << "  --max-archives N            chat archives the relay will hold (default 1000)\n"
               << "  --archive-quota-mib N       encrypted bytes allowed per chat archive (default 512)\n"
               << "  --keyring-max-kib N         largest keyring one mailbox may store (default 4096)\n"
+              << "  --max-attachment-mib N      largest single attachment (default 1024)\n"
+              << "  --attachment-quota-mib N    all of one mailbox's stored attachments together (default 4096)\n"
+              << "  --attachment-max-days N     how long an attachment may be kept for (default 30)\n"
               << "\nMembers vouching for friends: anyone on the relay can make single-use invites from the app.\n"
               << "The relay records who vouched for whom.\n"
               << "  --member-invites N          unused invites one member may have at once (default 3; 0 turns\n"
@@ -571,6 +574,12 @@ int main(int argc, char* argv[]) {
                 with_invitees = true;
             } else if (arg == "--max-archives" && has_value) {
                 limits.max_archives = std::stoull(argv[++i]);
+            } else if (arg == "--max-attachment-mib" && has_value) {
+                limits.max_attachment_bytes = std::stoull(argv[++i]) * 1024 * 1024;
+            } else if (arg == "--attachment-quota-mib" && has_value) {
+                limits.attachment_quota_bytes = std::stoull(argv[++i]) * 1024 * 1024;
+            } else if (arg == "--attachment-max-days" && has_value) {
+                limits.attachment_max_seconds = static_cast<int64_t>(std::stoull(argv[++i])) * 86400;
             } else if (arg == "--keyring-max-kib" && has_value) {
                 limits.keyring_max_bytes = std::stoull(argv[++i]) * 1024;
             } else if (arg == "--archive-quota-mib" && has_value) {

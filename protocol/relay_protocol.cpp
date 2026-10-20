@@ -176,6 +176,58 @@ std::vector<uint8_t> encode(const KeyringChunk& m) {
     return b;
 }
 
+std::vector<uint8_t> encode(const FileBegin& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.file_id);
+    write_u64(b, m.total_size);
+    write_u32(b, m.chunk_size);
+    write_u32(b, m.chunk_count);
+    write_u64(b, m.expires_at);
+    write_u32(b, static_cast<uint32_t>(m.token_hashes.size()));
+    for (const auto& h : m.token_hashes) write_blob(b, h);
+    return b;
+}
+std::vector<uint8_t> encode(const FileChunk& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.index);
+    write_blob(b, m.data);
+    return b;
+}
+std::vector<uint8_t> encode(const FileDownload& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.file_id);
+    write_blob(b, m.token);
+    write_u32(b, m.from_chunk);
+    return b;
+}
+std::vector<uint8_t> encode(const FileInfo& m) {
+    std::vector<uint8_t> b;
+    write_u64(b, m.total_size);
+    write_u32(b, m.chunk_size);
+    write_u32(b, m.chunk_count);
+    write_u64(b, m.expires_at);
+    return b;
+}
+std::vector<uint8_t> encode(const FileRedeem& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.file_id);
+    write_blob(b, m.token);
+    return b;
+}
+std::vector<uint8_t> encode(const FileRef& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.file_id);
+    return b;
+}
+std::vector<uint8_t> encode(const FileStatus& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.tokens_total);
+    write_u32(b, m.tokens_redeemed);
+    write_u64(b, m.expires_at);
+    write_u32(b, m.ready ? 1 : 0);
+    return b;
+}
+
 std::vector<uint8_t> encode(const HashOp& m) {
     std::vector<uint8_t> b;
     write_blob(b, m.token_hash);
@@ -418,6 +470,83 @@ std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>& in)
     const uint64_t expected_size = c.index + 1 < c.count ? KEYRING_CHUNK_BYTES : c.total_size - static_cast<uint64_t>(KEYRING_CHUNK_BYTES) * (c.count - 1);
     if (c.data.size() != expected_size) return std::nullopt;
     return c;
+}
+
+std::optional<FileBegin> decode_file_begin(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, FILE_ID_BYTES);
+    auto total = read_u64(in.data(), in.size(), off);
+    auto chunk_size = read_u32(in.data(), in.size(), off);
+    auto count = read_u32(in.data(), in.size(), off);
+    auto expires = read_u64(in.data(), in.size(), off);
+    auto tokens = read_u32(in.data(), in.size(), off);
+    if (!id || !total || !chunk_size || !count || !expires || !tokens) return std::nullopt;
+    if (*total < 1 || *total > MAX_FILE_BYTES || *chunk_size < 1 || *chunk_size > MAX_FILE_CHUNK_BYTES) return std::nullopt;
+    const uint64_t expected_count = (*total + *chunk_size - 1) / *chunk_size;
+    if (*count != expected_count) return std::nullopt;
+    if (*chunk_size < MIN_FILE_CHUNK_BYTES && *count != 1) return std::nullopt;  // many tiny chunks are just a way to waste the relay's time
+    if (*tokens < 1 || *tokens > MAX_FILE_TOKENS) return std::nullopt;
+    FileBegin m;
+    m.file_id = std::move(*id);
+    m.total_size = *total;
+    m.chunk_size = *chunk_size;
+    m.chunk_count = *count;
+    m.expires_at = *expires;
+    for (uint32_t i = 0; i < *tokens; i++) {
+        auto h = fixed_blob(in, off, HASH_BYTES);
+        if (!h) return std::nullopt;
+        for (const auto& other : m.token_hashes) if (other == *h) return std::nullopt;  // each recipient's token is their own
+        m.token_hashes.push_back(std::move(*h));
+    }
+    if (!at_end(in, off)) return std::nullopt;
+    return m;
+}
+std::optional<FileChunk> decode_file_chunk(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto index = read_u32(in.data(), in.size(), off);
+    auto data = read_blob(in.data(), in.size(), off, MAX_FILE_CHUNK_BYTES);
+    if (!index || !data || data->empty() || !at_end(in, off)) return std::nullopt;
+    return FileChunk{*index, std::move(*data)};
+}
+std::optional<FileDownload> decode_file_download(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, FILE_ID_BYTES);
+    auto token = fixed_blob(in, off, FILE_TOKEN_BYTES);
+    auto from = read_u32(in.data(), in.size(), off);
+    if (!id || !token || !from || !at_end(in, off)) return std::nullopt;
+    return FileDownload{std::move(*id), std::move(*token), *from};
+}
+std::optional<FileInfo> decode_file_info(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto total = read_u64(in.data(), in.size(), off);
+    auto chunk_size = read_u32(in.data(), in.size(), off);
+    auto count = read_u32(in.data(), in.size(), off);
+    auto expires = read_u64(in.data(), in.size(), off);
+    if (!total || !chunk_size || !count || !expires || !at_end(in, off)) return std::nullopt;
+    if (*total < 1 || *total > MAX_FILE_BYTES || *chunk_size < 1 || *chunk_size > MAX_FILE_CHUNK_BYTES || *count != (*total + *chunk_size - 1) / *chunk_size) return std::nullopt;
+    return FileInfo{*total, *chunk_size, *count, *expires};
+}
+std::optional<FileRedeem> decode_file_redeem(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, FILE_ID_BYTES);
+    auto token = fixed_blob(in, off, FILE_TOKEN_BYTES);
+    if (!id || !token || !at_end(in, off)) return std::nullopt;
+    return FileRedeem{std::move(*id), std::move(*token)};
+}
+std::optional<FileRef> decode_file_ref(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, FILE_ID_BYTES);
+    if (!id || !at_end(in, off)) return std::nullopt;
+    return FileRef{std::move(*id)};
+}
+std::optional<FileStatus> decode_file_status(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto total = read_u32(in.data(), in.size(), off);
+    auto redeemed = read_u32(in.data(), in.size(), off);
+    auto expires = read_u64(in.data(), in.size(), off);
+    auto ready = read_u32(in.data(), in.size(), off);
+    if (!total || !redeemed || !expires || !ready || *ready > 1 || *redeemed > *total || *total > MAX_FILE_TOKENS || !at_end(in, off)) return std::nullopt;
+    return FileStatus{*total, *redeemed, *expires, *ready == 1};
 }
 
 std::optional<HashOp> decode_hash_op(const std::vector<uint8_t>& in) {

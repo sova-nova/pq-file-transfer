@@ -198,6 +198,9 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--max-archives N` | 1000 | Chat archives the relay will hold |
 | `--archive-quota-mib N` | 512 | Encrypted bytes allowed per chat archive |
 | `--keyring-max-kib N` | 4096 | Largest keyring one mailbox may store (see below) |
+| `--max-attachment-mib N` | 1024 | Largest single chat attachment |
+| `--attachment-quota-mib N` | 4096 | All of one mailbox's stored attachments together |
+| `--attachment-max-days N` | 30 | How long an attachment may be kept |
 | `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
 | `--member-invites-total N` | 10 | Most people one member may ever invite |
 | `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |

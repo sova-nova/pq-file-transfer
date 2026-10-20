@@ -319,6 +319,105 @@ bool RelayClient::cancel_invite(const std::vector<uint8_t>& invite_hash, std::st
            read_reply(MessageType::RELAY_INVITE_CANCEL_OK, nullptr, error);
 }
 
+bool RelayClient::upload_file(const relay::FileBegin& begin, const FileChunkSource& source, std::string& error) {
+    if (!send_request(MessageType::FILE_UPLOAD_BEGIN, relay::encode(begin), error) || !read_reply(MessageType::FILE_UPLOAD_OK, nullptr, error)) return false;
+    for (uint32_t i = 0; i < begin.chunk_count; i++) {
+        std::vector<uint8_t> chunk;
+        if (!source(i, chunk)) {
+            error = "The file could not be read";
+            close();  // the relay throws away what it has of an upload that stops
+            return false;
+        }
+        if (!send_request(MessageType::FILE_CHUNK, relay::encode(relay::FileChunk{i, std::move(chunk)}), error)) return false;
+        // The relay confirms every few chunks, and after the last: that bounds what is in flight, and is where a refusal shows up.
+        if ((i + 1) % relay::FILE_ACK_WINDOW == 0 || i + 1 == begin.chunk_count) {
+            std::vector<uint8_t> ack;
+            if (!read_reply(MessageType::FILE_CHUNK_OK, &ack, error)) return false;
+            size_t off = 0;
+            auto stored = read_u32(ack.data(), ack.size(), off);
+            if (!stored || *stored != i + 1) {
+                error = "The relay's answer doesn't match what was sent";
+                close();
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool RelayClient::download_file(const std::vector<uint8_t>& file_id, const std::vector<uint8_t>& token, uint32_t from_chunk, relay::FileInfo& info,
+                                const FileChunkSink& sink, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::FILE_DOWNLOAD, relay::encode(relay::FileDownload{file_id, token, from_chunk}), error) || !read_reply(MessageType::FILE_INFO, &payload, error)) return false;
+    auto decoded = relay::decode_file_info(payload);
+    if (!decoded || from_chunk >= decoded->chunk_count) {
+        error = "The relay sent an invalid answer";
+        close();
+        return false;
+    }
+    info = *decoded;
+    uint32_t expected = from_chunk;
+    while (true) {
+        auto msg = recv_message(sock_, relay::MAX_MESSAGE_PAYLOAD);
+        if (!msg) {
+            error = "Lost the connection to the relay";
+            close();
+            return false;
+        }
+        if (msg->type == MessageType::FILE_DATA) {
+            auto chunk = relay::decode_file_chunk(msg->payload);
+            const uint64_t offset = chunk ? static_cast<uint64_t>(chunk->index) * info.chunk_size : 0;
+            const uint64_t want = chunk && chunk->index + 1 < info.chunk_count ? info.chunk_size : info.total_size - offset;
+            if (!chunk || chunk->index != expected || chunk->data.size() != want || expected >= info.chunk_count) {
+                error = "The relay sent a chunk that doesn't fit";
+                close();
+                return false;
+            }
+            if (!sink(chunk->index, chunk->data)) {
+                error = "The download was stopped";
+                close();
+                return false;
+            }
+            expected++;
+        } else if (msg->type == MessageType::FILE_DOWNLOAD_END) {
+            if (expected != info.chunk_count) {
+                error = "The relay stopped sending before the end of the file";
+                close();
+                return false;
+            }
+            return true;
+        } else if (msg->type == MessageType::ERROR_MSG) {
+            error = "Relay: " + clean(msg->payload);
+            return false;
+        } else {
+            error = "The relay sent something unexpected";
+            close();
+            return false;
+        }
+    }
+}
+
+bool RelayClient::redeem_file(const std::vector<uint8_t>& file_id, const std::vector<uint8_t>& token, std::string& error) {
+    return send_request(MessageType::FILE_REDEEM, relay::encode(relay::FileRedeem{file_id, token}), error) && read_reply(MessageType::FILE_REDEEM_OK, nullptr, error);
+}
+
+bool RelayClient::cancel_file(const std::vector<uint8_t>& file_id, std::string& error) {
+    return send_request(MessageType::FILE_CANCEL, relay::encode(relay::FileRef{file_id}), error) && read_reply(MessageType::FILE_CANCEL_OK, nullptr, error);
+}
+
+bool RelayClient::file_status(const std::vector<uint8_t>& file_id, relay::FileStatus& status, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::FILE_STATUS, relay::encode(relay::FileRef{file_id}), error) || !read_reply(MessageType::FILE_STATUS_OK, &payload, error)) return false;
+    auto decoded = relay::decode_file_status(payload);
+    if (!decoded) {
+        error = "The relay sent an invalid answer";
+        close();
+        return false;
+    }
+    status = *decoded;
+    return true;
+}
+
 bool RelayClient::put_keyring(const std::vector<uint8_t>& blob, std::string& error) {
     if (blob.empty() || blob.size() > relay::MAX_KEYRING_BYTES) {
         error = "That keyring is empty or too large";

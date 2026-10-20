@@ -273,6 +273,78 @@ int main() {
               "what each member signs covers the relay, the chat, the scope, the operation, the expiry and the entries in order");
     }
 
+    std::cout << "Attachment payloads\n";
+    {
+        auto begin = [&](uint64_t total, uint32_t chunk, uint32_t count, size_t tokens) {
+            FileBegin b;
+            b.file_id = fill(1, FILE_ID_BYTES); b.total_size = total; b.chunk_size = chunk; b.chunk_count = count; b.expires_at = 1700000000;
+            for (size_t i = 0; i < tokens; i++) b.token_hashes.push_back(fill(static_cast<uint8_t>(10 + i), HASH_BYTES));
+            return b;
+        };
+        auto good = begin(10 * 4096 + 100, 4096, 11, 3);
+        auto ge = encode(good);
+        auto back = decode_file_begin(ge);
+        CHECK(back && back->file_id == good.file_id && back->total_size == good.total_size && back->chunk_size == 4096 && back->chunk_count == 11 && back->expires_at == 1700000000 && back->token_hashes == good.token_hashes,
+              "a file's description round trips: size, chunking, expiry and one token hash per recipient");
+        check_framing("file begin", ge, decode_file_begin);
+        fuzz("file begin", ge, decode_file_begin);
+        CHECK(decode_file_begin(encode(begin(100, 100, 1, 1))) && decode_file_begin(encode(begin(100, 4096, 1, 1))) && decode_file_begin(encode(begin(MAX_FILE_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, 1, 16))),
+              "a small file is one chunk, down to one byte, and 16 recipients is allowed");
+        CHECK(!decode_file_begin(encode(begin(0, 4096, 0, 1))) && !decode_file_begin(encode(begin(MAX_FILE_BYTES + 1, MAX_FILE_CHUNK_BYTES, 1, 1))), "an empty file, or one over the format's ceiling, is rejected");
+        CHECK(!decode_file_begin(encode(begin(10 * 4096 + 100, 4096, 10, 3))) && !decode_file_begin(encode(begin(10 * 4096 + 100, 4096, 12, 3))) && !decode_file_begin(encode(begin(10 * 4096, 4096, 11, 3))),
+              "a chunk count that the size and chunk size don't need is rejected");
+        CHECK(!decode_file_begin(encode(begin(5000, 100, 50, 1))) && !decode_file_begin(encode(begin(100000, MAX_FILE_CHUNK_BYTES + 1, 2, 1))) && !decode_file_begin(encode(begin(100, 0, 1, 1))),
+              "many tiny chunks, chunks over a message's worth, or no chunk size are rejected");
+        CHECK(!decode_file_begin(encode(begin(100, 4096, 1, 0))) && !decode_file_begin(encode(begin(100, 4096, 1, MAX_FILE_TOKENS + 1))), "between 1 and 16 recipients");
+        auto dup = begin(100, 4096, 1, 2);
+        dup.token_hashes[1] = dup.token_hashes[0];
+        auto shorter = begin(100, 4096, 1, 2);
+        shorter.token_hashes[1].pop_back();
+        auto badid = begin(100, 4096, 1, 1);
+        badid.file_id.pop_back();
+        CHECK(!decode_file_begin(encode(dup)) && !decode_file_begin(encode(shorter)) && !decode_file_begin(encode(badid)), "two recipients sharing a token, a short token hash or a short file ID is rejected");
+        Bytes lying;
+        write_blob(lying, fill(1, 16)); write_u64(lying, 100); write_u32(lying, 4096); write_u32(lying, 1); write_u64(lying, 5); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_file_begin(lying), "a declared count of four billion recipients is rejected without allocating");
+
+        relay::FileChunk c{7, fill(3, 4096)};
+        auto ce = encode(c);
+        CHECK(decode_file_chunk(ce) && decode_file_chunk(ce)->index == 7 && decode_file_chunk(ce)->data == c.data, "a chunk round trips");
+        check_framing("file chunk", ce, decode_file_chunk);
+        fuzz("file chunk", ce, decode_file_chunk);
+        CHECK(!decode_file_chunk(encode(relay::FileChunk{0, Bytes()})) && !decode_file_chunk(encode(relay::FileChunk{0, fill(1, MAX_FILE_CHUNK_BYTES + 1)})) && decode_file_chunk(encode(relay::FileChunk{0, fill(1, MAX_FILE_CHUNK_BYTES)})), "a chunk is 1 byte up to one message's worth");
+
+        FileDownload d{fill(1, 16), fill(2, 32), 5};
+        auto de = encode(d);
+        CHECK(decode_file_download(de) && decode_file_download(de)->token == d.token && decode_file_download(de)->from_chunk == 5, "a download request round trips");
+        check_framing("file download", de, decode_file_download);
+        fuzz("file download", de, decode_file_download);
+        CHECK(!decode_file_download(encode(FileDownload{fill(1, 15), fill(2, 32), 0})) && !decode_file_download(encode(FileDownload{fill(1, 16), fill(2, 31), 0})), "and needs a full-size file ID and token");
+
+        FileInfo info{10 * 4096 + 100, 4096, 11, 1700000000};
+        auto ie = encode(info);
+        CHECK(decode_file_info(ie) && decode_file_info(ie)->chunk_count == 11 && !decode_file_info(encode(FileInfo{10 * 4096 + 100, 4096, 12, 5})) && !decode_file_info(encode(FileInfo{0, 4096, 0, 5})), "file info round trips, and its numbers must fit together");
+        check_framing("file info", ie, decode_file_info);
+        fuzz("file info", ie, decode_file_info);
+
+        FileRedeem r{fill(1, 16), fill(2, 32)};
+        auto re = encode(r);
+        CHECK(decode_file_redeem(re) && decode_file_redeem(re)->file_id == r.file_id && !decode_file_redeem(encode(FileRedeem{fill(1, 16), fill(2, 5)})), "a redeem round trips");
+        check_framing("file redeem", re, decode_file_redeem);
+        fuzz("file redeem", re, decode_file_redeem);
+        auto fe = encode(FileRef{fill(1, 16)});
+        CHECK(decode_file_ref(fe) && !decode_file_ref(encode(FileRef{fill(1, 17)})), "a file reference round trips");
+        check_framing("file ref", fe, decode_file_ref);
+        fuzz("file ref", fe, decode_file_ref);
+
+        FileStatus st{3, 1, 1700000000, true};
+        auto se = encode(st);
+        CHECK(decode_file_status(se) && decode_file_status(se)->tokens_redeemed == 1 && decode_file_status(se)->ready && !decode_file_status(encode(FileStatus{3, 4, 5, true})) && !decode_file_status(encode(FileStatus{17, 1, 5, true})),
+              "a status round trips, and more redeemed than issued, or more than 16 recipients, is rejected");
+        check_framing("file status", se, decode_file_status);
+        fuzz("file status", se, decode_file_status);
+    }
+
     std::cout << "Keyring chunks\n";
     {
         auto chunk = [&](uint32_t total, uint32_t index, uint32_t count, size_t data) { return KeyringChunk{total, index, count, fill(7, data)}; };

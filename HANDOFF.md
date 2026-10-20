@@ -50,7 +50,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - Code is compiled with `-Wall -Wextra -Wpedantic -Werror` against a fake liboqs and a small SQLite header shim, and the full suites run against those.
 - The Qt code (`chat_widget`, `main_window`) is only type-checked against a hand-written stub of the Qt classes. That catches typos and API mismatches in our own code, not Qt misuse.
 - **The first CI run is the real test** for the GUI, CMake, Windows and the real liboqs. If it fails, paste the compiler error.
-- Test totals at last run: **1,574 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 204, history 215, relay_protocol 135, relay_store 138, e2e 48, relay 183, chat 88, relay_setup 30, group 289). The group suite takes about nine minutes. Run the suites one at a time: they pick ports from a shared range, and two at once can collide. The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
+- Test totals at last run: **1,683 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 204, history 215, relay_protocol 172, relay_store 165, e2e 48, relay 228, chat 88, relay_setup 30, group 289). The group suite takes about nine minutes. Run the suites one at a time: they pick ports from a shared range, and two at once can collide. The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
 
 ## Operational facts and gotchas
 
@@ -76,6 +76,38 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - macOS build in CI; Windows code signing (SmartScreen warning).
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
+
+## M5: attachments (in progress; step 1 of 5 done)
+
+An attachment is a chat message that points at an encrypted file parked on the sender's relay. Each recipient has their own one-time download token; the relay deletes the file when every token is redeemed, when the sender withdraws it, or when it expires. The existing transfer-ID file transfer (the v2 protocol in `server/main.cpp`, the "Send File" tab) is left alone and keeps working.
+
+Decisions, settled with the maintainer:
+
+| # | Decision |
+|---|---|
+| 1 | The old transfer-ID tab stays; attachments are added next to it. |
+| 2 | The file lives on the **sender's relay**, named in the message with its pinned identity (as for archives); recipients on other relays connect to it. |
+| 3 | Groups: one file, one token per member (up to 16). |
+| 4 | Limits: **1 GiB per file, 4 GiB stored per mailbox, expiry 7 days by default, 30 at most**; all relay settings (`--max-attachment-mib`, `--attachment-quota-mib`, `--attachment-max-days`). |
+| 5 | Each file has its own random key, so a chunk number can safely be the nonce (unlike M4's archive entries, where two members can race for the same number under one shared key). |
+| 6 | A download can restart from a given chunk. |
+| 7 | Never downloaded automatically: the recipient clicks Download and sees the size first. |
+| 8 | The sender can see how many recipients have fetched it (the relay already knows). |
+| 9 | The relay learns that a mailbox uploaded a file of a given size for N tokens (it must know the uploader, to enforce quotas and let only them withdraw). |
+| 10 | File names are sanitised on save, never overwrite anything, and are never opened automatically. |
+
+Per the design: the shared message record (and so the archive) carries only public details (file ID, name, size, chunking, the file's SHA-256, the expiry, the relay); the file key and each recipient's token travel only in that recipient's own envelope, so restoring a chat from its archive can never produce a readable file. Files are not archived.
+
+Build order: 1. relay file store (**done**); 2. client file core (chunk encryption, streaming, hash check, attachment record, per-recipient grants in the envelope); 3. engine (send and receive for one-to-one chats and groups, the four states Available / Transferred / Expired / Withdrawn, download); 4. GUI; 5. end-to-end and hostile tests.
+
+**Step 1 as built** (`RelayStore`, `RelayService`, `RelayClient`; protocol in `relay_protocol.h`, messages 0x60 to 0x6D, relay schema 7):
+
+- **Upload** (mailbox sign-in): `FILE_UPLOAD_BEGIN` names the file ID, the ciphertext size, chunk size and count (they must fit together; chunks are at least 4 KiB unless the file is one chunk, and at most 64 KiB so each fits one relay message), the expiry, and one token *hash* per recipient (1 to 16, all different). Chunks stream to a temporary file; the relay confirms every 64 chunks and after the last. Only the last chunk makes the file fetchable (the temporary file is renamed). An out-of-order or wrong-size chunk, or a dropped connection, throws the upload away entirely (disk and record), freeing the quota.
+- **Download** (no mailbox): `FILE_DOWNLOAD` with the file ID, the token and a start chunk; the relay streams `FILE_INFO`, then each chunk, then an end marker. It does **not** use the token up. `FILE_REDEEM`, sent after the recipient has decrypted and checked the file, does; when the last token is used the relay deletes the file. "No such file" and "wrong token" give the same answer, so file IDs can't be probed. Downloads are rate-limited per address.
+- **Withdraw and status** (the owner only): `FILE_CANCEL` removes the file; `FILE_STATUS` says whether it is ready and how many of how many tokens are used.
+- **Limits and cleanup:** size per file, stored bytes per mailbox (counting uploads in progress), and how far ahead an expiry may be, all checked on upload begin. The sweeper deletes expired files and uploads unfinished after an hour, and removes any bytes on disk with no record (for example after the operator removes a mailbox), so nothing is orphaned. Files are written under `<storage>/v3/files/`.
+- **Verified:** wire format tests with hostile inputs; store tests (quotas, token states, expiry and abandoned sweeps, restart, a version 6 database upgrading); and relay tests over the real protocol, including a file of 70 chunks (past the confirmation window), resuming from chunk 40, a token not being used up by fetching, withdrawal by the owner only, the size and quota limits, expiry bounds, an upload that dies half way, out-of-order and wrong-size chunks, restart, and the bytes of a removed mailbox being swept. Five protections were broken in turn and each made its own check fail.
+- **Not yet:** nothing in the app uses this; per-recipient download status for the sender needs the engine; resuming an interrupted *upload* is not supported (it starts again).
 
 ## M4: decisions and build order
 

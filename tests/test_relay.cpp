@@ -794,6 +794,172 @@ static void test_real_relay() {
         keyring.stop();
     }
 
+    std::cout << "12f. Attachments\n";
+    {
+        const int fbase = 56000 + static_cast<int>(getpid() % 2000) * 2;
+        Server files{fbase, ROOT / "relay-files", {"--max-attachment-mib", "2", "--attachment-quota-mib", "3", "--attachment-max-days", "2", "--sweep-seconds", "1"}};
+        if (!files.start()) { std::cout << "FAIL could not start the attachment relay\n"; failures++; return; }
+        auto finvite = files.invite();
+        const Bytes fpin = finvite->relay_id;
+        auto owner = make_box(files, fpin);
+        auto neighbour = make_box(files, fpin);
+        if (!owner || !neighbour) { std::cout << "FAIL setup\n"; failures++; return; }
+        const fs::path stored = files.storage / "v3" / "files";
+        std::string e;
+        auto blob_of = [](size_t size, uint8_t seed) { Bytes b(size); for (size_t i = 0; i < size; i++) b[i] = static_cast<uint8_t>(seed + i * 131 + (i >> 8)); return b; };
+        auto soon = [](int seconds) { return static_cast<uint64_t>(time(nullptr)) + static_cast<uint64_t>(seconds); };
+        auto on_disk = [&](const Bytes& fid) { return fs::exists(stored / (bytes_to_hex(fid) + ".bin")) || fs::exists(stored / (bytes_to_hex(fid) + ".part")); };
+        auto begin_of = [&](const Bytes& fid, size_t size, uint32_t chunk, const std::vector<Bytes>& tokens, uint64_t expires) {
+            relay::FileBegin b;
+            b.file_id = fid; b.total_size = size; b.chunk_size = chunk; b.chunk_count = static_cast<uint32_t>((size + chunk - 1) / chunk); b.expires_at = expires;
+            for (const auto& t : tokens) b.token_hashes.push_back(CryptoEngine::sha256(t));
+            return b;
+        };
+        auto upload = [&](const Box& who, const Bytes& fid, const Bytes& content, uint32_t chunk, const std::vector<Bytes>& tokens, uint64_t expires, std::string& err, int fail_at = -1) {
+            RelayClient c;
+            if (!sign_in(c, files, fpin, who, err)) return false;
+            return c.upload_file(begin_of(fid, content.size(), chunk, tokens, expires), [&](uint32_t i, Bytes& out) {
+                if (static_cast<int>(i) == fail_at) return false;
+                const size_t from = static_cast<size_t>(i) * chunk;
+                out.assign(content.begin() + static_cast<std::ptrdiff_t>(from), content.begin() + static_cast<std::ptrdiff_t>(std::min(content.size(), from + chunk)));
+                return true;
+            }, err);
+        };
+        auto download = [&](const Bytes& fid, const Bytes& token, uint32_t from, Bytes& got, relay::FileInfo& info, std::string& err) {
+            RelayClient c;
+            got.clear();
+            return connect_to(c, files, fpin, err) && c.download_file(fid, token, from, info, [&](uint32_t, const Bytes& chunk) { got.insert(got.end(), chunk.begin(), chunk.end()); return true; }, err);
+        };
+        auto status_of = [&](const Box& who, const Bytes& fid, relay::FileStatus& st, std::string& err) {
+            RelayClient c;
+            return sign_in(c, files, fpin, who, err) && c.file_status(fid, st, err);
+        };
+        auto cancel_of = [&](const Box& who, const Bytes& fid, std::string& err) {
+            RelayClient c;
+            return sign_in(c, files, fpin, who, err) && c.cancel_file(fid, err);
+        };
+        auto redeem = [&](const Bytes& fid, const Bytes& token, std::string& err) {
+            RelayClient c;
+            return connect_to(c, files, fpin, err) && c.redeem_file(fid, token, err);
+        };
+
+        const Bytes fid = CryptoEngine::random_bytes(16);
+        const Bytes content = blob_of(70 * 4096, 7);  // 70 chunks: more than the relay's confirmation window of 64
+        const std::vector<Bytes> toks = {CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)};
+        {
+            RelayClient anon;
+            connect_to(anon, files, fpin, e);
+            CHECK(!anon.upload_file(begin_of(fid, content.size(), 4096, toks, soon(3600)), [](uint32_t, Bytes&) { return false; }, e) && has(e, "Sign in"), "uploading needs a mailbox sign-in: " + e);
+        }
+        CHECK(upload(*owner, fid, content, 4096, toks, soon(3600), e), "a mailbox owner uploads a file of 70 chunks for three recipients (" + e + ")");
+        CHECK(fs::exists(stored / (bytes_to_hex(fid) + ".bin")) && !fs::exists(stored / (bytes_to_hex(fid) + ".part")), "it is on the relay's disk, finished, with no temporary file left");
+        relay::FileStatus st;
+        CHECK(status_of(*owner, fid, st, e) && st.ready && st.tokens_total == 3 && st.tokens_redeemed == 0, "its owner sees it is ready, with three tokens and none used");
+        CHECK(!status_of(*neighbour, fid, st, e) && has(e, "isn't one of your files") && !cancel_of(*neighbour, fid, e) && has(e, "isn't one of your files") && on_disk(fid), "another mailbox's owner can neither look at it nor withdraw it: " + e);
+        {
+            RelayClient c;
+            Bytes again;
+            relay::FileInfo i;
+            connect_to(c, files, fpin, e);
+            CHECK(!c.upload_file(begin_of(fid, content.size(), 4096, toks, soon(3600)), [](uint32_t, Bytes&) { return false; }, e), "(an unsigned connection can't re-upload it)");
+            std::string d;
+            CHECK(!upload(*owner, fid, content, 4096, toks, soon(3600), d) && has(d, "already exists"), "the same file ID can't be uploaded twice: " + d);
+        }
+
+        Bytes got;
+        relay::FileInfo info;
+        CHECK(download(fid, toks[0], 0, got, info, e) && got == content && info.total_size == content.size() && info.chunk_size == 4096 && info.chunk_count == 70, "the first recipient fetches it, with no mailbox, and gets exactly what was uploaded");
+        CHECK(download(fid, toks[0], 0, got, info, e) && got == content, "fetching does not use the token up: the same recipient can fetch again (a download that failed can be retried)");
+        Bytes tail;
+        CHECK(download(fid, toks[0], 40, tail, info, e) && tail == Bytes(content.begin() + 40 * 4096, content.end()), "a download can carry on from chunk 40");
+        CHECK(!download(fid, toks[0], 70, tail, info, e) && has(e, "isn't valid"), "starting past the end is refused");
+        CHECK(!download(fid, CryptoEngine::random_bytes(32), 0, tail, info, e) && has(e, "No such file, or that token isn't valid"), "a wrong token is refused: " + e);
+        std::string unknown;
+        CHECK(!download(CryptoEngine::random_bytes(16), toks[0], 0, tail, info, unknown) && unknown.substr(unknown.find("No")) == e.substr(e.find("No")), "and a file that doesn't exist gets the very same answer, so files can't be probed");
+
+        CHECK(redeem(fid, toks[0], e), "the first recipient redeems their token once the file is decrypted and checked");
+        CHECK(!redeem(fid, toks[0], e) && has(e, "already used"), "a token can't be redeemed twice: " + e);
+        CHECK(!download(fid, toks[0], 0, tail, info, e) && has(e, "already downloaded"), "nor used to fetch again: " + e);
+        CHECK(download(fid, toks[1], 0, got, info, e) && got == content && status_of(*owner, fid, st, e) && st.tokens_redeemed == 1, "the others still can, and the owner sees one of three has it");
+        CHECK(!redeem(fid, CryptoEngine::random_bytes(32), e) && has(e, "isn't valid") && !redeem(CryptoEngine::random_bytes(16), toks[1], e), "a wrong token or unknown file can't redeem");
+        CHECK(redeem(fid, toks[1], e) && on_disk(fid), "two of three have it: the file is still there");
+        CHECK(redeem(fid, toks[2], e), "the last recipient redeems");
+        CHECK(!on_disk(fid) && !status_of(*owner, fid, st, e) && !download(fid, toks[2], 0, tail, info, e) && has(e, "No such file"), "and the relay's copy is deleted, from disk and from its records");
+
+        // Withdrawing a file.
+        const Bytes fid2 = CryptoEngine::random_bytes(16);
+        const Bytes small = blob_of(10000, 3);
+        const std::vector<Bytes> toks2 = {CryptoEngine::random_bytes(32)};
+        CHECK(upload(*owner, fid2, small, 4096, toks2, soon(3600), e), "(another file, for one recipient)");
+        CHECK(cancel_of(*owner, fid2, e) && !on_disk(fid2), "its owner withdraws it: it is gone from disk");
+        CHECK(!download(fid2, toks2[0], 0, tail, info, e) && has(e, "No such file") && !cancel_of(*owner, fid2, e), "the recipient can no longer fetch it, and withdrawing twice says so");
+
+        // Limits.
+        std::string big_err;
+        CHECK(!upload(*owner, CryptoEngine::random_bytes(16), blob_of(2 * 1024 * 1024 + 1, 1), 65536, toks2, soon(3600), big_err) && has(big_err, "larger than this relay allows"), "a file over the relay's limit (2 MiB here) is refused: " + big_err);
+        const Bytes q1 = CryptoEngine::random_bytes(16), q2 = CryptoEngine::random_bytes(16);
+        const Bytes chunky = blob_of(1600 * 1024, 5);  // 1.6 MiB
+        CHECK(upload(*owner, q1, chunky, 65536, toks2, soon(3600), e), "a 1.6 MiB file is stored");
+        std::string quota_err;
+        CHECK(!upload(*owner, q2, chunky, 65536, toks2, soon(3600), quota_err) && has(quota_err, "limit") && !on_disk(q2), "a second one would go over the mailbox's quota (3 MiB here) and is refused: " + quota_err);
+        CHECK(upload(*neighbour, q2, chunky, 65536, toks2, soon(3600), e), "(another mailbox has its own allowance)");
+        CHECK(cancel_of(*owner, q1, e) && upload(*owner, CryptoEngine::random_bytes(16), chunky, 65536, toks2, soon(3600), e), "and withdrawing the first makes room");
+        std::string early, late;
+        CHECK(!upload(*owner, CryptoEngine::random_bytes(16), small, 4096, toks2, soon(10), early) && has(early, "between a minute and 2 days") &&
+                  !upload(*owner, CryptoEngine::random_bytes(16), small, 4096, toks2, soon(3 * 86400), late) && has(late, "between a minute and 2 days"),
+              "an expiry that is too near or too far (this relay allows 2 days) is refused: " + early);
+
+        // Uploads that go wrong leave nothing behind.
+        const Bytes cut = CryptoEngine::random_bytes(16);
+        std::string cut_err;
+        CHECK(!upload(*owner, cut, blob_of(20 * 4096, 9), 4096, toks2, soon(3600), cut_err, 5) && !status_of(*owner, cut, st, e) && !on_disk(cut), "an upload that stops half way is thrown away, from disk and from the records: " + cut_err);
+        CHECK(upload(*owner, cut, small, 4096, toks2, soon(3600), e), "(and its ID and space can be used again)");
+        auto raw_session = [&](Raw& r, const Box& who) {
+            if (!r.open(files) || !r.hello()) return false;
+            relay::Auth auth;
+            auth.mailbox_id = who.id;
+            auth.signature = CryptoEngine::sign(relay::auth_signing_input(r.challenge, fpin, who.id), who.access.private_key);
+            return send_message(r.s, MessageType::RELAY_AUTH, relay::encode(auth)) && r.answer() == "type 37";
+        };
+        {
+            const Bytes bad = CryptoEngine::random_bytes(16);
+            Raw r;
+            CHECK(raw_session(r, *owner), "(a raw signed-in connection)");
+            CHECK(send_message(r.s, MessageType::FILE_UPLOAD_BEGIN, relay::encode(begin_of(bad, 3 * 4096, 4096, toks2, soon(3600)))) && r.answer() == "type 97", "(an upload begins)");
+            CHECK(send_message(r.s, MessageType::FILE_CHUNK, relay::encode(relay::FileChunk{1, Bytes(4096, 1)})) && has(r.answer(), "out of order"), "a chunk that skips the first is refused");
+            CHECK(!status_of(*owner, bad, st, e) && !on_disk(bad), "and the whole upload is dropped");
+            CHECK(send_message(r.s, MessageType::FILE_UPLOAD_BEGIN, relay::encode(begin_of(bad, 3 * 4096, 4096, toks2, soon(3600)))) && r.answer() == "type 97", "(begin again)");
+            CHECK(send_message(r.s, MessageType::FILE_CHUNK, relay::encode(relay::FileChunk{0, Bytes(4095, 1)})) && has(r.answer(), "wrong size") && !on_disk(bad), "a chunk of the wrong size is refused, and the upload dropped");
+            CHECK(send_message(r.s, MessageType::FILE_CHUNK, relay::encode(relay::FileChunk{0, Bytes(4096, 1)})) && has(r.answer(), "No upload"), "(and a chunk with no upload under way is refused)");
+        }
+
+        // The relay can restart, and what it holds is still there.
+        const Bytes keep = CryptoEngine::random_bytes(16);
+        const Bytes kept = blob_of(30000, 2);
+        CHECK(upload(*owner, keep, kept, 4096, toks2, soon(3600), e), "(a file to keep)");
+        files.stop();
+        CHECK(files.start(), "(the relay restarts)");
+        CHECK(download(keep, toks2[0], 0, got, info, e) && got == kept, "after a restart the file is still there, byte for byte");
+
+        // Bytes with no record are swept away: here, the owner's mailbox is removed by the operator.
+        const std::string prefix = bytes_to_hex(owner->id).substr(0, 12);
+        CHECK(on_disk(keep), "(the file is on disk)");
+        std::string cmd = "\"" + SERVER_BIN + "\" --storage \"" + files.storage.string() + "\" --remove-mailbox " + prefix + " 2>&1";
+        FILE* p = popen(cmd.c_str(), "r");
+        char buf[256];
+        std::string out;
+        while (p && fgets(buf, sizeof(buf), p)) out += buf;
+        if (p) pclose(p);
+        CHECK(has(out.c_str(), "Removed 1 mailbox"), "(the operator removes the owner's mailbox)");
+        bool swept = false;
+        for (int i = 0; i < 60 && !swept; i++) {
+            swept = !on_disk(keep);
+            if (!swept) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        CHECK(swept, "the relay sweeps away the bytes that no longer belong to anyone");
+        files.stop();
+    }
+
     std::cout << "12e. Deleting and redacting by agreement\n";
     {
         const int dbase = 61000 + static_cast<int>(getpid() % 2000) * 2;

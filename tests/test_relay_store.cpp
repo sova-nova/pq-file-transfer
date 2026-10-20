@@ -209,7 +209,7 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 6, "the schema version is now 6");
+        CHECK(version == 7, "the schema version is now 7");
         auto ms = migrated.members();
         CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
         CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
@@ -281,6 +281,81 @@ int main() {
 
     }
 
+
+    std::cout << "Attachments\n";
+    {
+        fs::path path = dir / "files.db";
+        const Bytes owner = id(1), other = id(2), f1 = id(0xF1, 16), f2 = id(0xF2, 16), f3 = id(0xF3, 16);
+        const std::vector<Bytes> tokens = {id(0xA1, 32), id(0xA2, 32), id(0xA3, 32)};
+        using B = RelayStore::BeginFileResult;
+        using T = RelayStore::TokenCheck;
+        using RR = RelayStore::RedeemResult;
+        RelayStore s(path);
+        s.add_invite(id(0xE1, 32), 99999);
+        s.add_invite(id(0xE2, 32), 99999);
+        s.register_mailbox(id(0xE1, 32), owner, id(0x55, 64), id(0xAA, 32), 1000, 10);
+        s.register_mailbox(id(0xE2, 32), other, id(0x55, 64), id(0xAB, 32), 1000, 10);
+
+        CHECK(!s.file(f1) && s.owner_file_bytes(owner) == 0, "there are no files to begin with");
+        CHECK(s.begin_file(id(99), f1, 1000, 4096, 1, 5000, tokens, 1000, 10000) == B::NoSuchMailbox, "only a mailbox can upload");
+        CHECK(s.begin_file(owner, f1, 6000, 4096, 2, 5000, tokens, 1000, 10000) == B::Ok, "a file is begun");
+        CHECK(s.begin_file(owner, f1, 100, 4096, 1, 5000, tokens, 1000, 10000) == B::Exists, "the same ID again is refused");
+        auto meta = s.file(f1);
+        CHECK(meta && meta->owner == owner && meta->total_size == 6000 && meta->chunk_size == 4096 && meta->chunk_count == 2 && meta->expires_at == 5000 && !meta->ready && meta->tokens_total == 3 && meta->tokens_redeemed == 0,
+              "its owner, size, chunking, expiry and three tokens are recorded, and it is not ready");
+        CHECK(s.check_file_token(f1, tokens[0], 1100) == T::NotReady, "it can't be fetched until the last chunk is in");
+        s.finish_file(f1);
+        CHECK(s.file(f1)->ready && s.check_file_token(f1, tokens[0], 1100) == T::Ok && s.check_file_token(f1, tokens[2], 1100) == T::Ok, "afterwards each recipient's token works");
+        CHECK(s.check_file_token(f1, id(0xEE, 32), 1100) == T::BadToken && s.check_file_token(f2, tokens[0], 1100) == T::NoSuchFile, "a wrong token, or an unknown file, is refused");
+        CHECK(s.check_file_token(f1, tokens[0], 5000) == T::Expired && s.check_file_token(f1, tokens[0], 4999) == T::Ok, "a token stops working at the file's expiry");
+        CHECK(s.owner_file_bytes(owner) == 6000 && s.owner_file_bytes(other) == 0, "what a mailbox has stored is counted for that mailbox");
+        CHECK(s.begin_file(owner, f2, 3000, 4096, 1, 5000, {id(0xB1, 32)}, 1000, 10000) == B::Ok && s.begin_file(owner, f3, 2000, 4096, 1, 5000, {id(0xB2, 32)}, 1000, 10000) == B::QuotaExceeded,
+              "a mailbox can't store more than its quota (11,000 bytes against 10,000)");
+        CHECK(s.begin_file(other, f3, 9000, 4096, 3, 5000, {id(0xB2, 32)}, 1000, 10000) == B::Ok, "(each mailbox has its own)");
+
+        bool done = true;
+        CHECK(s.redeem_file_token(f1, tokens[0], &done) == RR::Ok && !done && s.file(f1)->tokens_redeemed == 1, "redeeming a token uses it up");
+        CHECK(s.check_file_token(f1, tokens[0], 1100) == T::AlreadyRedeemed && s.redeem_file_token(f1, tokens[0], &done) == RR::AlreadyRedeemed, "and it can't be used or redeemed again");
+        CHECK(s.check_file_token(f1, tokens[1], 1100) == T::Ok && s.redeem_file_token(f1, id(0xEE, 32), &done) == RR::BadToken && s.redeem_file_token(id(0xF9, 16), tokens[1], &done) == RR::NoSuchFile, "the others still work, and a wrong token or unknown file can't redeem");
+        s.redeem_file_token(f1, tokens[1], &done);
+        CHECK(!done && s.file(f1), "two of three is not all");
+        CHECK(s.redeem_file_token(f1, tokens[2], &done) == RR::Ok && done && !s.file(f1) && s.owner_file_bytes(owner) == 3000, "the last token takes the file's record with it, and frees the owner's space");
+
+        CHECK(!s.delete_file(f2, other) && s.file(f2), "only the owner can withdraw a file");
+        CHECK(s.delete_file(f2, owner) && !s.file(f2) && !s.delete_file(f2, owner), "the owner can, once");
+        CHECK(s.delete_file(f3, Bytes()) && !s.file(f3), "(an empty owner means the relay itself)");
+
+        // Expiry and abandoned uploads.
+        s.begin_file(owner, id(0xC1, 16), 100, 4096, 1, 3000, {id(0xD1, 32)}, 2000, 1 << 20);   // expires at 3000
+        s.finish_file(id(0xC1, 16));
+        s.begin_file(owner, id(0xC2, 16), 100, 4096, 1, 9000, {id(0xD2, 32)}, 2000, 1 << 20);   // never finished
+        s.begin_file(owner, id(0xC3, 16), 100, 4096, 1, 9000, {id(0xD3, 32)}, 2000, 1 << 20);   // fine
+        s.finish_file(id(0xC3, 16));
+        auto none = s.sweep_files(2500, 1000);
+        CHECK(none.empty() && s.file(id(0xC1, 16)) && s.file(id(0xC2, 16)), "before anything is due, nothing goes");
+        auto gone = s.sweep_files(3000, 1000);
+        CHECK(gone.size() == 1 && gone[0] == id(0xC1, 16) && !s.file(id(0xC1, 16)) && s.file(id(0xC2, 16)) && s.file(id(0xC3, 16)), "an expired file goes, and the others stay");
+        gone = s.sweep_files(3500, 2000);
+        CHECK(gone.size() == 1 && gone[0] == id(0xC2, 16) && s.file(id(0xC3, 16)), "an upload that was never finished goes once it is old enough");
+        CHECK(s.all_file_ids().size() == 1 && s.all_file_ids()[0] == id(0xC3, 16), "(what is left can be listed)");
+
+        // Removing a mailbox removes its files' records; a restart keeps the rest.
+        s.begin_file(other, id(0xC4, 16), 100, 4096, 1, 9000, {id(0xD4, 32)}, 2000, 1 << 20);
+        { RelayStore again(path); CHECK(again.file(id(0xC4, 16)) && again.file(id(0xC3, 16)) && again.file(id(0xC3, 16))->ready, "files survive a restart"); }
+        CHECK(s.delete_mailbox(other) && !s.file(id(0xC4, 16)) && s.file(id(0xC3, 16)), "removing a mailbox removes its files' records and nobody else's");
+
+        // A database from before attachments existed.
+        fs::path old = dir / "v6files.db";
+        { RelayStore f(old); }
+        sqlite3* raw = nullptr;
+        sqlite3_open_v2(old.string().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+        sqlite3_exec(raw, "DROP TABLE file_tokens; DROP TABLE files; PRAGMA user_version=6;", nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+        RelayStore migrated(old);
+        migrated.add_invite(id(0xE1, 32), 99999);
+        migrated.register_mailbox(id(0xE1, 32), owner, id(0x55, 64), id(0xAA, 32), 1000, 10);
+        CHECK(migrated.begin_file(owner, f1, 100, 4096, 1, 5000, {id(0xA1, 32)}, 1000, 10000) == B::Ok, "a version 6 database opens and can hold attachments straight away");
+    }
 
     std::cout << "Redacting and deleting archives\n";
     {
