@@ -88,6 +88,7 @@ static MessagingEngine::Options test_options() {
     o.reconnect_max_seconds = 2;
     o.connect_timeout_seconds = 3;
     o.retry_base_seconds = 1;
+    o.archive_check_seconds = 3600;  // these tests are about plain messaging: chat archives are tested in test_group
     return o;
 }
 

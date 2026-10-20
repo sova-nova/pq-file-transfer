@@ -41,6 +41,7 @@ enum class RecordType : uint32_t {
     Conversation = 4,  // payload: see conversation_payload(); creates a group (version 2 only)
     Forward = 5,       // payload: see forward_payload(); asks a group's creator to pass a sealed envelope to another member (version 2 only)
     ArchiveGrant = 6,  // payload: see archive_grant_payload(); gives one member what they need to use the chat's archive (version 2 only)
+    Checkpoint = 7,    // payload: see checkpoint_payload(); "I have seen the archive up to this entry" (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -156,6 +157,21 @@ struct ArchiveGrantInfo {
 Bytes archive_grant_payload(const ArchiveGrantInfo& info);
 // std::nullopt for anything malformed, including trailing bytes.
 std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload);
+
+// --- Checkpoints ---
+//
+// Now and then a member signs "I have seen this chat's archive up to entry n, whose hash is h" and
+// adds it to the archive itself. A relay that later drops the end of the log, or shows different members
+// different histories, contradicts someone's checkpoint, and the app says so. Outside the transcript.
+//
+//   payload = u64 number | blob hash (32 bytes)
+struct CheckpointInfo {
+    uint64_t number = 0;
+    Bytes hash;  // HASH_BYTES: the archive's chain hash at that entry
+};
+// Throws std::runtime_error if the number is 0 or the hash isn't HASH_BYTES.
+Bytes checkpoint_payload(uint64_t number, const Bytes& hash);
+std::optional<CheckpointInfo> parse_checkpoint_payload(const Bytes& payload);
 
 // A receipt tells the sender that these messages were delivered or read.
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids);

@@ -581,6 +581,34 @@ int main() {
         CHECK(!as_record(2, Bytes(), 0, Bytes(MAX_ARCHIVE_GRANT_PAYLOAD + 1, 1)), "and its payload has a limit");
     }
 
+    std::cout << "Checkpoints\n";
+    {
+        Bytes hash = CryptoEngine::random_bytes(HASH_BYTES);
+        Bytes payload = checkpoint_payload(137, hash);
+        auto back = parse_checkpoint_payload(payload);
+        CHECK(back && back->number == 137 && back->hash == hash, "a checkpoint names an entry number and the chain hash at that entry, exactly");
+        CHECK(throws([&] { checkpoint_payload(0, hash); }) && throws([&] { checkpoint_payload(5, Bytes(31, 1)); }) && throws([&] { checkpoint_payload(5, Bytes(33, 1)); }),
+              "entry number 0 (there is no entry 0) and a hash of the wrong size are refused");
+        Bytes trailing = payload; trailing.push_back(0);
+        bool prefixes = true;
+        for (size_t n = 0; n < payload.size(); n++)
+            if (parse_checkpoint_payload(Bytes(payload.begin(), payload.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes zero; write_u64(zero, 0); write_blob(zero, hash);
+        Bytes short_hash; write_u64(short_hash, 9); write_blob(short_hash, Bytes(7, 1));
+        CHECK(!parse_checkpoint_payload(trailing) && prefixes && !parse_checkpoint_payload(Bytes()) && !parse_checkpoint_payload(zero) && !parse_checkpoint_payload(short_hash),
+              "trailing bytes, every truncation, an empty payload, entry 0 and a short hash are rejected");
+
+        Bytes recipients = recipients_hash_for({alice.fingerprint, bob.fingerprint});
+        auto as_record = [&](uint32_t version, const Bytes& own_prev, uint32_t seen_count, const Bytes& body) {
+            return parse_record(hand_record(alice, version, 7, alice.fingerprint, recipients, body, own_prev,
+                                            [&](Bytes& b) { if (version == 1) write_blob(b, Bytes()); else { write_u32(b, seen_count); for (uint32_t i = 0; i < seen_count; i++) write_blob(b, CryptoEngine::random_bytes(HASH_BYTES)); } }));
+        };
+        CHECK(as_record(2, Bytes(), 0, payload).has_value(), "(control) a checkpoint record parses as version 2");
+        CHECK(!as_record(1, Bytes(), 0, payload), "...but not as version 1");
+        CHECK(!as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 0, payload) && !as_record(2, Bytes(), 1, payload), "it is outside the transcript: no previous entry, nothing seen");
+        CHECK(!as_record(2, Bytes(), 0, Bytes(100, 1)), "and its payload has a small limit");
+    }
+
     std::cout << "Archive entries and chain\n";
     {
         const Bytes key = CryptoEngine::random_bytes(archive::KEY_BYTES), id = CryptoEngine::random_bytes(16);

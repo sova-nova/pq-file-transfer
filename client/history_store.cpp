@@ -50,7 +50,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 6;
+constexpr int64_t SCHEMA_VERSION = 7;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -120,7 +120,13 @@ const char SCHEMA_REST[] =
     "  role INTEGER NOT NULL, state INTEGER NOT NULL,"
     "  archive_key BLOB NOT NULL, chat_public BLOB NOT NULL, chat_private BLOB NOT NULL, join_token BLOB NOT NULL,"
     "  head_number INTEGER NOT NULL DEFAULT 0, head_hash BLOB NOT NULL DEFAULT x'',"
-    "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '');";
+    "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',"
+    "  checkpoint_at INTEGER NOT NULL DEFAULT 0, activity INTEGER NOT NULL DEFAULT 0,"
+    "  checkpoint_seen INTEGER NOT NULL DEFAULT 0, warning TEXT NOT NULL DEFAULT '');"
+    // Added in version 7: the chain hashes this device has checked.
+    "CREATE TABLE IF NOT EXISTS archive_chain("
+    "  conv_id BLOB NOT NULL, number INTEGER NOT NULL, hash BLOB NOT NULL,"
+    "  PRIMARY KEY(conv_id, number));";
 
 const char CONVERSATION_COLUMNS[] =
     "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
@@ -165,17 +171,24 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
     if (has_conversations && version < 2) {
         migrate_v1_to_v2(db_path);  // rewrites a table, so it keeps a copy of the old file first
     } else if (has_conversations && version < SCHEMA_VERSION) {
-        // Versions 3 to 6 only add tables (group invitations, introduced members, member tokens,
-        // verified people, chat archives): nothing to rewrite, so nothing to back up.
+        // Versions 3 to 7 only add tables (group invitations, introduced members, member tokens,
+        // verified people, chat archives) and, in 7, four columns on the archive table: nothing to
+        // rewrite, so nothing to back up.
         Transaction tx(db_);
+        if (version == 6) {
+            exec(db_, "ALTER TABLE archives ADD COLUMN checkpoint_at INTEGER NOT NULL DEFAULT 0");
+            exec(db_, "ALTER TABLE archives ADD COLUMN activity INTEGER NOT NULL DEFAULT 0");
+            exec(db_, "ALTER TABLE archives ADD COLUMN checkpoint_seen INTEGER NOT NULL DEFAULT 0");
+            exec(db_, "ALTER TABLE archives ADD COLUMN warning TEXT NOT NULL DEFAULT ''");
+        }
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=6");
+        exec(db_, "PRAGMA user_version=7");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=6");
+        exec(db_, "PRAGMA user_version=7");
         tx.commit();
     }
     } catch (...) {
@@ -216,7 +229,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=6");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=7");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -703,11 +716,16 @@ static std::optional<HistoryStore::Archive> read_archive(Stmt& s, const std::fun
     a.head_hash = s.column_blob(10);
     a.created_at = s.column_i64(11);
     a.note = s.column_text(12);
+    a.checkpoint_at = s.column_i64(13);
+    a.activity = static_cast<uint64_t>(s.column_i64(14));
+    a.checkpoint_seen = static_cast<uint64_t>(s.column_i64(15));
+    a.warning = s.column_text(16);
     return a;
 }
 
 static const char ARCHIVE_COLUMNS[] =
-    "conv_id, relay_address, relay_id, role, state, archive_key, chat_public, chat_private, join_token, head_number, head_hash, created_at, note";
+    "conv_id, relay_address, relay_id, role, state, archive_key, chat_public, chat_private, join_token, head_number, head_hash, created_at, note, "
+    "checkpoint_at, activity, checkpoint_seen, warning";
 
 std::optional<HistoryStore::Archive> HistoryStore::archive(const Bytes& conversation_id) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -744,6 +762,71 @@ void HistoryStore::set_archive_joined(const Bytes& conversation_id) {
 void HistoryStore::set_archive_failed(const Bytes& conversation_id, const std::string& note) {
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt(db_, "UPDATE archives SET state = 2, join_token = x'', note = ? WHERE conv_id = ?").text(1, note).blob(2, conversation_id).step();
+}
+
+std::vector<HistoryStore::Bytes> HistoryStore::archive_ids(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT conv_id FROM archives WHERE state = ? ORDER BY created_at, rowid");
+    s.i64(1, state);
+    std::vector<Bytes> out;
+    while (s.step()) out.push_back(s.column_blob(0));
+    return out;
+}
+
+bool HistoryStore::has_archive(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT 1 FROM archives WHERE conv_id = ?");
+    s.blob(1, conversation_id);
+    return s.step();
+}
+
+void HistoryStore::add_archive_activity(const Bytes& conversation_id, uint64_t entries) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET activity = activity + ? WHERE conv_id = ?").i64(1, static_cast<int64_t>(entries)).blob(2, conversation_id).step();
+}
+
+void HistoryStore::note_checkpoint_posted(const Bytes& conversation_id, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET activity = 0, checkpoint_at = ? WHERE conv_id = ?").i64(1, now).blob(2, conversation_id).step();
+}
+
+void HistoryStore::note_checkpoint_seen(const Bytes& conversation_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET checkpoint_seen = ? WHERE conv_id = ? AND checkpoint_seen < ?")
+        .i64(1, static_cast<int64_t>(number)).blob(2, conversation_id).i64(3, static_cast<int64_t>(number)).step();
+}
+
+void HistoryStore::set_archive_warning(const Bytes& conversation_id, const std::string& warning) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET warning = ? WHERE conv_id = ?").text(1, warning).blob(2, conversation_id).step();
+}
+
+void HistoryStore::save_archive_hashes(const Bytes& conversation_id, const std::vector<std::pair<uint64_t, Bytes>>& hashes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    for (const auto& [number, hash] : hashes)
+        Stmt(db_, "INSERT OR IGNORE INTO archive_chain(conv_id, number, hash) VALUES(?, ?, ?)").blob(1, conversation_id).i64(2, static_cast<int64_t>(number)).blob(3, hash).step();
+    tx.commit();
+}
+
+std::optional<HistoryStore::Bytes> HistoryStore::archive_hash(const Bytes& conversation_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT hash FROM archive_chain WHERE conv_id = ? AND number = ?");
+    s.blob(1, conversation_id).i64(2, static_cast<int64_t>(number));
+    if (!s.step()) return std::nullopt;
+    return s.column_blob(0);
+}
+
+std::optional<HistoryStore::Message> HistoryStore::first_message(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT row, conv_id, msg_id, outgoing, sent_at, received_at, status, gap, entry_hash, sealed "
+                "FROM messages WHERE conv_id = ? ORDER BY row LIMIT 1");
+    s.blob(1, conversation_id);
+    if (!s.step()) return std::nullopt;
+    Message m;
+    auto opener = [this](const Bytes& sealed, const Bytes& aad) { return unseal(sealed, aad); };
+    if (!read_message(s, m, opener)) return std::nullopt;
+    return m;
 }
 
 void HistoryStore::set_archive_head(const Bytes& conversation_id, uint64_t number, const Bytes& hash) {

@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 6, "opening it upgrades it to the current version (6)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 7, "opening it upgrades it to the current version (7)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 6, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 7, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 6 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 7 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 6, "opening it upgrades it to the current version (6)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 7, "opening it upgrades it to the current version (7)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -648,6 +648,97 @@ int main() {
         CHECK(!wrong.archive(conv) && wrong.archives().empty(), "with a different key none of it can be read (and nothing crashes)");
         HistoryStore again(dir / "archive.db", key);
         CHECK(again.archive(conv) && again.archive(conv)->head_number == 9 && again.archive(conv)->archive_key == a.archive_key && again.archives().size() == 2, "archives survive a restart");
+    }
+
+    std::cout << "Archive upkeep: checkpoints, warnings and the checked chain\n";
+    {
+        const Bytes conv = id(0x61), other = id(0x62);
+        HistoryStore::Archive a;
+        a.conversation_id = conv;
+        a.relay_address = "10.0.0.248:9000";
+        a.relay_id = id(0x71, 32);
+        a.archive_key = id(0x11, 32);
+        a.chat_public_key = id(0x33, 50);
+        a.chat_private_key = id(0x44, 80);
+        a.created_at = 1000;
+        HistoryStore h(dir / "upkeep.db", key);
+        h.ensure_conversation(conv_a, fp_a, 1000);
+        CHECK(!h.has_archive(conv) && h.archive_ids(HistoryStore::ArchiveGranted).empty(), "no archive yet");
+        h.add_archive(a);
+        a.conversation_id = other;
+        a.state = HistoryStore::ArchiveJoined;
+        a.created_at = 2000;
+        h.add_archive(a);
+        CHECK(h.has_archive(conv) && h.has_archive(other) && !h.has_archive(id(0x99)), "it can be asked cheaply whether a chat has one");
+        auto granted = h.archive_ids(HistoryStore::ArchiveGranted), joined = h.archive_ids(HistoryStore::ArchiveJoined);
+        CHECK(granted.size() == 1 && granted[0] == conv && joined.size() == 1 && joined[0] == other && h.archive_ids(HistoryStore::ArchiveFailed).empty(), "and which chats are in which state, without opening any secrets");
+
+        auto fresh = h.archive(conv);
+        CHECK(fresh && fresh->checkpoint_at == 0 && fresh->activity == 0 && fresh->checkpoint_seen == 0 && fresh->warning.empty(), "a new archive has no activity, checkpoint or warning");
+        h.add_archive_activity(conv, 3);
+        h.add_archive_activity(conv, 4);
+        CHECK(h.archive(conv)->activity == 7, "activity since the last checkpoint adds up");
+        h.note_checkpoint_posted(conv, 5000);
+        CHECK(h.archive(conv)->activity == 0 && h.archive(conv)->checkpoint_at == 5000, "adding a checkpoint resets it and records when");
+        h.note_checkpoint_seen(conv, 40);
+        h.note_checkpoint_seen(conv, 25);
+        CHECK(h.archive(conv)->checkpoint_seen == 40, "the latest entry a checkpoint has vouched for only moves forward");
+        h.set_archive_warning(conv, "the relay's copy changed");
+        CHECK(h.archive(conv)->warning == "the relay's copy changed" && h.archive(other)->warning.empty(), "a warning is kept for that chat only");
+        h.set_archive_warning(conv, "");
+        CHECK(h.archive(conv)->warning.empty(), "and can be cleared");
+
+        CHECK(!h.archive_hash(conv, 1), "no chain hashes are held to begin with");
+        h.save_archive_hashes(conv, {{1, id(0xA1, 32)}, {2, id(0xA2, 32)}, {3, id(0xA3, 32)}});
+        h.save_archive_hashes(conv, {{3, id(0xEE, 32)}, {4, id(0xA4, 32)}});
+        CHECK(h.archive_hash(conv, 2) == id(0xA2, 32) && h.archive_hash(conv, 4) == id(0xA4, 32) && !h.archive_hash(conv, 5) && !h.archive_hash(other, 2),
+              "the hash of each checked entry is kept, per chat");
+        CHECK(h.archive_hash(conv, 3) == id(0xA3, 32), "an entry's hash is never replaced by a later claim");
+
+        CHECK(!h.first_message(conv_a), "a conversation with nothing in it has no first message");
+        h.add_message(msg(conv_a, 1, true, 3000, "the first one"));
+        h.add_message(msg(conv_a, 2, false, 3001, "the second one"));
+        auto first = h.first_message(conv_a);
+        CHECK(first && first->record == text("the first one") && first->message_id == id(1), "the first message stored is found");
+    }
+
+    std::cout << "Upgrading a version 6 history\n";
+    {
+        fs::path v6 = dir / "v6.db";
+        const Bytes conv = id(0x61);
+        {
+            HistoryStore h(v6, key);
+            HistoryStore::Archive a;
+            a.conversation_id = conv;
+            a.relay_address = "10.0.0.248:9000";
+            a.relay_id = id(0x71, 32);
+            a.role = HistoryStore::ArchiveCreator;
+            a.state = HistoryStore::ArchiveJoined;
+            a.archive_key = id(0x11, 32);
+            a.chat_public_key = id(0x33, 50);
+            a.chat_private_key = id(0x44, 80);
+            a.created_at = 1234;
+            h.add_archive(a);
+            h.set_archive_head(conv, 9, id(0x99, 32));
+        }
+        // Make it what version 6 left: the archive table without its four newer columns, and no chain table.
+        raw_exec(v6, "CREATE TABLE archives_old AS SELECT conv_id, relay_address, relay_id, role, state, archive_key, chat_public, chat_private, join_token, head_number, head_hash, created_at, note FROM archives;"
+                     "DROP TABLE archives; ALTER TABLE archives_old RENAME TO archives; DROP TABLE archive_chain; PRAGMA user_version=6;");
+        CHECK(raw_int(v6, "PRAGMA user_version") == 6 && raw_int(v6, "SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name = 'warning'") == 0, "(setup) the fixture really is a version 6 database");
+        {
+            HistoryStore h(v6, key);
+            CHECK(raw_int(v6, "PRAGMA user_version") == 7, "opening it upgrades it to version 7");
+            auto a = h.archive(conv);
+            CHECK(a && a->relay_address == "10.0.0.248:9000" && a->role == HistoryStore::ArchiveCreator && a->state == HistoryStore::ArchiveJoined && a->archive_key == id(0x11, 32) &&
+                      a->head_number == 9 && a->head_hash == id(0x99, 32) && a->created_at == 1234,
+                  "the archive it held is untouched");
+            CHECK(a && a->checkpoint_at == 0 && a->activity == 0 && a->checkpoint_seen == 0 && a->warning.empty(), "the new columns start empty");
+            h.add_archive_activity(conv, 2);
+            h.save_archive_hashes(conv, {{1, id(0xA1, 32)}});
+            CHECK(h.archive(conv)->activity == 2 && h.archive_hash(conv, 1) == id(0xA1, 32), "and work straight away");
+        }
+        CHECK(!fs::exists(fs::path(v6.string() + ".before-v2")), "adding columns needs no backup of the old file");
+        { HistoryStore again(v6, key); CHECK(again.archive(conv) && again.archive(conv)->activity == 2, "opening it again is harmless"); }
     }
 
     std::cout << "People the user has verified\n";

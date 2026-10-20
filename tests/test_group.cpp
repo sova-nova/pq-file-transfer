@@ -24,6 +24,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <sqlite3.h>
+
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
 
@@ -83,6 +85,8 @@ struct Server {
 
 // --- People ---
 
+static int g_archive_check_seconds = 1;  // how often an engine looks for chats that need an archive
+
 static MessagingEngine::Options test_options() {
     MessagingEngine::Options o;
     o.receipt_delay_max_seconds = 0;
@@ -90,6 +94,9 @@ static MessagingEngine::Options test_options() {
     o.reconnect_max_seconds = 2;
     o.connect_timeout_seconds = 3;
     o.retry_base_seconds = 1;
+    o.archive_check_seconds = g_archive_check_seconds;  // chat archives are made and caught up on quickly...
+    o.archive_sync_seconds = 2;
+    o.archive_checkpoint_every = 5;   // ...and checkpointed after 5 entries instead of 50
     return o;
 }
 
@@ -221,6 +228,19 @@ static bool file_contains(const fs::path& p, const std::string& needle) {
     return data.find(needle) != std::string::npos;
 }
 
+static void sql_exec(const fs::path& db, const std::string& sql) {
+    sqlite3* h = nullptr;
+    sqlite3_open_v2(db.string().c_str(), &h, SQLITE_OPEN_READWRITE, nullptr);
+    char* err = nullptr;
+    if (sqlite3_exec(h, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
+        std::cout << "  (sql failed: " << (err ? err : "?") << ")\n";
+        sqlite3_free(err);
+    }
+    sqlite3_close(h);
+}
+
+static std::string hex_literal(const Bytes& b) { return "x'" + bytes_to_hex(b) + "'"; }
+
 // --- Hand-made envelopes, for the hostile cases ---
 
 static Bytes fp_raw(const User& u) { return *hex_to_bytes(u.fp); }
@@ -290,6 +310,24 @@ static std::vector<Bytes> mailbox_envelopes(User& u) {
         else if (e.kind == RelayClient::Event::Kind::CollectEnd || e.kind == RelayClient::Event::Kind::Closed) break;
     }
     return out;
+}
+
+// Throws away everything waiting in someone's mailbox, as if it had never arrived. Their engine must not be running.
+static size_t empty_mailbox(User& u) {
+    auto cfg = u.keys->load_mailbox_config();
+    Bytes access = u.keys->load_access_private();
+    RelayClient c;
+    std::string err;
+    std::vector<Bytes> ids;
+    if (!cfg || access.empty() || !c.connect("127.0.0.1", static_cast<uint16_t>(PORT), RELAY_ID, 3, err) || !c.authenticate(cfg->mailbox_id, access, err) || !c.collect(err)) return 0;
+    for (int i = 0; i < 60; i++) {
+        auto e = c.next_event(250);
+        if (e.kind == RelayClient::Event::Kind::Envelope) ids.push_back(e.envelope.id);
+        else if (e.kind == RelayClient::Event::Kind::CollectEnd || e.kind == RelayClient::Event::Kind::Closed) break;
+    }
+    size_t deleted = 0;
+    if (!ids.empty()) c.acknowledge(ids, &deleted, err);
+    return deleted;
 }
 
 static Bytes bundle_of(User& u) {
@@ -736,29 +774,35 @@ int main(int argc, char** argv) {
         const Bytes f = fp_raw(frank), g = fp_raw(gina);
         CHECK(wait_for([&] { return find_invite(frank, gid).has_value(); }, 30000) && frank.engine->accept_group_invite(gid, err), "e1 joins");
 
-        // e1 now makes a token for e2 and sends it, sealed, to Alice. Alice deposits it in e2's mailbox.
-        auto sealed_for_gina = [&] {
-            std::vector<Bytes> found;
-            for (auto& env : mailbox_envelopes(gina)) found.push_back(env);
-            return found;
-        };
-        bool arrived = wait_for([&] { return sealed_for_gina().size() >= 2; }, 60000);
-        CHECK(arrived, "e2's mailbox ends up holding Alice's invitation and the token e1 made for her");
-        auto envelopes = sealed_for_gina();
+        // e1 now makes a token for e2 and sends it, sealed, to Alice. Alice deposits it in e2's mailbox. (Alice also
+        // makes the group's archive and sends e2 its grant, so wait for both of those, not for a number of envelopes.)
         as(alice);
-        const Bytes alice_kem = alice.keys->load_private_kem(), gina_kem = gina.keys->load_private_kem();
-        int alice_can_open = 0, gina_can_open = 0, grants_from_frank = 0;
-        for (auto& env : envelopes) {
-            if (chat::open_envelope(env, alice_kem)) alice_can_open++;
-            if (auto inner = chat::open_envelope(env, gina_kem)) {
-                gina_can_open++;
-                for (auto& raw : inner->records)
-                    if (auto sr = chat::parse_record(raw))
-                        if (sr->record.type == chat::RecordType::TokenGrant && sr->record.sender == f && sr->record.payload.size() == 32 && sr->record.conversation_id == group_id) grants_from_frank++;
+        const Bytes alice_kem = alice.keys->load_private_kem();
+        as(gina);
+        const Bytes gina_kem = gina.keys->load_private_kem();
+        auto classify = [&](int& alice_can_open, int& gina_can_open, int& grants_from_frank, int& archive_grants, size_t& total) {
+            auto envelopes = mailbox_envelopes(gina);
+            total = envelopes.size();
+            alice_can_open = gina_can_open = grants_from_frank = archive_grants = 0;
+            for (auto& env : envelopes) {
+                if (chat::open_envelope(env, alice_kem)) alice_can_open++;
+                if (auto inner = chat::open_envelope(env, gina_kem)) {
+                    gina_can_open++;
+                    for (auto& raw : inner->records)
+                        if (auto sr = chat::parse_record(raw)) {
+                            if (sr->record.type == chat::RecordType::TokenGrant && sr->record.sender == f && sr->record.payload.size() == 32 && sr->record.conversation_id == group_id) grants_from_frank++;
+                            if (sr->record.type == chat::RecordType::ArchiveGrant && sr->record.sender == a) archive_grants++;
+                        }
+                }
             }
-        }
+        };
+        int alice_can_open = 0, gina_can_open = 0, grants_from_frank = 0, archive_grants = 0;
+        size_t total = 0;
+        bool arrived = wait_for([&] { classify(alice_can_open, gina_can_open, grants_from_frank, archive_grants, total); return grants_from_frank == 1 && archive_grants == 1; }, 60000);
+        CHECK(arrived, "e2's mailbox ends up holding Alice's invitation, the token e1 made for her, and the archive grant");
+        classify(alice_can_open, gina_can_open, grants_from_frank, archive_grants, total);
         CHECK(alice_can_open == 0, "Alice, who passed it on, cannot open any of what is in e2's mailbox: everything is sealed to e2 alone");
-        CHECK(gina_can_open == static_cast<int>(envelopes.size()) && grants_from_frank == 1, "e2 can open all of it, and one is a 32-byte send token signed by e1 for this group");
+        CHECK(gina_can_open == static_cast<int>(total) && grants_from_frank == 1, "e2 can open all of it, and one is a 32-byte send token signed by e1 for this group");
 
         // Who may ask Alice to deposit something? Only a member, for another member, in a group Alice made.
         auto forward = [&](User& signer, const Bytes& target, const Bytes& group, const std::vector<Bytes>& members, const Bytes& sealed) {
@@ -863,7 +907,7 @@ int main(int argc, char** argv) {
     }
 
 
-    std::cout << "16. Chat archives between real people\n";
+    std::cout << "16. Chat archives made by hand, and hostile grants\n";
     {
         std::string err;
         const std::string relay_address = "127.0.0.1:" + std::to_string(PORT);
@@ -885,82 +929,142 @@ int main(int argc, char** argv) {
             return in;
         };
 
-        // --- A one-to-one chat: the person with the smaller fingerprint makes the archive ---
+        // --- A one-to-one chat. Its archive was made automatically (the smaller fingerprint's job); here we use it by hand. ---
         User& maker = alice.fp < bob.fp ? alice : bob;
         User& other = alice.fp < bob.fp ? bob : alice;
         const std::string direct = *maker.engine->direct_conversation_id(other.fp);
         const Bytes direct_id = *hex_to_bytes(direct);
         CHECK(direct == *other.engine->direct_conversation_id(maker.fp), "both sides agree on the chat's ID");
-        CHECK(!maker.engine->archive_status(direct).exists, "there is no archive yet");
-        CHECK(!other.engine->create_archive(direct, err) && has(err, "Someone else"), "the person with the larger fingerprint can't make it: " + err);
-        CHECK(!maker.engine->create_archive(std::string(32, 'a'), err) && has(err, "isn't in your list"), "nor can one be made for a chat that doesn't exist: " + err);
-        const size_t other_messages_before = other.engine->messages(maker.fp).size();
-        CHECK(maker.engine->create_archive(direct, err), "the smaller fingerprint makes it (" + err + ")");
+        CHECK(wait_for([&] { return maker.engine->archive_status(direct).joined && other.engine->archive_status(direct).joined; }, 30000),
+              "the chat already has an archive, made by the smaller fingerprint, and both have joined");
         auto made = maker.engine->archive_status(direct);
-        CHECK(made.exists && made.joined && made.is_creator && made.entries == 0 && made.relay == relay_address, "it exists on their relay, and they are in it");
-        CHECK(!maker.engine->create_archive(direct, err) && has(err, "already has"), "making it twice is refused: " + err);
-        CHECK(wait_for([&] { return other.engine->archive_status(direct).joined; }, 30000), "the other person receives their grant and joins");
-        auto got_grant = other.engine->archive_status(direct);
-        CHECK(got_grant.exists && !got_grant.is_creator && !got_grant.failed && got_grant.relay == relay_address, "as a member, with the relay named in the grant");
-        CHECK(other.engine->messages(maker.fp).size() == other_messages_before, "the grant is not a message: nothing new appears in the chat");
+        CHECK(made.exists && made.is_creator && made.relay == relay_address && !other.engine->archive_status(direct).is_creator, "one is its maker and the other a member, on the maker's relay");
+        CHECK(!other.engine->create_archive(direct, err) && has(err, "Someone else"), "the person with the larger fingerprint can't make it: " + err);
+        CHECK(!maker.engine->create_archive(direct, err) && has(err, "already has"), "making it again is refused: " + err);
+        CHECK(!maker.engine->create_archive(std::string(32, 'a'), err) && has(err, "isn't in your list"), "nor can one be made for a chat that doesn't exist: " + err);
 
+        // Settle: catch both up, so what follows is exactly what this test adds.
+        std::vector<MessagingEngine::ArchivedRecord> fresh, others;
+        maker.engine->archive_sync(direct, fresh, err);
+        other.engine->archive_sync(direct, fresh, err);
+        const uint64_t base = maker.engine->archive_status(direct).entries;
         const std::vector<Bytes> pair = {a, b};
-        Bytes r1 = text_record(maker, direct_id, pair, "first, in the archive");
         uint64_t n = 0;
-        std::vector<MessagingEngine::ArchivedRecord> others;
-        CHECK(maker.engine->archive_append(direct, r1, n, others, err) && n == 1 && others.empty(), "the maker appends the first entry (" + err + ")");
-        std::vector<MessagingEngine::ArchivedRecord> fresh;
-        CHECK(other.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 1 && fresh[0].record == r1, "the other person fetches it: checked, decrypted, and the same record");
-        CHECK(other.engine->archive_status(direct).entries == 1, "and their device remembers how far it has checked");
+        Bytes r1 = text_record(maker, direct_id, pair, "first, in the archive");
+        CHECK(maker.engine->archive_append(direct, r1, n, others, err) && n == base + 1 && others.empty(), "the maker appends an entry (" + err + ")");
+        CHECK(other.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == base + 1 && fresh[0].record == r1, "the other person fetches it: checked, decrypted, and the same record");
         Bytes r2 = text_record(other, direct_id, pair, "second, from the other person");
-        CHECK(other.engine->archive_append(direct, r2, n, others, err) && n == 2 && others.empty(), "they append the second");
-        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 2 && fresh[0].record == r2, "the maker sees it");
+        CHECK(other.engine->archive_append(direct, r2, n, others, err) && n == base + 2 && others.empty(), "they append the next");
+        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == base + 2 && fresh[0].record == r2, "the maker sees it");
 
         // Both write without looking first: the later one finds out, catches up, and goes on top.
         Bytes r3 = text_record(maker, direct_id, pair, "third, from the maker");
         Bytes r4 = text_record(other, direct_id, pair, "fourth, written without seeing the third");
-        CHECK(maker.engine->archive_append(direct, r3, n, others, err) && n == 3, "the maker appends the third");
-        CHECK(other.engine->archive_append(direct, r4, n, others, err) && n == 4 && others.size() == 1 && others[0].number == 3 && others[0].record == r3,
-              "the other person's append was behind: it caught up on the third, handed it over, and landed on top as the fourth");
-        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 4 && fresh[0].record == r4, "and the maker's view is one chain");
+        CHECK(maker.engine->archive_append(direct, r3, n, others, err) && n == base + 3, "the maker appends another");
+        CHECK(other.engine->archive_append(direct, r4, n, others, err) && n == base + 4 && others.size() == 1 && others[0].number == base + 3 && others[0].record == r3,
+              "the other person's append was behind: it caught up on the maker's, handed it over, and landed on top");
+        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].record == r4, "and the maker's view is one chain");
         CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.empty() && other.engine->archive_sync(direct, fresh, err) && fresh.empty(), "when nothing is new, nothing comes back");
-        CHECK(maker.engine->archive_status(direct).entries == 4 && other.engine->archive_status(direct).entries == 4, "both devices agree the chat has 4 entries");
+        CHECK(maker.engine->archive_status(direct).entries == base + 4 && other.engine->archive_status(direct).entries == base + 4, "both devices agree on how long the chat is");
         CHECK(!maker.engine->archive_append(std::string(32, 'b'), r1, n, others, err) && has(err, "no archive"), "appending to a chat with no archive is refused: " + err);
         CHECK(!maker.engine->archive_append(direct, Bytes(), n, others, err), "an empty record is refused");
 
-        // --- A group: its creator makes the archive for all three members ---
-        const std::string group = hiking;
-        const Bytes group_id = *hex_to_bytes(group);
+        // --- A group whose archive is made by hand: Alice's automatic creation is held off while it is set up ---
+        g_archive_check_seconds = 3600;
+        restart_engine(alice);
+        std::string manual;
+        CHECK(alice.engine->create_group("Archive test", {bob.fp, carol.fp}, manual, err), "(Alice makes a group, with her own archive creation paused)");
+        CHECK(wait_for([&] { return find_invite(bob, manual) && find_invite(carol, manual); }), "(Bob and Carol are invited)");
+        CHECK(bob.engine->accept_group_invite(manual, err) && carol.engine->accept_group_invite(manual, err), "(and join)");
+        const Bytes group_id = *hex_to_bytes(manual);
         const std::vector<Bytes> trio = {a, b, c};
+
         // A member who is not the creator tries to hand Bob an archive of their own.
         send_envelope(bob, token_for(carol, bob), grant_inner(carol, group_id, trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
         run_for(1500);
-        CHECK(!bob.engine->archive_status(group).exists, "a grant from a member who didn't make the group is ignored");
+        CHECK(!bob.engine->archive_status(manual).exists, "a grant from a member who didn't make the group is ignored");
         send_envelope(bob, token_for(alice, bob), grant_inner(alice, *hex_to_bytes(std::string(32, 'c')), trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
         run_for(1000);
         CHECK(!bob.engine->archive_status(std::string(32, 'c')).exists, "a grant for a chat Bob has never heard of is ignored");
 
-        CHECK(!bob.engine->create_archive(group, err) && has(err, "Someone else"), "a member who didn't make the group can't make its archive: " + err);
-        CHECK(alice.engine->create_archive(group, err), "the group's creator makes it (" + err + ")");
-        CHECK(wait_for([&] { return bob.engine->archive_status(group).joined && carol.engine->archive_status(group).joined; }, 30000), "Bob and Carol each receive their own grant and join");
+        CHECK(!bob.engine->create_archive(manual, err) && has(err, "Someone else"), "a member who didn't make the group can't make its archive: " + err);
+        CHECK(alice.engine->create_archive(manual, err), "the group's creator makes it (" + err + ")");
+        CHECK(wait_for([&] { return bob.engine->archive_status(manual).joined && carol.engine->archive_status(manual).joined; }, 30000), "Bob and Carol each receive their own grant and join");
 
         Bytes g1 = text_record(alice, group_id, trio, "welcome, archived");
-        CHECK(alice.engine->archive_append(group, g1, n, others, err) && n == 1, "Alice appends");
-        CHECK(bob.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g1 && carol.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g1,
+        CHECK(alice.engine->archive_append(manual, g1, n, others, err) && n == 1, "Alice appends");
+        CHECK(bob.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g1 && carol.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g1,
               "Bob and Carol both read it");
         // A second grant, from the real creator, with a different key: a replay must not change what Bob holds.
         send_envelope(bob, token_for(alice, bob), grant_inner(alice, group_id, trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
         run_for(1500);
         Bytes g2 = text_record(carol, group_id, trio, "from Carol, after a replayed grant");
-        CHECK(carol.engine->archive_append(group, g2, n, others, err) && n == 2, "Carol appends");
-        CHECK(bob.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g2, "Bob still reads it: the replayed grant did not replace his archive key");
+        CHECK(carol.engine->archive_append(manual, g2, n, others, err) && n == 2, "Carol appends");
+        CHECK(bob.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g2, "Bob still reads it: the replayed grant did not replace his archive key");
         Bytes g3 = text_record(bob, group_id, trio, "Bob, at the same time as Carol");
         Bytes g4 = text_record(carol, group_id, trio, "Carol, at the same time as Bob");
-        CHECK(bob.engine->archive_append(group, g3, n, others, err) && n == 3 && carol.engine->archive_append(group, g4, n, others, err) && n == 4 && others.size() == 1 && others[0].record == g3,
+        CHECK(bob.engine->archive_append(manual, g3, n, others, err) && n == 3 && carol.engine->archive_append(manual, g4, n, others, err) && n == 4 && others.size() == 1 && others[0].record == g3,
               "two members writing at once end up in one order, the second catching up on the first");
-        CHECK(alice.engine->archive_sync(group, fresh, err) && fresh.size() == 3 && fresh[0].number == 2 && fresh[1].number == 3 && fresh[2].number == 4 && alice.engine->archive_status(group).entries == 4,
+        CHECK(alice.engine->archive_sync(manual, fresh, err) && fresh.size() == 3 && fresh[0].number == 2 && fresh[2].number == 4 && alice.engine->archive_status(manual).entries == 4,
               "Alice, who was away, catches up on all three in order");
         CHECK(!file_contains(alice.history(), "welcome, archived") && !file_contains(fs::path(alice.history().string() + "-wal"), "welcome, archived"), "(an archived record's text is not readable in the history file)");
+
+        g_archive_check_seconds = 1;
+        restart_engine(alice);
+    }
+
+    std::cout << "17. Archives in everyday use\n";
+    {
+        std::string err;
+        // The Hiking group was made long ago, with no special care: its archive was made automatically.
+        CHECK(wait_for([&] { return alice.engine->archive_status(hiking).joined && bob.engine->archive_status(hiking).joined && carol.engine->archive_status(hiking).joined; }, 30000),
+              "a group's archive is made by its creator without being asked, and every member joins");
+        auto status = alice.engine->archive_status(hiking);
+        CHECK(status.is_creator && !bob.engine->archive_status(hiking).is_creator && status.warning.empty(), "(Alice made it, nobody has a warning)");
+        CHECK(wait_for([&] { return alice.engine->archive_status(hiking).entries >= 1 && bob.engine->archive_status(hiking).entries >= 1 && carol.engine->archive_status(hiking).entries >= 1; }, 30000),
+              "its first entry is the group's creation record, and every member has checked it");
+
+        const uint64_t before = alice.engine->archive_status(hiking).entries;
+        CHECK(alice.engine->send_group_text(hiking, "this one is archived too", err), "Alice sends a message in the group");
+        CHECK(wait_for([&] { return got(bob, hiking, "this one is archived too") && got(carol, hiking, "this one is archived too"); }), "it is delivered as always, by envelope");
+        CHECK(wait_for([&] { return alice.engine->archive_status(hiking).entries >= before + 1; }, 30000), "and it is added to the archive");
+        CHECK(wait_for([&] { return bob.engine->archive_status(hiking).entries >= before + 1; }, 30000), "where the others' devices see the chain grow");
+        CHECK(incoming_count(bob, hiking, "this one is archived too") == 1, "(and reading it from the archive did not add it a second time)");
+
+        // A message that never arrives by envelope still turns up, from the archive.
+        carol.engine.reset();
+        CHECK(alice.engine->send_group_text(hiking, "only the archive will bring this one", err), "Alice writes while Carol's app is closed");
+        CHECK(wait_for([&] { return got(bob, hiking, "only the archive will bring this one") && alice.engine->archive_status(hiking).entries >= before + 2; }, 30000), "Bob gets it, and it reaches the archive");
+        CHECK(empty_mailbox(carol) >= 1, "(Carol's copy is lost on the way: everything waiting in her mailbox is thrown away)");
+        restart_engine(carol);
+        CHECK(wait_for([&] { return got(carol, hiking, "only the archive will bring this one"); }, 30000), "when Carol's app starts it finds the message in the archive");
+        CHECK(incoming_count(carol, hiking, "only the archive will bring this one") == 1, "exactly once");
+        bool genuine = false;
+        for (auto& m : carol.engine->group_messages(hiking)) if (m.text == "only the archive will bring this one" && m.sender_fp == alice.fp && m.sender_name == "Alice") genuine = true;
+        CHECK(genuine, "and as Alice's: it carried her signature, checked as for any message");
+
+        // Checkpoints: after a few entries each member signs where they have got to.
+        for (int i = 1; i <= 7; i++) alice.engine->send_group_text(hiking, "filler " + std::to_string(i), err);
+        CHECK(wait_for([&] { return bob.engine->archive_status(hiking).checkpoint_seen > 0 && carol.engine->archive_status(hiking).checkpoint_seen > 0; }, 60000),
+              "after enough entries, other members' signed checkpoints appear in the archive and are seen");
+        CHECK(bob.engine->archive_status(hiking).warning.empty() && carol.engine->archive_status(hiking).warning.empty() && alice.engine->archive_status(hiking).warning.empty(), "all of which agree with the relay's copy: no warnings");
+
+        // The relay drops the end of the log.
+        wait_for([&] { return alice.engine->archive_status(hiking).entries == bob.engine->archive_status(hiking).entries && bob.engine->archive_status(hiking).entries == carol.engine->archive_status(hiking).entries; }, 30000);
+        const uint64_t head = bob.engine->archive_status(hiking).entries;
+        const std::string id_hex = hiking;
+        const std::string literal = hex_literal(*hex_to_bytes(id_hex));
+        const uint64_t keep = head - 3;
+        sql_exec(ROOT / "relay-data/s/v3/relay.db",
+                 "DELETE FROM archive_entries WHERE archive_id = " + literal + " AND number > " + std::to_string(keep) + ";"
+                 "UPDATE archives SET head_number = " + std::to_string(keep) + ", head_hash = (SELECT hash FROM archive_entries WHERE archive_id = " + literal + " AND number = " + std::to_string(keep) + ") WHERE id = " + literal + ";");
+        CHECK(wait_for([&] { return !bob.engine->archive_status(hiking).warning.empty() && !carol.engine->archive_status(hiking).warning.empty() && !alice.engine->archive_status(hiking).warning.empty(); }, 60000),
+              "a relay that drops the end of the log is caught by the next catch-up: every member is warned");
+        CHECK(has(bob.engine->archive_status(hiking).warning, "different end"), "(" + bob.engine->archive_status(hiking).warning + ")");
+        CHECK(any_notice(bob, "Warning about a chat's archive"), "Bob is told in words");
+        std::string e2;
+        CHECK(bob.engine->send_group_text(hiking, "chatting still works", e2) && wait_for([&] { return got(alice, hiking, "chatting still works") && got(carol, hiking, "chatting still works"); }, 30000),
+              "and messages still flow by envelope: a damaged archive never stops the chat");
     }
 
     srv.stop();

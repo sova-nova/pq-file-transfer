@@ -44,6 +44,13 @@ public:
         int connect_timeout_seconds = 8;
         int retry_base_seconds = 5;             // a failed send is retried after this, then 2x, 4x... up to 10 minutes
         uint32_t envelope_ttl_seconds = 30u * 24 * 3600;  // how long the relay may hold an undelivered envelope
+        // Chat archives: how often to look for chats that need one, how often to catch up on each archive,
+        // and when to add a checkpoint (after this many entries, or if there has been activity and this
+        // long has passed since the last).
+        int archive_check_seconds = 10;
+        int archive_sync_seconds = 300;
+        int archive_checkpoint_every = 50;
+        int archive_checkpoint_max_age_seconds = 24 * 3600;
     };
 
     // Throws std::runtime_error if the keys are locked or the history can't be opened.
@@ -252,6 +259,8 @@ public:
         std::string note;      // why joining failed
         bool is_creator = false;
         uint64_t entries = 0;  // how far this device has checked the chain
+        uint64_t checkpoint_seen = 0;  // the latest entry any member's checkpoint says they had seen
+        std::string warning;   // the relay's copy contradicts something this device holds; empty if all is well
         std::string relay;     // host:port of the relay that holds it
     };
     ArchiveStatus archive_status(const std::string& conversation_id);
@@ -329,6 +338,18 @@ private:
     std::optional<ArchiveContext> archive_context(const Bytes& conversation_id);
     bool receive_archive_grant(const Peer& sender, const chat::SignedRecord& record);
     void join_pending_archives();
+    void ensure_archives();                  // makes the archive for chats where that is our job
+    void sync_archives();                    // catches up on each archive now and then, and when a gap shows
+    void queue_archive_entry(const Bytes& conversation_id, const Bytes& record, const Bytes& message_id);
+    void flush_archive_item(const HistoryStore::OutboxItem& item, int64_t now);
+    bool handle_archived_records(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records);
+    bool process_checkpoint(const Bytes& conversation_id, const chat::SignedRecord& record, const std::string& sender_fp);
+    void maybe_post_checkpoint(const Bytes& conversation_id);
+    void warn_archive(const Bytes& conversation_id, const std::string& what);
+    std::map<std::string, std::chrono::steady_clock::time_point> archive_create_retry_;
+    std::map<std::string, std::chrono::steady_clock::time_point> archive_next_sync_;
+    std::set<std::string> archive_sync_now_;  // chats where a message showed a gap
+    std::chrono::steady_clock::time_point next_archive_check_{};
     bool open_archive_session(const HistoryStore::Archive& archive, RelayClient& client, std::string& error);
     bool archive_catch_up(RelayClient& client, const HistoryStore::Archive& archive, archive::Head& head, std::vector<ArchivedRecord>& fresh, std::string& error);
     std::map<std::string, std::chrono::steady_clock::time_point> archive_join_retry_;  // when to try joining again

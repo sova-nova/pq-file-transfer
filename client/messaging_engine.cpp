@@ -23,6 +23,7 @@ constexpr size_t INTRODUCED_PER_ENVELOPE = 6;
 constexpr int OUTBOX_KIND_MESSAGE = 0;
 constexpr int OUTBOX_KIND_RECEIPT = 1;
 constexpr int OUTBOX_KIND_GRANTS = 2;  // a job to make send tokens for group members, then Forward records to the creator
+constexpr int OUTBOX_KIND_ARCHIVE = 4;  // a record to add to a chat's archive (the item's contact_fp holds the chat's ID in hex)
 constexpr int OUTBOX_KIND_RELAY = 3;   // an already-sealed envelope to deposit as it is (the creator passing one on)
 constexpr size_t FORWARDS_PER_ENVELOPE = 4;  // each carries a sealed envelope of about 5 KB
 
@@ -52,6 +53,9 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(history_key); });
     if (history_key.empty()) throw std::runtime_error("Your keys could not be loaded");
     history_ = std::make_unique<HistoryStore>(history_path, history_key);
+    // The first look for chats that need an archive comes one interval after start, not at once: starting up
+    // has enough to do already.
+    next_archive_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
 
     my_fp_hex_ = keys_.own_fingerprint();
     auto fp = hex_to_bytes(my_fp_hex_);
@@ -469,6 +473,7 @@ bool MessagingEngine::send_text(const std::string& contact_fp, const std::string
     m.record = raw;
     history_->add_message(m);
     history_->enqueue(contact_fp, OUTBOX_KIND_MESSAGE, r.message_id, {raw}, now, now);
+    queue_archive_entry(conv.id, raw, r.message_id);
     bump();
     return true;
 }
@@ -567,6 +572,7 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             // They pointed at an earlier message of theirs that we never saw: something went missing.
             m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
             if (!history_->add_message(m)) return false;  // a duplicate or replay
+            if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));  // the archive may have what went missing
             auto conv = history_->conversation_for(contact.fingerprint);
             if (conv && conv->send_delivery_receipts) enqueue_receipt(contact.fingerprint, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
             return true;
@@ -581,6 +587,7 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
         }
         case chat::RecordType::ArchiveGrant:
             return receive_archive_grant(peer_from_contact(contact), sr);
+        case chat::RecordType::Checkpoint:  // these live only in an archive, never in an envelope
         case chat::RecordType::Conversation:
         case chat::RecordType::Forward:
             return false;  // these belong to a group, not to a one-to-one conversation
@@ -988,6 +995,7 @@ bool MessagingEngine::send_group_text(const std::string& group_id, const std::st
     history_->add_message(m);
     // One envelope per member, each queued, retried and tracked on its own.
     for (const auto& fp : conv->members) history_->enqueue(fp, OUTBOX_KIND_MESSAGE, r.message_id, {raw}, now, now);
+    queue_archive_entry(conv->id, raw, r.message_id);
     bump();
     return true;
 }
@@ -1063,6 +1071,7 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 // They pointed at an earlier message of theirs that we never saw: something went missing.
                 m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
                 if (!history_->add_message(m)) return false;  // a duplicate or replay
+                if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));
                 if (conv->send_delivery_receipts)
                     enqueue_receipt_in(conv_id, sr.record.recipients_hash, sender.fp, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
                 return true;
@@ -1092,6 +1101,7 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
             }
             case chat::RecordType::ArchiveGrant:
                 return receive_archive_grant(sender, sr);
+            case chat::RecordType::Checkpoint:     // only ever found in an archive
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
         }
@@ -1375,6 +1385,8 @@ MessagingEngine::ArchiveStatus MessagingEngine::archive_status(const std::string
     st.note = a->note;
     st.is_creator = a->role == HistoryStore::ArchiveCreator;
     st.entries = a->head_number;
+    st.checkpoint_seen = a->checkpoint_seen;
+    st.warning = a->warning;
     st.relay = a->relay_address;
     return st;
 }
@@ -1520,20 +1532,29 @@ bool MessagingEngine::archive_catch_up(RelayClient& client, const HistoryStore::
         auto next = archive::verify_chain(a.conversation_id, head, entries);
         if (!next) {
             error = "The relay's copy of this chat doesn't match what it held before: it may have been altered";
+            warn_archive(a.conversation_id, error);
             return false;
         }
+        std::vector<std::pair<uint64_t, Bytes>> hashes;
+        uint64_t activity = 0;
         for (const auto& e : entries) {
             ArchivedRecord r;
             r.number = e.number;
             if (auto record = archive::open_entry(a.archive_key, a.conversation_id, e.number, e.ciphertext)) r.record = std::move(*record);
+            auto parsed = r.record.empty() ? std::nullopt : chat::parse_record(r.record);
+            if (!parsed || parsed->record.type != chat::RecordType::Checkpoint) activity++;  // checkpoints don't count towards the next one
+            hashes.emplace_back(e.number, e.hash);
             fresh.push_back(std::move(r));
         }
         head = *next;
+        history_->save_archive_hashes(a.conversation_id, hashes);
+        if (activity) history_->add_archive_activity(a.conversation_id, activity);
         history_->set_archive_head(a.conversation_id, head.number, head.hash);
         if (entries.empty() || head.number >= relay_head.number) {
             // What the relay says its end is must be the end of the entries it actually gave us.
             if (relay_head.number != head.number || relay_head.hash != head.hash) {
                 error = "The relay reports a different end to this chat than the entries it sent add up to";
+                warn_archive(a.conversation_id, error);
                 return false;
             }
             return true;
@@ -1579,7 +1600,9 @@ bool MessagingEngine::archive_append(const std::string& conversation_id, const s
                     return false;
                 }
                 number = new_head.number;
+                history_->save_archive_hashes(a->conversation_id, {{number, new_head.hash}});
                 history_->set_archive_head(a->conversation_id, new_head.number, new_head.hash);
+                if (auto own = chat::parse_record(record); !own || own->record.type != chat::RecordType::Checkpoint) history_->add_archive_activity(a->conversation_id, 1);
                 return true;
             }
             case RelayClient::AppendOutcome::Stale: break;  // someone got in first: catch up on theirs and go again
@@ -1590,12 +1613,179 @@ bool MessagingEngine::archive_append(const std::string& conversation_id, const s
     return false;
 }
 
+// --- Chat archive: keeping it up to date ---
+
+void MessagingEngine::warn_archive(const Bytes& conversation_id, const std::string& what) {
+    // Say it once: a warning that's already set stays as it is until someone looks into it.
+    auto a = history_->archive(conversation_id);
+    if (!a || !a->warning.empty()) return;
+    history_->set_archive_warning(conversation_id, what);
+    notify("Warning about a chat's archive: " + what);
+    bump();
+}
+
+// A message we have just sent also goes into the chat's archive, but never holds up the message itself.
+void MessagingEngine::queue_archive_entry(const Bytes& conversation_id, const Bytes& record, const Bytes& message_id) {
+    if (!history_->has_archive(conversation_id)) return;  // older history isn't backfilled
+    const int64_t now = unix_now();
+    history_->enqueue(bytes_to_hex(conversation_id), OUTBOX_KIND_ARCHIVE, message_id, {record}, now, now);
+}
+
+void MessagingEngine::flush_archive_item(const HistoryStore::OutboxItem& item, int64_t now) {
+    auto id = hex_to_bytes(item.contact_fp);
+    if (!id || item.records.size() != 1) {
+        history_->outbox_done(item.id);  // malformed: nothing to send
+        return;
+    }
+    auto a = history_->archive(*id);
+    if (!a || a->state == HistoryStore::ArchiveFailed) {
+        history_->outbox_done(item.id);  // the chat has no usable archive: nothing to add to
+        return;
+    }
+    if (a->state != HistoryStore::ArchiveJoined) {
+        history_->outbox_failed(item.id, now + std::max(1, options_.retry_base_seconds));  // still waiting to join
+        return;
+    }
+    uint64_t number = 0;
+    std::vector<ArchivedRecord> others;
+    std::string err;
+    if (!archive_append(item.contact_fp, item.records[0], number, others, err)) {
+        history_->outbox_failed(item.id, now + retry_delay(item.attempts));
+        return;
+    }
+    // What others added while we caught up is theirs to be read, exactly as if it had come by envelope.
+    if (handle_archived_records(*id, others)) bump();
+    history_->outbox_done(item.id);
+}
+
+// Records found in an archive are treated like ones that came in an envelope: the same signature,
+// membership and recipients checks, and nothing already held is added twice.
+bool MessagingEngine::handle_archived_records(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records) {
+    auto conv = history_->conversation(conversation_id);
+    if (!conv) return false;
+    bool changed = false;
+    for (const auto& ar : records) {
+        if (ar.record.empty()) continue;  // unreadable under the archive key
+        auto sr = chat::parse_record(ar.record);
+        if (!sr || sr->record.conversation_id != conversation_id || sr->record.sender == my_fp_) continue;
+        const std::string sender_hex = bytes_to_hex(sr->record.sender);
+        auto peer = resolve_peer(sender_hex, conversation_id);
+        if (!peer || !chat::verify_record(*sr, peer->pub_dsa)) continue;
+        if (sr->record.type == chat::RecordType::Checkpoint) {
+            changed |= process_checkpoint(conversation_id, *sr, sender_hex);
+        } else if (sr->record.type == chat::RecordType::Text) {
+            if (conv->kind == HistoryStore::Direct) {
+                if (auto contact = keys_.find_contact_by_fingerprint(sender_hex)) changed |= handle_record(*contact, *sr, true);
+            } else {
+                changed |= handle_group_record(*peer, *sr, true);
+            }
+        }
+    }
+    return changed;
+}
+
+// A member's signed "I have seen the archive up to entry n, whose hash is h". If our own checked chain has a
+// different hash at n, the relay has shown that member something other than it showed us.
+bool MessagingEngine::process_checkpoint(const Bytes& conversation_id, const chat::SignedRecord& sr, const std::string& sender_fp) {
+    auto ctx = archive_context(conversation_id);
+    if (!ctx || std::find(ctx->others.begin(), ctx->others.end(), sender_fp) == ctx->others.end()) return false;
+    if (sr.record.recipients_hash != ctx->recipients_hash) return false;
+    auto info = chat::parse_checkpoint_payload(sr.record.payload);
+    if (!info) return false;
+    history_->note_checkpoint_seen(conversation_id, info->number);
+    auto ours = history_->archive_hash(conversation_id, info->number);
+    if (ours && *ours != info->hash) {
+        warn_archive(conversation_id, "A member's checkpoint contradicts the relay's copy of this chat at entry " + std::to_string(info->number) +
+                                          ": the relay may be showing different members different histories");
+        return true;
+    }
+    return false;
+}
+
+// Adds a checkpoint once enough has happened since the last one: a number of entries, or some activity and a day.
+void MessagingEngine::maybe_post_checkpoint(const Bytes& conversation_id) {
+    auto a = history_->archive(conversation_id);
+    if (!a || a->state != HistoryStore::ArchiveJoined || a->head_number == 0 || a->activity == 0) return;
+    const int64_t now = unix_now();
+    const bool enough = a->activity >= static_cast<uint64_t>(std::max(1, options_.archive_checkpoint_every));
+    const bool stale = now - std::max(a->checkpoint_at, a->created_at) >= options_.archive_checkpoint_max_age_seconds;
+    if (!enough && !stale) return;
+    auto ctx = archive_context(conversation_id);
+    if (!ctx) return;
+    chat::Record r;
+    r.conversation_id = conversation_id;
+    r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    r.sender = my_fp_;
+    r.recipients_hash = ctx->recipients_hash;
+    r.sent_at = static_cast<uint64_t>(now);
+    r.type = chat::RecordType::Checkpoint;
+    try {
+        r.payload = chat::checkpoint_payload(a->head_number, a->head_hash);
+        history_->enqueue(bytes_to_hex(conversation_id), OUTBOX_KIND_ARCHIVE, r.message_id, {chat::sign_record(r, dsa_private_)}, now, now);
+    } catch (const std::exception&) {
+        return;
+    }
+    history_->note_checkpoint_posted(conversation_id, now);
+}
+
+// Makes the archive for every chat where that is our job and none exists yet.
+void MessagingEngine::ensure_archives() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_archive_check_) return;
+    next_archive_check_ = now + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
+    for (const auto& conv : history_->conversations()) {
+        if (history_->has_archive(conv.id)) continue;
+        if (conv.kind == HistoryStore::Direct) {
+            // The smaller fingerprint makes a one-to-one chat's archive, once the chat has something in it.
+            if (!(my_fp_hex_ < conv.contact_fp) || !history_->first_message(conv.id)) continue;
+        } else if (conv.creator_fp != my_fp_hex_) {
+            continue;
+        }
+        const std::string hex = bytes_to_hex(conv.id);
+        auto due = archive_create_retry_.find(hex);
+        if (due != archive_create_retry_.end() && now < due->second) continue;
+        std::string err;
+        if (create_archive(hex, err)) {
+            archive_create_retry_.erase(hex);
+            // A group's creation record is the archive's first entry: it says who is in the group.
+            if (conv.kind == HistoryStore::Group)
+                if (auto first = history_->first_message(conv.id))
+                    if (auto parsed = chat::parse_record(first->record); parsed && parsed->record.type == chat::RecordType::Conversation)
+                        queue_archive_entry(conv.id, first->record, first->message_id);
+        } else {
+            archive_create_retry_[hex] = now + std::chrono::seconds(std::max(1, options_.retry_base_seconds) * 6);
+        }
+    }
+}
+
+// Catches up on each joined archive now and then, and straight away when a message showed a gap.
+void MessagingEngine::sync_archives() {
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& id : history_->archive_ids(HistoryStore::ArchiveJoined)) {
+        const std::string hex = bytes_to_hex(id);
+        const bool asked = archive_sync_now_.erase(hex) > 0;
+        auto due = archive_next_sync_.find(hex);
+        if (!asked && due != archive_next_sync_.end() && now < due->second) continue;
+        archive_next_sync_[hex] = now + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+        std::vector<ArchivedRecord> fresh;
+        std::string err;
+        if (!archive_sync(hex, fresh, err)) continue;  // not reachable, or inconsistent (already warned about)
+        if (handle_archived_records(id, fresh)) bump();
+        maybe_post_checkpoint(id);
+    }
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
     const int64_t now = unix_now();
     for (auto& item : history_->due_items(now, 20)) {
         try {
+        // An entry for a chat's archive: added when the archive can be reached, whatever happens to the envelopes.
+        if (item.kind == OUTBOX_KIND_ARCHIVE) {
+            flush_archive_item(item, now);
+            continue;
+        }
         // What is this item about? Tokens a member gave us for one group only work for that group's items.
         Bytes item_conv;
         for (const auto& raw : item.records)
@@ -1792,5 +1982,7 @@ void MessagingEngine::pump(int wait_ms) {
     if (owner_.connected()) {
         flush_outbox();
         join_pending_archives();
+        ensure_archives();
+        sync_archives();
     }
 }

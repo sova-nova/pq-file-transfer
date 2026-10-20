@@ -174,6 +174,10 @@ public:
         Bytes head_hash;           // empty before any entry
         int64_t created_at = 0;
         std::string note;          // why joining failed
+        int64_t checkpoint_at = 0;      // when this device last added a checkpoint
+        uint64_t activity = 0;          // entries (other than checkpoints) since then
+        uint64_t checkpoint_seen = 0;   // the highest entry any member's checkpoint says they had seen
+        std::string warning;            // the relay's copy contradicts something we hold; empty if all is well
     };
     // False if the conversation already has an archive.
     bool add_archive(const Archive& archive);
@@ -184,6 +188,17 @@ public:
     void set_archive_failed(const Bytes& conversation_id, const std::string& note);
     // Moves the checked head forward; never backwards.
     void set_archive_head(const Bytes& conversation_id, uint64_t number, const Bytes& hash);
+    bool has_archive(const Bytes& conversation_id);  // cheap: doesn't open the secrets
+    std::vector<Bytes> archive_ids(int state);       // likewise: just which chats, not their keys
+    void add_archive_activity(const Bytes& conversation_id, uint64_t entries);
+    void note_checkpoint_posted(const Bytes& conversation_id, int64_t now);  // resets the activity count
+    void note_checkpoint_seen(const Bytes& conversation_id, uint64_t number);  // forward only
+    void set_archive_warning(const Bytes& conversation_id, const std::string& warning);  // empty clears it
+    // The chain hash of every entry this device has checked, so a checkpoint can be compared with it.
+    void save_archive_hashes(const Bytes& conversation_id, const std::vector<std::pair<uint64_t, Bytes>>& hashes);
+    std::optional<Bytes> archive_hash(const Bytes& conversation_id, uint64_t number);
+    // The first message stored for a conversation (a group's creation record, for its creator), if any.
+    std::optional<Message> first_message(const Bytes& conversation_id);
 
     // --- People the user has verified ---
     // "I compared this person's fingerprint with them." It is about the person, not about how we

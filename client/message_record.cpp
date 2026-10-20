@@ -47,6 +47,7 @@ bool well_formed(const Record& r) {
         // Control records, outside the transcript like receipts.
         case RecordType::Forward: return r.payload.size() <= 4 + HASH_BYTES + 4 + MAX_FORWARD_ENVELOPE_BYTES && r.own_prev.empty() && r.seen.empty();
         case RecordType::ArchiveGrant: return r.payload.size() <= MAX_ARCHIVE_GRANT_PAYLOAD && r.own_prev.empty() && r.seen.empty();
+        case RecordType::Checkpoint: return r.payload.size() <= 8 + 4 + HASH_BYTES && r.own_prev.empty() && r.seen.empty();
     }
     return false;
 }
@@ -181,7 +182,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
         }
     }
     if (b != bd.size()) return std::nullopt;
-    const uint32_t newest_type = *version == 1 ? 3 : 6;  // Conversation, Forward and ArchiveGrant records came with version 2
+    const uint32_t newest_type = *version == 1 ? 3 : 7;  // Conversation, Forward, ArchiveGrant and Checkpoint records came with version 2
     if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
@@ -315,6 +316,22 @@ std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload
         info.join_token.size() != 32)
         return std::nullopt;
     return info;
+}
+
+Bytes checkpoint_payload(uint64_t number, const Bytes& hash) {
+    if (number == 0 || hash.size() != HASH_BYTES) throw std::runtime_error("The checkpoint is not valid");
+    Bytes p;
+    write_u64(p, number);
+    write_blob(p, hash);
+    return p;
+}
+
+std::optional<CheckpointInfo> parse_checkpoint_payload(const Bytes& payload) {
+    size_t off = 0;
+    auto number = read_u64(payload.data(), payload.size(), off);
+    auto hash = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    if (!number || !hash || *number == 0 || hash->size() != HASH_BYTES || off != payload.size()) return std::nullopt;
+    return CheckpointInfo{*number, std::move(*hash)};
 }
 
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids) {
