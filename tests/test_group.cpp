@@ -465,35 +465,36 @@ int main(int argc, char** argv) {
         if (invite) for (auto& mem : invite->members) if (mem.fp == dave.fp && mem.name == "dave" && !mem.is_contact && !mem.can_send) dave_known = true;
         CHECK(dave_known, "Bob's invitation names Dave from the bundle Alice passed on, as someone Bob can't write to yet");
         CHECK(bob.engine->accept_group_invite(mixed, err) && dave.engine->accept_group_invite(mixed, err), "both accept");
+        CHECK(find_group(alice, mixed) && find_group(alice, mixed)->ready, "for Alice it is ready from the start (they are both her contacts)");
+
+        // Bob and Dave have never met. Each sent the other a send token, sealed so Alice (who passed
+        // it on) can't read it. Until those arrive the group is "setting up".
+        bool both_ready = wait_for([&] {
+            auto bv = find_group(bob, mixed), dv = find_group(dave, mixed);
+            return bv && bv->ready && dv && dv->ready;
+        }, 30000);
+        CHECK(both_ready, "Bob and Dave each end up able to write to the other: the group is ready for both");
         auto bob_view = find_group(bob, mixed);
-        auto dave_view = find_group(dave, mixed);
-        CHECK(find_group(alice, mixed) && find_group(alice, mixed)->ready, "for Alice it is ready (they are both her contacts)");
-        CHECK(bob_view && !bob_view->ready && dave_view && !dave_view->ready, "for Bob and Dave it is not ready: they can't write to each other yet");
+        bool dave_is_stranger = false;
+        if (bob_view) for (auto& mem : bob_view->members) if (mem.fp == dave.fp && !mem.is_contact && mem.can_send) dave_is_stranger = true;
+        CHECK(dave_is_stranger, "...even though Dave is still not Bob's contact");
+        CHECK(bob.engine->requests().empty() && dave.engine->requests().empty(), "(and nobody became a message request)");
 
         bob.engine->send_group_text(mixed, "Bob to the mixed group", err);
+        dave.engine->send_group_text(mixed, "Dave to the mixed group", err);
         alice.engine->send_group_text(mixed, "Alice to the mixed group", err);
-        CHECK(wait_for([&] { return got(alice, mixed, "Bob to the mixed group") && got(bob, mixed, "Alice to the mixed group") && got(dave, mixed, "Alice to the mixed group"); }), "messages still flow through the members who can reach each other");
-        run_for(800);
-        CHECK(!got(dave, mixed, "Bob to the mixed group"), "Bob's message does not reach Dave, whom he can't write to yet");
-        CHECK(member_status(bob, mixed, "Bob to the mixed group", alice.fp) >= 1 && member_status(bob, mixed, "Bob to the mixed group", dave.fp) == 0 && overall(bob, mixed, "Bob to the mixed group") == 0,
-              "it waits in Bob's queue for Dave, and as a whole stays Queued");
-        CHECK(bob.engine->group_delivery(mixed, outgoing_message(bob, mixed, "Bob to the mixed group")->message_id).size() == 2, "(per-member delivery lists both others)");
-
-        // A member who isn't a contact writing to the group, through a token Bob made for him: what a
-        // later step will arrange automatically.
-        std::string card, err2;
-        CHECK(bob.engine->make_card("for Dave", card, err2), "(setup) Bob makes a token Dave can use");
-        auto card_info = decode_any_contact_card(card);
-        Bytes token = card_info ? card_info->send_token : Bytes();
-        chat::Inner inner;
-        inner.sender_bundle = bundle_of(dave);
-        inner.records = {group_text(dave, *hex_to_bytes(mixed), {a, b, d}, "Dave, through a token")};
-        CHECK(!token.empty() && send_envelope(bob, token, inner), "Dave deposits a group message in Bob's mailbox");
-        CHECK(wait_for([&] { return got(bob, mixed, "Dave, through a token"); }), "Bob accepts it: Dave is a member, and his introduced bundle verifies the signature");
+        CHECK(wait_for([&] {
+            return got(alice, mixed, "Bob to the mixed group") && got(alice, mixed, "Dave to the mixed group") && got(dave, mixed, "Bob to the mixed group") &&
+                   got(bob, mixed, "Dave to the mixed group") && got(bob, mixed, "Alice to the mixed group") && got(dave, mixed, "Alice to the mixed group");
+        }, 30000), "everyone's messages reach everyone, including between Bob and Dave");
         bool right_name = false;
-        for (auto& msg : bob.engine->group_messages(mixed)) if (msg.text == "Dave, through a token" && msg.sender_name == "dave" && msg.sender_fp == dave.fp) right_name = true;
-        CHECK(right_name, "shown as coming from Dave");
-        CHECK(bob.engine->requests().empty(), "...and he did not become a message request");
+        for (auto& msg : bob.engine->group_messages(mixed)) if (msg.text == "Dave to the mixed group" && msg.sender_name == "dave" && msg.sender_fp == dave.fp) right_name = true;
+        CHECK(right_name, "Bob sees Dave's message as Dave's");
+        CHECK(wait_for([&] { return overall(bob, mixed, "Bob to the mixed group") == 2 && overall(dave, mixed, "Dave to the mixed group") == 2; }, 30000),
+              "delivery receipts work between them too: both messages become Delivered");
+        bob.engine->mark_group_read(mixed);
+        CHECK(wait_for([&] { return member_status(dave, mixed, "Dave to the mixed group", bob.fp) == 3; }, 30000), "and Bob's read receipt reaches Dave directly");
+        CHECK(any_notice(bob, "passed on") == false, "no token was reported as passed on (the creator's forwarding doesn't look like misuse)");
     }
 
     std::cout << "8. Hostile input\n";
@@ -657,8 +658,11 @@ int main(int argc, char** argv) {
         CHECK(wait_for([&] { return overall(alice, big, "hello all nine") == 2; }, 30000), "and becomes Delivered once every one of them has stored it");
         auto ds = alice.engine->group_delivery(big, outgoing_message(alice, big, "hello all nine")->message_id);
         CHECK(ds.size() == 8, "per-member delivery covers all eight");
-        auto g = find_group(*crowd[0], big);
-        CHECK(g && !g->ready, "for one of the strangers the group is not ready (the other six can't be written to yet)");
+        CHECK(wait_for([&] { for (User* u : crowd) { auto g = find_group(*u, big); if (!g || !g->ready) return false; } return true; }, 120000),
+              "every one of the eight ends up able to write to all the others (56 tokens, each passed on through Alice)");
+        crowd[0]->engine->send_group_text(big, "from e1 to everyone", err);
+        CHECK(wait_for([&] { for (size_t i = 1; i < crowd.size(); i++) if (!got(*crowd[i], big, "from e1 to everyone")) return false; return got(alice, big, "from e1 to everyone"); }, 60000),
+              "a message from one stranger reaches the other seven and Alice");
     }
 
     std::cout << "12. Groups don't disturb one-to-one chats\n";

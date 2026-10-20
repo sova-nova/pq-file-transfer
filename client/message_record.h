@@ -32,12 +32,14 @@ constexpr size_t MAX_SEEN = 15;                      // the other members of a 1
 constexpr size_t MAX_GROUP_MEMBERS = 16;             // including the creator
 constexpr size_t MAX_TITLE_BYTES = 64;
 constexpr size_t MAX_CONVERSATION_PAYLOAD = 1024;    // 16 members and a full title take about 700
+constexpr size_t MAX_FORWARD_ENVELOPE_BYTES = 8 * 1024;  // an envelope holding one token grant is about 5 KB
 
 enum class RecordType : uint32_t {
     Text = 1,          // payload: the message, UTF-8
     Receipt = 2,       // payload: see receipt_payload()
     TokenGrant = 3,    // payload: a 32-byte send token for the recipient to use when writing back
     Conversation = 4,  // payload: see conversation_payload(); creates a group (version 2 only)
+    Forward = 5,       // payload: see forward_payload(); asks a group's creator to pass a sealed envelope to another member (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -110,6 +112,27 @@ std::optional<ConversationInfo> parse_conversation_payload(const Bytes& payload)
 // members, and its recipients hash matches the member list. Check the signature separately
 // with verify_record. std::nullopt otherwise.
 std::optional<ConversationInfo> conversation_from_record(const SignedRecord& signed_record);
+
+// --- Forwarding through a group's creator ---
+//
+// Members of a group who aren't each other's contacts have no way to write to each other, so a
+// member makes a send token for each of the others and seals it to its new owner, inside an
+// envelope the creator can't open. The creator is the one person everyone can write to, so the
+// member sends that envelope to the creator in a Forward record, and the creator deposits it,
+// unread, in the target's mailbox.
+//
+//   payload = blob target_fingerprint (32 bytes) | blob sealed_envelope
+//
+// Like receipts, a Forward record is not part of the conversation's transcript: it has no
+// previous entry and has seen nothing.
+struct ForwardInfo {
+    Bytes target;    // HASH_BYTES: the member the envelope is for
+    Bytes envelope;  // sealed to that member; the creator deposits it as it is
+};
+// Throws std::runtime_error if the target isn't HASH_BYTES or the envelope is empty or too large.
+Bytes forward_payload(const Bytes& target, const Bytes& sealed_envelope);
+// std::nullopt for anything malformed, including trailing bytes.
+std::optional<ForwardInfo> parse_forward_payload(const Bytes& payload);
 
 // A receipt tells the sender that these messages were delivered or read.
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids);

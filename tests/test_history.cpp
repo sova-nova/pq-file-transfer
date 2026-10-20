@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 3, "opening it upgrades it to the current version (3)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 4, "opening it upgrades it to the current version (4)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 3, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 4, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 3 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 4 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 3, "opening it upgrades it to version 3");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 4, "opening it upgrades it to the current version (4)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -585,6 +585,25 @@ int main() {
         auto of = [&](uint8_t n) { return h.conversation_of_outgoing(id(n)); };
         CHECK(of(1) && *of(1) == conv_a && of(2) && *of(2) == id(0x61), "an outgoing message is found in its direct or group conversation");
         CHECK(!of(3) && !of(99), "a message we received, or one that doesn't exist, is not");
+    }
+
+    std::cout << "Send tokens other group members gave us\n";
+    {
+        HistoryStore h(dir / "tokens.db", key);
+        const std::string fp_c = fp_of('c');
+        Bytes g1 = id(0x61), g2 = id(0x62);
+        const std::string secret = "TOKEN-SECRET-MARKER-0123456789AB";  // 32 bytes
+        CHECK(!h.member_token(g1, fp_b), "there is none to begin with");
+        h.save_member_token(g1, fp_b, text(secret), 100);
+        auto t = h.member_token(g1, fp_b);
+        CHECK(t && *t == text(secret), "a token is stored and read back");
+        CHECK(!h.member_token(g2, fp_b) && !h.member_token(g1, fp_c), "it is good for that group and that member only");
+        h.save_member_token(g1, fp_b, id(0x55, 32), 200);
+        CHECK(h.member_token(g1, fp_b) && *h.member_token(g1, fp_b) == id(0x55, 32), "saving again for the same group and member replaces it");
+        h.save_member_token(g1, fp_c, text(secret), 300);
+        CHECK(!file_contains(dir / "tokens.db", secret) && !file_contains(fs::path((dir / "tokens.db").string() + "-wal"), secret), "a token is a secret: it is not readable on disk");
+        HistoryStore other(dir / "tokens.db", CryptoEngine::random_bytes(32));
+        CHECK(!other.member_token(g1, fp_c), "with a different key it can't be read (and nothing crashes)");
     }
 
     std::cout << "Groups and delivery survive a restart\n";

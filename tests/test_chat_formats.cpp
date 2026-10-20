@@ -508,6 +508,33 @@ int main() {
         CHECK(throws([&] { seal_envelope(huge_bundle, bob.kem.public_key); }), "a single introduced bundle over the size limit is refused");
     }
 
+    std::cout << "Forwarding through the creator\n";
+    {
+        Bytes target = CryptoEngine::random_bytes(HASH_BYTES), env = CryptoEngine::random_bytes(5000);
+        Bytes payload = forward_payload(target, env);
+        auto info = parse_forward_payload(payload);
+        CHECK(info && info->target == target && info->envelope == env, "a forward names its target and carries the sealed envelope, round-tripping exactly");
+        CHECK(throws([&] { forward_payload(Bytes(31, 1), env); }) && throws([&] { forward_payload(target, Bytes()); }) &&
+                  throws([&] { forward_payload(target, Bytes(MAX_FORWARD_ENVELOPE_BYTES + 1, 1)); }) && !throws([&] { forward_payload(target, Bytes(MAX_FORWARD_ENVELOPE_BYTES, 1)); }),
+              "a target of the wrong size, and an empty or oversized envelope, are refused");
+        Bytes trailing = payload; trailing.push_back(0);
+        bool prefixes = true;
+        for (size_t n = 0; n < payload.size(); n++)
+            if (parse_forward_payload(Bytes(payload.begin(), payload.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        CHECK(!parse_forward_payload(trailing) && prefixes && !parse_forward_payload(Bytes()), "trailing bytes, every truncation and an empty payload are rejected");
+        Bytes lying; write_u32(lying, 0xFFFFFFFF);
+        CHECK(!parse_forward_payload(lying) && !parse_forward_payload(hand_payload(1, "", 1, 0, Bytes(), {}, 0)), "a huge declared length doesn't allocate, and other payloads aren't mistaken for a forward");
+
+        Bytes recipients = recipients_hash_for({alice.fingerprint, bob.fingerprint});
+        auto as_record = [&](uint32_t version, const Bytes& own_prev, uint32_t seen_count) {
+            return parse_record(hand_record(alice, version, 5, alice.fingerprint, recipients, payload, own_prev,
+                                            [&](Bytes& b) { if (version == 1) write_blob(b, Bytes()); else { write_u32(b, seen_count); for (uint32_t i = 0; i < seen_count; i++) write_blob(b, CryptoEngine::random_bytes(HASH_BYTES)); } }));
+        };
+        CHECK(as_record(2, Bytes(), 0).has_value(), "(control) a forward record parses as version 2");
+        CHECK(!as_record(1, Bytes(), 0), "...but not as version 1");
+        CHECK(!as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 0) && !as_record(2, Bytes(), 1), "it is outside the transcript: it can't claim a previous entry or anything seen");
+    }
+
     std::cout << "The inside of an envelope: versions and hostile input\n";
     {
         Inner x;

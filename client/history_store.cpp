@@ -48,7 +48,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 3;
+constexpr int64_t SCHEMA_VERSION = 4;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -104,7 +104,11 @@ const char SCHEMA_REST[] =
     "  conv_id BLOB PRIMARY KEY, creator_fp TEXT NOT NULL, received_at INTEGER NOT NULL, sealed BLOB NOT NULL);"
     "CREATE TABLE IF NOT EXISTS introduced_members("
     "  fp TEXT PRIMARY KEY, bundle BLOB NOT NULL, issued_at INTEGER NOT NULL,"
-    "  introduced_by TEXT NOT NULL, first_seen INTEGER NOT NULL);";
+    "  introduced_by TEXT NOT NULL, first_seen INTEGER NOT NULL);"
+    // Added in version 4:
+    "CREATE TABLE IF NOT EXISTS member_tokens("
+    "  conv_id BLOB NOT NULL, fp TEXT NOT NULL, sealed BLOB NOT NULL, received_at INTEGER NOT NULL,"
+    "  PRIMARY KEY(conv_id, fp));";
 
 const char CONVERSATION_COLUMNS[] =
     "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
@@ -148,17 +152,18 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
                                  "). Update the app; it can't be opened by this one.");
     if (has_conversations && version < 2) {
         migrate_v1_to_v2(db_path);  // rewrites a table, so it keeps a copy of the old file first
-    } else if (has_conversations && version == 2) {
-        // Version 3 only adds tables (group invitations and introduced members): nothing to rewrite.
+    } else if (has_conversations && version < SCHEMA_VERSION) {
+        // Versions 3 and 4 only add tables (group invitations, introduced members, member tokens):
+        // nothing to rewrite, so nothing to back up.
         Transaction tx(db_);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=3");
+        exec(db_, "PRAGMA user_version=4");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=3");
+        exec(db_, "PRAGMA user_version=4");
         tx.commit();
     }
     } catch (...) {
@@ -199,7 +204,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=3");  // SCHEMA_REST already holds the version 3 tables
+            exec(db_, "PRAGMA user_version=4");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -642,6 +647,26 @@ void HistoryStore::delete_introduced_except(const std::set<std::string>& keep) {
         }
     }
     for (const auto& fp : doomed) Stmt(db_, "DELETE FROM introduced_members WHERE fp = ?").text(1, fp).step();
+}
+
+// --- Member tokens ---
+
+static Bytes member_token_aad(const Bytes& conversation_id, const std::string& member_fp) {
+    return aad_of("pq-suite v3 history member token", conversation_id, Bytes(member_fp.begin(), member_fp.end()));
+}
+
+void HistoryStore::save_member_token(const Bytes& conversation_id, const std::string& member_fp, const Bytes& token, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR REPLACE INTO member_tokens(conv_id, fp, sealed, received_at) VALUES(?, ?, ?, ?)")
+        .blob(1, conversation_id).text(2, member_fp).blob(3, seal(token, member_token_aad(conversation_id, member_fp))).i64(4, now).step();
+}
+
+std::optional<HistoryStore::Bytes> HistoryStore::member_token(const Bytes& conversation_id, const std::string& member_fp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT sealed FROM member_tokens WHERE conv_id = ? AND fp = ?");
+    s.blob(1, conversation_id).text(2, member_fp);
+    if (!s.step()) return std::nullopt;
+    return unseal(s.column_blob(0), member_token_aad(conversation_id, member_fp));
 }
 
 // --- Outbox ---

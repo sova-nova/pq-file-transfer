@@ -155,6 +155,13 @@ public:
     // Forgets everyone not in `keep` (those no longer in any group or pending invitation).
     void delete_introduced_except(const std::set<std::string>& keep);
 
+    // --- Send tokens other group members gave us ---
+    // A token lets us write to one member's mailbox, and is good for one group only. It is a bearer
+    // secret, so it is stored encrypted like the messages. Saving again for the same group and
+    // member replaces it.
+    void save_member_token(const Bytes& conversation_id, const std::string& member_fp, const Bytes& token, int64_t now);
+    std::optional<Bytes> member_token(const Bytes& conversation_id, const std::string& member_fp);
+
     // --- Outgoing queue: records waiting to be sealed and deposited ---
     struct OutboxItem {
         int64_t id = 0;

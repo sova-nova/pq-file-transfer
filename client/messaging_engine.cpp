@@ -22,6 +22,9 @@ constexpr size_t MAX_PENDING_GROUP_INVITES = 50;
 constexpr size_t INTRODUCED_PER_ENVELOPE = 6;
 constexpr int OUTBOX_KIND_MESSAGE = 0;
 constexpr int OUTBOX_KIND_RECEIPT = 1;
+constexpr int OUTBOX_KIND_GRANTS = 2;  // a job to make send tokens for group members, then Forward records to the creator
+constexpr int OUTBOX_KIND_RELAY = 3;   // an already-sealed envelope to deposit as it is (the creator passing one on)
+constexpr size_t FORWARDS_PER_ENVELOPE = 4;  // each carries a sealed envelope of about 5 KB
 
 bool all_zero(const std::vector<uint8_t>& b) {
     return std::all_of(b.begin(), b.end(), [](uint8_t x) { return x == 0; });
@@ -139,14 +142,17 @@ MessagingEngine::Peer MessagingEngine::peer_from_contact(const KeyStore::Contact
     p.mailbox_id = c.mailbox_id;
     p.send_token = c.send_token;
     p.is_contact = true;
+    p.keys_verified = c.kem_verified;
     p.can_send = c.can_message();
     return p;
 }
 
 // A contact, or failing that someone a group creator introduced (their bundle is self-signed, so
 // their keys can be checked, but nobody has given us a send token for them yet).
-std::optional<MessagingEngine::Peer> MessagingEngine::resolve_peer(const std::string& fp) {
-    if (auto contact = keys_.find_contact_by_fingerprint(fp)) return peer_from_contact(*contact);
+std::optional<MessagingEngine::Peer> MessagingEngine::resolve_peer(const std::string& fp, const Bytes& conversation_id) {
+    std::optional<Peer> found;
+    if (auto contact = keys_.find_contact_by_fingerprint(fp)) found = peer_from_contact(*contact);
+    else found = [&]() -> std::optional<Peer> {
     auto row = history_->introduced(fp);
     if (!row) return std::nullopt;
     auto bundle = parse_identity_bundle(row->bundle);
@@ -162,14 +168,27 @@ std::optional<MessagingEngine::Peer> MessagingEngine::resolve_peer(const std::st
         p.mailbox_id = bundle->mailbox_id;
     }
     p.is_contact = false;
-    p.can_send = false;  // no send token yet (a later step gives group members one)
+    p.keys_verified = true;  // a bundle is self-signed
+    p.can_send = false;      // until a member gives us a token (below)
     return p;
+    }();
+    if (!found) return std::nullopt;
+
+    // A token a member gave us for this group lets us write to them even if we have no other way to.
+    if (!found->can_send && !conversation_id.empty() && found->keys_verified && !found->relay_address.empty() &&
+        found->relay_id.size() == 32 && found->mailbox_id.size() == 16) {
+        if (auto token = history_->member_token(conversation_id, fp); token && token->size() == relay::SEND_TOKEN_BYTES) {
+            found->send_token = *token;
+            found->can_send = true;
+        }
+    }
+    return found;
 }
 
-MessagingEngine::GroupMember MessagingEngine::member_info(const std::string& fp) {
+MessagingEngine::GroupMember MessagingEngine::member_info(const std::string& fp, const Bytes& conversation_id) {
     GroupMember m;
     m.fp = fp;
-    if (auto peer = resolve_peer(fp)) {
+    if (auto peer = resolve_peer(fp, conversation_id)) {
         m.name = peer->name;
         m.is_contact = peer->is_contact;
         m.can_send = peer->can_send;
@@ -394,7 +413,7 @@ void MessagingEngine::enqueue_receipt(const std::string& contact_fp, chat::Recei
 // A receipt goes only to the author of the messages it covers, whatever conversation they are in.
 void MessagingEngine::enqueue_receipt_in(const Bytes& conversation_id, const Bytes& recipients_hash, const std::string& to_fp,
                                          chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed) {
-    auto peer = resolve_peer(to_fp);
+    auto peer = resolve_peer(to_fp, conversation_id);
     if (!peer || !peer->can_send || ids.empty()) return;
 
     // At most 256 messages per receipt record.
@@ -492,7 +511,8 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             return changed;
         }
         case chat::RecordType::Conversation:
-            return false;  // groups are handled in a later step
+        case chat::RecordType::Forward:
+            return false;  // these belong to a group, not to a one-to-one conversation
         case chat::RecordType::TokenGrant: {
             if (sr.record.payload.size() != 32) return false;
             try {
@@ -504,6 +524,14 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
         }
     }
     return false;
+}
+
+// A token grant sealed by one member for another is deposited by the group's creator, so the send
+// token it arrives with is the creator's, and says nothing about who wrote it.
+static bool only_group_grants(const std::vector<chat::SignedRecord>& records) {
+    for (const auto& sr : records)
+        if (sr.record.type != chat::RecordType::TokenGrant) return false;
+    return !records.empty();
 }
 
 bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
@@ -539,7 +567,7 @@ bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
             if (sr.record.type == chat::RecordType::Conversation) changed |= receive_group_invite(*contact, sr, inner->introduced);
             else changed |= handle_record(*contact, sr, true);
         }
-        note_token_use(envelope.token_hash, sender_hex);
+        if (!only_group_grants(records)) note_token_use(envelope.token_hash, sender_hex);
         if (changed) bump();
         return true;
     }
@@ -565,7 +593,7 @@ bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
                     changed |= handle_group_record(*member, sr, true);
                 }
             }
-            note_token_use(envelope.token_hash, sender_hex);
+            if (!only_group_grants(records)) note_token_use(envelope.token_hash, sender_hex);
             if (changed) bump();
             return true;
         }
@@ -708,7 +736,7 @@ std::vector<MessagingEngine::GroupSummary> MessagingEngine::groups() {
         g.last_activity = conv.last_activity;
         g.ready = true;
         for (const auto& fp : conv.members) {
-            GroupMember m = member_info(fp);
+            GroupMember m = member_info(fp, conv.id);
             g.ready = g.ready && m.can_send;
             g.members.push_back(std::move(m));
         }
@@ -973,7 +1001,21 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 for (const auto& id : info->message_ids) changed |= history_->raise_delivery(conv_id, id, sender.fp, status);
                 return changed;
             }
-            case chat::RecordType::TokenGrant:     // grants use the one-to-one conversation
+            case chat::RecordType::TokenGrant: {
+                // A member's gift: a token for writing to their mailbox, good for this group only.
+                history_->save_member_token(conv_id, sender.fp, sr.record.payload, now);
+                return true;
+            }
+            case chat::RecordType::Forward: {
+                // A member asks us, as the creator, to pass a sealed envelope (we can't open it) on to another member.
+                if (conv->creator_fp != my_fp_hex_) return false;
+                auto info = chat::parse_forward_payload(sr.record.payload);
+                if (!info) return false;
+                const std::string target = bytes_to_hex(info->target);
+                if (target == sender.fp || std::find(conv->members.begin(), conv->members.end(), target) == conv->members.end()) return false;
+                history_->enqueue(target, OUTBOX_KIND_RELAY, sr.record.message_id, {info->envelope}, now, now);
+                return true;
+            }
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
         }
@@ -982,7 +1024,8 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
 
     // A group we have been invited to but haven't answered: keep what its members send until we do.
     if (auto invite = history_->group_invite(conv_id)) {
-        if (sr.record.type != chat::RecordType::Text) return false;
+        // Tokens members send before we answer are kept too, so that writing to them works once we join.
+        if (sr.record.type != chat::RecordType::Text && sr.record.type != chat::RecordType::TokenGrant) return false;
         auto creation = chat::parse_record(invite->records.front());
         auto info = creation ? chat::conversation_from_record(*creation) : std::nullopt;
         if (!info) return false;
@@ -1118,6 +1161,7 @@ bool MessagingEngine::accept_group_invite(const std::string& group_id, std::stri
     }
     history_->delete_group_invite(*id);
     prune_introduced();
+    queue_group_grants(*id, invite->creator_fp, others);
     bump();
     return true;
 }
@@ -1130,19 +1174,138 @@ void MessagingEngine::decline_group_invite(const std::string& group_id) {
     bump();
 }
 
+// --- Giving other members a way to write to us ---
+
+// Everyone but the creator needs a token from us, unless they are a contact who has already used
+// one of ours (so they can write to us anyway). The tokens are made later, on the relay thread.
+void MessagingEngine::queue_group_grants(const Bytes& conversation_id, const std::string& creator_fp, const std::vector<std::string>& others) {
+    auto issued = history_->issued_tokens();
+    Bytes job = conversation_id;
+    std::vector<Bytes> targets;
+    for (const auto& fp : others) {
+        if (fp == creator_fp) continue;
+        auto raw = hex_to_bytes(fp);
+        if (!raw || raw->size() != 32) continue;
+        bool can_already = false;
+        if (keys_.find_contact_by_fingerprint(fp))
+            for (const auto& t : issued) can_already |= t.bound_fp == fp && !t.revoked;
+        if (!can_already) targets.push_back(std::move(*raw));
+    }
+    if (targets.empty()) return;
+    write_u32(job, static_cast<uint32_t>(targets.size()));
+    for (const auto& t : targets) job.insert(job.end(), t.begin(), t.end());
+    const int64_t now = unix_now();
+    history_->enqueue(creator_fp, OUTBOX_KIND_GRANTS, CryptoEngine::random_bytes(chat::ID_BYTES), {job}, now, now);
+}
+
+// For each member in the job: a fresh send token (registered with our relay, bound to that member),
+// sealed for them inside an envelope only they can open, wrapped in a Forward record for the creator.
+bool MessagingEngine::build_grant_forwards(const HistoryStore::OutboxItem& job, std::vector<Bytes>& forwards) {
+    const Bytes& data = job.records.front();
+    if (data.size() < chat::ID_BYTES + 4) return true;  // malformed: nothing to do
+    const Bytes conv_id(data.begin(), data.begin() + chat::ID_BYTES);
+    size_t off = chat::ID_BYTES;
+    auto count = read_u32(data.data(), data.size(), off);
+    if (!count || *count > chat::MAX_GROUP_MEMBERS || data.size() != off + static_cast<size_t>(*count) * 32) return true;
+    auto conv = history_->conversation(conv_id);
+    if (!conv || conv->kind != HistoryStore::Group) return true;  // we left, or never joined: nothing to do
+
+    std::vector<Bytes> everyone = {my_fp_};
+    for (const auto& fp : conv->members)
+        if (auto raw = hex_to_bytes(fp)) everyone.push_back(std::move(*raw));
+    const Bytes recipients = chat::recipients_hash_for(everyone);
+    const int64_t now = unix_now();
+
+    for (uint32_t i = 0; i < *count; i++) {
+        const Bytes target_raw(data.begin() + static_cast<std::ptrdiff_t>(off + i * 32), data.begin() + static_cast<std::ptrdiff_t>(off + (i + 1) * 32));
+        const std::string target_fp = bytes_to_hex(target_raw);
+        auto target = resolve_peer(target_fp);
+        if (!target || !target->keys_verified || target->pub_kem.size() != CryptoEngine::kem_public_key_size()) continue;  // can't seal to them
+
+        Bytes token = CryptoEngine::random_bytes(relay::SEND_TOKEN_BYTES);
+        std::string err;
+        if (!owner_.add_token(CryptoEngine::sha256(token), err)) return false;  // the relay isn't reachable: try again later
+        history_->add_issued_token(CryptoEngine::sha256(token),
+                                   "group " + (conv->title.empty() ? std::string("(no name)") : "\"" + conv->title + "\"") + ", for " + target->name,
+                                   target_fp, now);
+        try {
+            chat::Record grant;
+            grant.conversation_id = conv_id;
+            grant.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+            grant.sender = my_fp_;
+            grant.recipients_hash = recipients;
+            grant.sent_at = static_cast<uint64_t>(now);
+            grant.type = chat::RecordType::TokenGrant;
+            grant.payload = token;
+            chat::Inner inner;
+            inner.records = {chat::sign_record(grant, dsa_private_)};
+            Bytes sealed = chat::seal_envelope(inner, target->pub_kem);  // only the target can open this
+
+            chat::Record forward;
+            forward.conversation_id = conv_id;
+            forward.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+            forward.sender = my_fp_;
+            forward.recipients_hash = recipients;
+            forward.sent_at = static_cast<uint64_t>(now);
+            forward.type = chat::RecordType::Forward;
+            forward.payload = chat::forward_payload(target_raw, sealed);
+            forwards.push_back(chat::sign_record(forward, dsa_private_));
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return true;
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
     const int64_t now = unix_now();
     for (auto& item : history_->due_items(now, 20)) {
         try {
-        auto peer = resolve_peer(item.contact_fp);
+        // What is this item about? Tokens a member gave us for one group only work for that group's items.
+        Bytes item_conv;
+        for (const auto& raw : item.records)
+            if (auto parsed = chat::parse_record(raw)) { item_conv = parsed->record.conversation_id; break; }
+        auto peer = resolve_peer(item.contact_fp, item_conv);
         if (!peer || !peer->can_send) {  // no way to reach them (yet): try again later
             history_->outbox_failed(item.id, now + retry_delay(item.attempts));
             continue;
         }
-        const bool first_message = item.kind == OUTBOX_KIND_MESSAGE && !history_->bundle_sent(item.contact_fp);
+        // An envelope someone sealed for another member, passed on as it is (we are the group's creator).
+        if (item.kind == OUTBOX_KIND_RELAY) {
+            if (item.records.size() != 1) { history_->outbox_done(item.id); continue; }  // malformed: nothing to send
+            auto address = parse_server_address(peer->relay_address);
+            RelayClient depositor;
+            std::string err;
+            if (!address || !depositor.connect(address->host, address->port, peer->relay_id, options_.connect_timeout_seconds, err) ||
+                !depositor.deposit(peer->mailbox_id, peer->send_token, item.records[0], options_.envelope_ttl_seconds, nullptr, err)) {
+                history_->outbox_failed(item.id, now + retry_delay(item.attempts));
+                continue;
+            }
+            history_->outbox_done(item.id);
+            continue;
+        }
+
         std::vector<Bytes> records = item.records;
+        // A job to make tokens becomes signed Forward records for the creator (once; a retry reuses them).
+        if (item.kind == OUTBOX_KIND_GRANTS && !records.empty() && !chat::parse_record(records.front())) {
+            std::vector<Bytes> forwards;
+            if (!build_grant_forwards(item, forwards)) {
+                history_->outbox_failed(item.id, now + 15);
+                continue;
+            }
+            if (forwards.empty()) { history_->outbox_done(item.id); continue; }  // nobody needed one after all
+            records.assign(forwards.begin(), forwards.begin() + static_cast<std::ptrdiff_t>(std::min(forwards.size(), FORWARDS_PER_ENVELOPE)));
+            history_->update_outbox_records(item.id, records);
+            for (size_t start = FORWARDS_PER_ENVELOPE; start < forwards.size(); start += FORWARDS_PER_ENVELOPE) {
+                std::vector<Bytes> more(forwards.begin() + static_cast<std::ptrdiff_t>(start),
+                                        forwards.begin() + static_cast<std::ptrdiff_t>(std::min(forwards.size(), start + FORWARDS_PER_ENVELOPE)));
+                history_->enqueue(item.contact_fp, OUTBOX_KIND_GRANTS, CryptoEngine::random_bytes(chat::ID_BYTES), more, now, now);
+            }
+        }
+        // Someone we know only from a group is not a contact: no first-message introduction for them.
+        const bool first_message = item.kind == OUTBOX_KIND_MESSAGE && peer->is_contact && !history_->bundle_sent(item.contact_fp);
 
         // First message to someone: give them a token for writing back, and introduce ourselves.
         if (first_message) {

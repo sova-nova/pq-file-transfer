@@ -20,7 +20,7 @@ namespace relay {
 struct RelayLimits {
     size_t mailbox_quota_bytes = 64ull * 1024 * 1024;  // queued envelopes per mailbox
     size_t max_mailboxes = 1000;
-    size_t max_tokens_per_mailbox = 256;   // one per card handed out, and one per first message sent
+    size_t max_tokens_per_mailbox = 1024;  // one per card handed out, per first message sent, and per other member of each group joined
     int rate_limit_per_minute = 120;                   // deposits per send token, and per client address
     int sweep_seconds = 60;                            // how often expired envelopes are removed
     int64_t invite_lifetime_seconds = 14ll * 24 * 3600;

@@ -44,6 +44,8 @@ bool well_formed(const Record& r) {
         case RecordType::TokenGrant: return r.payload.size() == 32;
         // The first thing in a conversation: nothing came before it, and it has seen nothing.
         case RecordType::Conversation: return r.payload.size() <= MAX_CONVERSATION_PAYLOAD && r.own_prev.empty() && r.seen.empty();
+        // Control records, outside the transcript like receipts.
+        case RecordType::Forward: return r.payload.size() <= 4 + HASH_BYTES + 4 + MAX_FORWARD_ENVELOPE_BYTES && r.own_prev.empty() && r.seen.empty();
     }
     return false;
 }
@@ -178,7 +180,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
         }
     }
     if (b != bd.size()) return std::nullopt;
-    const uint32_t newest_type = *version == 1 ? 3 : 4;  // Conversation records came with version 2
+    const uint32_t newest_type = *version == 1 ? 3 : 5;  // Conversation and Forward records came with version 2
     if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
@@ -255,6 +257,24 @@ std::optional<ConversationInfo> conversation_from_record(const SignedRecord& sr)
     if (std::find(info->members.begin(), info->members.end(), r.sender) == info->members.end()) return std::nullopt;
     if (r.recipients_hash != recipients_hash_for(info->members)) return std::nullopt;
     return info;
+}
+
+Bytes forward_payload(const Bytes& target, const Bytes& sealed_envelope) {
+    if (target.size() != HASH_BYTES || sealed_envelope.empty() || sealed_envelope.size() > MAX_FORWARD_ENVELOPE_BYTES)
+        throw std::runtime_error("The forwarded envelope is not valid");
+    Bytes p;
+    write_blob(p, target);
+    write_blob(p, sealed_envelope);
+    return p;
+}
+
+std::optional<ForwardInfo> parse_forward_payload(const Bytes& payload) {
+    size_t off = 0;
+    auto target = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    auto envelope = read_blob(payload.data(), payload.size(), off, MAX_FORWARD_ENVELOPE_BYTES);
+    if (!target || !envelope || off != payload.size()) return std::nullopt;
+    if (target->size() != HASH_BYTES || envelope->empty()) return std::nullopt;
+    return ForwardInfo{std::move(*target), std::move(*envelope)};
 }
 
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids) {

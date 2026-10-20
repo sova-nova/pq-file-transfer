@@ -123,8 +123,9 @@ public:
     // --- Groups ---
     // A group is created by one person, who invites the others; each of them accepts or declines.
     // Membership never changes afterwards, and a message is sent to each member separately.
-    // Until a member's own "send token" for another member exists (a later step), members who
-    // aren't each other's contacts can't write to each other, and the group shows as not ready.
+    // Members who aren't each other's contacts get a send token from one another when they accept:
+    // each makes a token for the others and sends it sealed through the group's creator, who can't
+    // read it. Until those arrive the group shows as not ready.
     struct GroupMember {
         std::string fp;        // lowercase hex
         std::string name;      // a contact's name; else the display name in their bundle (untrusted text); else a short fingerprint
@@ -216,11 +217,17 @@ private:
         std::string relay_address;
         Bytes relay_id, mailbox_id, send_token;
         bool is_contact = false;
+        bool keys_verified = false;  // their encryption key is bound to their identity by a signed bundle
         bool can_send = false;
     };
     static Peer peer_from_contact(const KeyStore::Contact& contact);
-    std::optional<Peer> resolve_peer(const std::string& fp);
-    GroupMember member_info(const std::string& fp);
+    // With `conversation_id`, a send token a member gave us for that group counts too.
+    std::optional<Peer> resolve_peer(const std::string& fp, const Bytes& conversation_id = Bytes());
+    GroupMember member_info(const std::string& fp, const Bytes& conversation_id = Bytes());
+    // After joining a group: queues the job of making a send token for each member who needs one.
+    void queue_group_grants(const Bytes& conversation_id, const std::string& creator_fp, const std::vector<std::string>& others);
+    // Turns such a job into signed Forward records for the creator. False if it must be retried.
+    bool build_grant_forwards(const HistoryStore::OutboxItem& job, std::vector<Bytes>& forwards);
 
     bool process_envelope(const relay::StoredEnvelope& envelope);  // true = acknowledge it
     bool handle_record(const KeyStore::Contact& contact, const chat::SignedRecord& record, bool delay_receipt);
