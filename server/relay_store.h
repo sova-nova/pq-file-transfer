@@ -35,6 +35,20 @@ public:
     IssueResult add_member_invite(const Bytes& issuer_mailbox, const Bytes& invite_hash, int64_t now, int64_t expires_at,
                                   size_t max_outstanding, size_t max_total);
 
+    struct UnusedInvite {
+        Bytes hash;
+        int64_t expires_at = 0;
+    };
+    struct JoinedMember {
+        Bytes mailbox_id;
+        int64_t joined_at = 0;
+    };
+    // This member's unused, unexpired invites (soonest to expire first) and the people who used theirs.
+    std::vector<UnusedInvite> unused_invites(const Bytes& issuer_mailbox, int64_t now);
+    std::vector<JoinedMember> joined_through(const Bytes& issuer_mailbox);
+    // Cancels one of this member's own unused invites. False if it isn't theirs, or isn't there.
+    bool cancel_member_invite(const Bytes& issuer_mailbox, const Bytes& invite_hash);
+
     struct Member {
         Bytes id;
         int64_t created_at = 0;

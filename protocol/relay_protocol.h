@@ -80,6 +80,24 @@ struct HashOp {                              // TokenAdd / TokenRevoke
     std::vector<uint8_t> token_hash;
 };
 
+// What one member has done with their invites: the unused ones (identified by hash, since the relay
+// never keeps the invite itself), and when the people they invited joined.
+struct InviteStatus {
+    uint32_t max_unused = 0;  // how many unused invites this relay lets a member hold at once
+    uint32_t max_total = 0;   // how many people it lets a member invite in all
+    struct Unused {
+        std::vector<uint8_t> hash;  // HASH_BYTES: SHA-256 of the invite, which is how one is cancelled
+        uint64_t expires_at = 0;
+    };
+    struct Joined {
+        std::vector<uint8_t> mailbox_id;  // MAILBOX_ID_BYTES
+        uint64_t joined_at = 0;
+    };
+    std::vector<Unused> unused;
+    std::vector<Joined> joined;
+};
+constexpr size_t MAX_INVITE_STATUS_ENTRIES = 4096;
+
 // --- Encoding. decode_* validate every length and reject trailing bytes. ---
 
 std::vector<uint8_t> encode(const Hello&);
@@ -90,6 +108,7 @@ std::vector<uint8_t> encode(const Deposit&);
 std::vector<uint8_t> encode(const StoredEnvelope&);
 std::vector<uint8_t> encode(const IdList&);
 std::vector<uint8_t> encode(const HashOp&);
+std::vector<uint8_t> encode(const InviteStatus&);
 
 std::optional<Hello> decode_hello(const std::vector<uint8_t>&);
 std::optional<HelloReply> decode_hello_reply(const std::vector<uint8_t>&);
@@ -99,6 +118,7 @@ std::optional<Deposit> decode_deposit(const std::vector<uint8_t>&);
 std::optional<StoredEnvelope> decode_stored_envelope(const std::vector<uint8_t>&);
 std::optional<IdList> decode_id_list(const std::vector<uint8_t>&);
 std::optional<HashOp> decode_hash_op(const std::vector<uint8_t>&);
+std::optional<InviteStatus> decode_invite_status(const std::vector<uint8_t>&);
 
 // --- What gets signed. Each starts with its own label, and includes the relay ID, so a
 // signature made for one purpose or one relay can't be accepted for another. ---

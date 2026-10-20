@@ -69,6 +69,10 @@ enum class MessageType : uint8_t {
     RELAY_TOKEN_OK     = 0x2F,
     RELAY_INVITE_CREATE = 0x32,  // mailbox owner → relay: make me one single-use invite for a friend
     RELAY_INVITE_OK     = 0x33,  // relay → owner: the invite (INVITE_BYTES)
+    RELAY_INVITE_LIST   = 0x34,  // mailbox owner → relay: show the invites I made (empty payload)
+    RELAY_INVITE_LIST_OK = 0x35, // relay → owner: relay::InviteStatus
+    RELAY_INVITE_CANCEL = 0x36,  // mailbox owner → relay: cancel one of my unused invites (its hash)
+    RELAY_INVITE_CANCEL_OK = 0x37,
     RELAY_PING         = 0x30,
     RELAY_PONG         = 0x31,
     ERROR_MSG        = 0xFE,  // either direction: UTF-8 error text

@@ -380,6 +380,29 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     break;
                 }
 
+                case MessageType::RELAY_INVITE_LIST: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    if (limits_.member_invites_outstanding == 0) { send_error(sock, "This relay doesn't let members make invites"); break; }
+                    InviteStatus status;
+                    status.max_unused = static_cast<uint32_t>(limits_.member_invites_outstanding);
+                    status.max_total = static_cast<uint32_t>(limits_.member_invites_total);
+                    for (const auto& u : store_->unused_invites(*mailbox, now)) status.unused.push_back({u.hash, static_cast<uint64_t>(u.expires_at)});
+                    for (const auto& j : store_->joined_through(*mailbox)) status.joined.push_back({j.mailbox_id, static_cast<uint64_t>(j.joined_at)});
+                    if (!send_message(sock, MessageType::RELAY_INVITE_LIST_OK, encode(status))) return;
+                    break;
+                }
+
+                case MessageType::RELAY_INVITE_CANCEL: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_hash_op(msg->payload);
+                    if (!m) { send_error(sock, "Malformed request"); return; }
+                    // Only your own unused invites: someone else's, a used one and a made-up one all look the same.
+                    if (!store_->cancel_member_invite(*mailbox, m->token_hash)) { send_error(sock, "That isn't one of your unused invites"); break; }
+                    log("Member invite cancelled by " + short_id(*mailbox));
+                    if (!send_message(sock, MessageType::RELAY_INVITE_CANCEL_OK, {})) return;
+                    break;
+                }
+
                 case MessageType::RELAY_TOKEN_ADD:
                 case MessageType::RELAY_TOKEN_REVOKE: {
                     if (!mailbox) { send_error(sock, "Sign in first"); break; }

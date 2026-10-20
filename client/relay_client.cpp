@@ -298,6 +298,23 @@ bool RelayClient::create_invite(std::vector<uint8_t>& invite, std::string& error
     return true;
 }
 
+bool RelayClient::list_invites(relay::InviteStatus& status, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::RELAY_INVITE_LIST, {}, error) || !read_reply(MessageType::RELAY_INVITE_LIST_OK, &payload, error)) return false;
+    auto decoded = relay::decode_invite_status(payload);
+    if (!decoded) {
+        error = "The relay sent an invalid answer";
+        return false;
+    }
+    status = std::move(*decoded);
+    return true;
+}
+
+bool RelayClient::cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error) {
+    return send_request(MessageType::RELAY_INVITE_CANCEL, relay::encode(relay::HashOp{invite_hash}), error) &&
+           read_reply(MessageType::RELAY_INVITE_CANCEL_OK, nullptr, error);
+}
+
 bool RelayClient::add_token(const std::vector<uint8_t>& token_hash, std::string& error) {
     return send_request(MessageType::RELAY_TOKEN_ADD, relay::encode(relay::HashOp{token_hash}), error) &&
            read_reply(MessageType::RELAY_TOKEN_OK, nullptr, error);

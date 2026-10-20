@@ -607,6 +607,14 @@ static void test_real_relay() {
             if (!sign_in(c, vouch, vpin, who, why) || !c.create_invite(code, why)) return std::nullopt;
             return code;
         };
+        auto status_of = [&](const Box& who, relay::InviteStatus& st, std::string& e) {
+            RelayClient c;
+            return sign_in(c, vouch, vpin, who, e) && c.list_invites(st, e);
+        };
+        auto cancel_for = [&](const Box& who, const Bytes& invite_hash, std::string& e) {
+            RelayClient c;
+            return sign_in(c, vouch, vpin, who, e) && c.cancel_invite(invite_hash, e);
+        };
         std::string why;
 
         RelayClient anon;
@@ -615,6 +623,11 @@ static void test_real_relay() {
         Bytes ignored;
         CHECK(!anon.create_invite(ignored, anon_err) && has(anon_err, "Sign in"), "someone who hasn't signed in to a mailbox can't make invites: " + anon_err);
 
+        {
+            relay::InviteStatus st;
+            CHECK(!anon.list_invites(st, anon_err) && has(anon_err, "Sign in"), "nor can they list invites: " + anon_err);
+            CHECK(status_of(*alice_box, st, why) && st.max_unused == 2 && st.max_total == 3 && st.unused.empty() && st.joined.empty(), "a member with no invites sees the limits and nothing else");
+        }
         auto c1 = make_invite(*alice_box, why);
         CHECK(c1 && c1->size() == 16, "a member can make an invite");
         auto bob = c1 ? invitee(*c1) : std::nullopt;
@@ -624,11 +637,27 @@ static void test_real_relay() {
         auto c2 = make_invite(*alice_box, why);
         auto c3 = make_invite(*alice_box, why);
         CHECK(c2 && c3, "she can have 2 unused invites at once");
+        {
+            relay::InviteStatus st;
+            Bytes h2 = c2 ? CryptoEngine::sha256(*c2) : Bytes(), h3 = c3 ? CryptoEngine::sha256(*c3) : Bytes();
+            bool has_both = status_of(*alice_box, st, why) && st.unused.size() == 2;
+            if (has_both) has_both = (st.unused[0].hash == h2 || st.unused[1].hash == h2) && (st.unused[0].hash == h3 || st.unused[1].hash == h3);
+            CHECK(has_both && st.joined.size() == 1 && st.joined[0].mailbox_id == bob->id, "she sees her two unused invites (by hash) and that Bob joined through her");
+            CHECK(!cancel_for(*bob, h2, why) && has(why, "isn't one of your unused invites"), "Bob can't cancel her invite: " + why);
+            CHECK(cancel_for(*alice_box, h3, why) && !(c3 && invitee(*c3)), "she cancels one, and it no longer works");
+            CHECK(!cancel_for(*alice_box, h3, why) && has(why, "isn't one of your unused invites"), "cancelling it again says so: " + why);
+            c3 = make_invite(*alice_box, why);
+            CHECK(c3.has_value(), "and she can make another in its place");
+        }
         auto c4 = make_invite(*alice_box, why);
         CHECK(!c4 && has(why, "2 unused"), "a third unused one is refused: " + why);
         auto carol = c2 ? invitee(*c2) : std::nullopt;
         auto dave = c3 ? invitee(*c3) : std::nullopt;
         CHECK(carol && dave, "two more friends join");
+        {
+            relay::InviteStatus st;
+            CHECK(status_of(*alice_box, st, why) && st.unused.empty() && st.joined.size() == 3, "afterwards she has no unused invites and three people have joined through her");
+        }
         auto c5 = make_invite(*alice_box, why);
         CHECK(!c5 && has(why, "limit of people"), "after inviting 3 people in all, she can invite no more: " + why);
 

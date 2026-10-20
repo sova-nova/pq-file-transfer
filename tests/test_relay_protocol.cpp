@@ -134,6 +134,32 @@ int main() {
         check_framing("hash op", e, decode_hash_op);
         fuzz("hash op", e, decode_hash_op);
     }
+    {
+        InviteStatus st;
+        st.max_unused = 3;
+        st.max_total = 10;
+        st.unused = {{fill(1, HASH_BYTES), 1700000000}, {fill(2, HASH_BYTES), 1700000100}};
+        st.joined = {{fill(3, MAILBOX_ID_BYTES), 1699999000}};
+        auto e = encode(st);
+        auto back = decode_invite_status(e);
+        CHECK(back && back->max_unused == 3 && back->max_total == 10 && back->unused.size() == 2 && back->unused[1].hash == fill(2, HASH_BYTES) &&
+                  back->unused[1].expires_at == 1700000100 && back->joined.size() == 1 && back->joined[0].mailbox_id == fill(3, MAILBOX_ID_BYTES) && back->joined[0].joined_at == 1699999000,
+              "invite status round trip");
+        check_framing("invite status", e, decode_invite_status);
+        fuzz("invite status", e, decode_invite_status);
+        CHECK(decode_invite_status(encode(InviteStatus{})).has_value(), "invite status: nothing unused and nobody joined is valid");
+        InviteStatus huge;
+        for (size_t i = 0; i <= MAX_INVITE_STATUS_ENTRIES; i++) huge.unused.push_back({fill(1, HASH_BYTES), 1});
+        CHECK(!decode_invite_status(encode(huge)), "invite status: more entries than the limit is rejected");
+        InviteStatus bad_hash;
+        bad_hash.unused = {{fill(1, 7), 1}};
+        InviteStatus bad_id;
+        bad_id.joined = {{fill(1, 5), 1}};
+        CHECK(!decode_invite_status(encode(bad_hash)) && !decode_invite_status(encode(bad_id)), "invite status: a hash or mailbox ID of the wrong size is rejected");
+        std::vector<uint8_t> lying;
+        write_u32(lying, 3); write_u32(lying, 10); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_invite_status(lying), "invite status: a declared count of four billion is rejected without allocating");
+    }
 
     std::cout << "Signing inputs\n";
     {

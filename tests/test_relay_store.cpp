@@ -260,6 +260,24 @@ int main() {
         CHECK(s.delete_mailbox(box1) && s.add_member_invite(box2, id(0x86, 32), 5200, 9000, 5, 5) == RelayStore::IssueResult::Ok, "removing a mailbox also removes the unused invites it made (and others are unaffected)");
         CHECK(s.register_mailbox(id(0x82, 32), id(4), id(0x55, 64), id(0xAA, 32), 5300, 10) == R::BadInvite, "...so an invitation it left behind no longer works");
         CHECK(!s.delete_mailbox(id(77)), "removing a mailbox that doesn't exist reports that");
+
+        // Looking at one's own invites, and cancelling one. A fresh mailbox, so nothing else is counted.
+        s.add_invite(id(0xA1, 32), 99999);
+        CHECK(s.register_mailbox(id(0xA1, 32), id(20), id(0x55, 64), id(0xAA, 32), 6000, 30) == R::Ok, "(setup) a new mailbox");
+        Bytes lister = id(20);
+        CHECK(s.add_member_invite(lister, id(0x91, 32), 6000, 9500, 5, 9) == RelayStore::IssueResult::Ok && s.add_member_invite(lister, id(0x92, 32), 6000, 9000, 5, 9) == RelayStore::IssueResult::Ok &&
+                  s.add_member_invite(lister, id(0x93, 32), 6000, 6001, 5, 9) == RelayStore::IssueResult::Ok, "(setup) it makes three invites, one about to expire");
+        auto unused = s.unused_invites(lister, 6000);
+        CHECK(unused.size() == 3 && unused[0].hash == id(0x93, 32) && unused[1].hash == id(0x92, 32) && unused[2].expires_at == 9500, "its unused invites are listed soonest to expire first");
+        CHECK(s.unused_invites(lister, 6002).size() == 2, "an expired one is no longer listed");
+        CHECK(!s.cancel_member_invite(id(88), id(0x92, 32)) && s.unused_invites(lister, 6002).size() == 2, "someone else cannot cancel it");
+        CHECK(s.cancel_member_invite(lister, id(0x92, 32)) && s.unused_invites(lister, 6002).size() == 1, "its owner can");
+        CHECK(!s.cancel_member_invite(lister, id(0x92, 32)) && !s.cancel_member_invite(lister, id(0xFE, 32)), "cancelling twice, or something that never existed, reports that");
+        CHECK(s.register_mailbox(id(0x92, 32), id(9), id(0x55, 64), id(0xAA, 32), 6003, 30) == R::BadInvite, "a cancelled invite can't be used");
+        CHECK(s.register_mailbox(id(0x91, 32), id(10), id(0x55, 64), id(0xAA, 32), 6004, 30) == R::Ok, "(another one still can)");
+        auto joined = s.joined_through(lister);
+        CHECK(joined.size() == 1 && joined[0].mailbox_id == id(10) && joined[0].joined_at == 6004 && s.joined_through(id(88)).empty(), "the people who used a member's invites are listed with when they joined");
+
     }
 
     fs::remove_all(dir);

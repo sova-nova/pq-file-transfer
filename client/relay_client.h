@@ -67,6 +67,10 @@ public:
     // Needs sign-in. Asks the relay for one single-use invite to give a friend. The relay limits how
     // many a member may make and records that this mailbox vouched for whoever uses it.
     bool create_invite(std::vector<uint8_t>& invite, std::string& error);
+    // Needs sign-in. Your unused invites, the people who have joined through you, and the relay's limits.
+    bool list_invites(relay::InviteStatus& status, std::string& error);
+    // Needs sign-in. Cancels one of your unused invites, named by the hash the list gave.
+    bool cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error);
 
     bool add_token(const std::vector<uint8_t>& token_hash, std::string& error);
     bool revoke_token(const std::vector<uint8_t>& token_hash, std::string& error);

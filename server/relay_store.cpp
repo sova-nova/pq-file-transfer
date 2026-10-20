@@ -138,6 +138,30 @@ RelayStore::IssueResult RelayStore::add_member_invite(const Bytes& issuer_mailbo
     return IssueResult::Ok;
 }
 
+std::vector<RelayStore::UnusedInvite> RelayStore::unused_invites(const Bytes& issuer_mailbox, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT hash, expires_at FROM invites WHERE issued_by = ? AND expires_at > ? ORDER BY expires_at, hash");
+    s.blob(1, issuer_mailbox).i64(2, now);
+    std::vector<UnusedInvite> out;
+    while (s.step()) out.push_back({s.column_blob(0), s.column_i64(1)});
+    return out;
+}
+
+std::vector<RelayStore::JoinedMember> RelayStore::joined_through(const Bytes& issuer_mailbox) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT id, created_at FROM mailboxes WHERE invited_by = ? ORDER BY created_at, id");
+    s.blob(1, issuer_mailbox);
+    std::vector<JoinedMember> out;
+    while (s.step()) out.push_back({s.column_blob(0), s.column_i64(1)});
+    return out;
+}
+
+bool RelayStore::cancel_member_invite(const Bytes& issuer_mailbox, const Bytes& invite_hash) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "DELETE FROM invites WHERE hash = ? AND issued_by = ?").blob(1, invite_hash).blob(2, issuer_mailbox).step();
+    return sqlite3_changes(db_) > 0;
+}
+
 std::vector<RelayStore::Member> RelayStore::members() {
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt s(db_, "SELECT m.id, m.created_at, m.invited_by, (SELECT COUNT(*) FROM envelopes e WHERE e.mailbox_id = m.id) "

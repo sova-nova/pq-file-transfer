@@ -277,6 +277,32 @@ bool MessagingEngine::create_relay_invite(std::string& invite, std::string& erro
     return true;
 }
 
+bool MessagingEngine::relay_invite_status(RelayInviteStatus& status, std::string& error) {
+    if (!keys_.load_mailbox_config()) {
+        error = "Set up messaging first";
+        return false;
+    }
+    RelayClient client;
+    relay::InviteStatus raw;
+    if (!connect_authenticated(client, error) || !client.list_invites(raw, error)) return false;
+    status = RelayInviteStatus();
+    status.max_unused = raw.max_unused;
+    status.max_total = raw.max_total;
+    for (const auto& u : raw.unused) status.unused.push_back({bytes_to_hex(u.hash), static_cast<int64_t>(u.expires_at)});
+    for (const auto& j : raw.joined) status.joined.push_back({bytes_to_hex(j.mailbox_id).substr(0, 8), static_cast<int64_t>(j.joined_at)});
+    return true;
+}
+
+bool MessagingEngine::cancel_relay_invite(const std::string& id, std::string& error) {
+    auto hash = hex_to_bytes(id);
+    if (!hash || hash->size() != relay::HASH_BYTES) {
+        error = "That isn't an invite";
+        return false;
+    }
+    RelayClient client;
+    return connect_authenticated(client, error) && client.cancel_invite(*hash, error);
+}
+
 bool MessagingEngine::make_card(const std::string& label, std::string& card, std::string& error) {
     auto config = keys_.load_mailbox_config();
     if (!config) {

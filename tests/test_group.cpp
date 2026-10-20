@@ -835,6 +835,21 @@ int main(int argc, char** argv) {
         User& late = make_user("late");
         std::string reuse_err;
         CHECK(!late.engine->setup(*invite, reuse_err) && has(reuse_err, "used"), "and nobody else can use the same invite: " + reuse_err);
+        MessagingEngine::RelayInviteStatus status;
+        CHECK(alice.engine->relay_invite_status(status, err) && status.max_unused == 3 && status.max_total == 10 && status.unused.empty() && status.joined.size() == 1 &&
+                  status.joined[0].mailbox.size() == 8,
+              "Alice sees the relay's limits, no unused invites, and that one person joined through her");
+        std::string spare;
+        CHECK(alice.engine->create_relay_invite(spare, err) && alice.engine->relay_invite_status(status, err) && status.unused.size() == 1, "a new invite shows up as unused");
+        auto spare_invite = parse_relay_invite(spare);
+        const std::string spare_id = status.unused.empty() ? std::string() : status.unused[0].id;
+        CHECK(alice.engine->cancel_relay_invite(spare_id, err) && alice.engine->relay_invite_status(status, err) && status.unused.empty(), "cancelling it removes it");
+        CHECK(!alice.engine->cancel_relay_invite(spare_id, err) && has(err, "isn't one of your"), "cancelling it again says so: " + err);
+        CHECK(!alice.engine->cancel_relay_invite("not hex", err), "a nonsense ID is refused before asking the relay");
+        User& cancelled = make_user("cancelled");
+        std::string cancel_err;
+        CHECK(spare_invite && !cancelled.engine->setup(*spare_invite, cancel_err) && has(cancel_err, "used"), "the cancelled invite can't be used: " + cancel_err);
+        users.erase("cancelled");
         int made = 0;
         std::string last_err;
         for (int i = 0; i < 5; i++) {

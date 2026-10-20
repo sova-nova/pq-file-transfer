@@ -80,6 +80,23 @@ std::vector<uint8_t> encode(const IdList& m) {
     return b;
 }
 
+std::vector<uint8_t> encode(const InviteStatus& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.max_unused);
+    write_u32(b, m.max_total);
+    write_u32(b, static_cast<uint32_t>(m.unused.size()));
+    for (const auto& u : m.unused) {
+        write_blob(b, u.hash);
+        write_u64(b, u.expires_at);
+    }
+    write_u32(b, static_cast<uint32_t>(m.joined.size()));
+    for (const auto& j : m.joined) {
+        write_blob(b, j.mailbox_id);
+        write_u64(b, j.joined_at);
+    }
+    return b;
+}
+
 std::vector<uint8_t> encode(const HashOp& m) {
     std::vector<uint8_t> b;
     write_blob(b, m.token_hash);
@@ -179,6 +196,33 @@ std::optional<IdList> decode_id_list(const std::vector<uint8_t>& in) {
         auto id = fixed_blob(in, off, ENVELOPE_ID_BYTES);
         if (!id) return std::nullopt;
         m.ids.push_back(std::move(*id));
+    }
+    if (!at_end(in, off)) return std::nullopt;
+    return m;
+}
+
+std::optional<InviteStatus> decode_invite_status(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    InviteStatus m;
+    auto max_unused = read_u32(in.data(), in.size(), off);
+    auto max_total = read_u32(in.data(), in.size(), off);
+    auto unused = read_u32(in.data(), in.size(), off);
+    if (!max_unused || !max_total || !unused || *unused > MAX_INVITE_STATUS_ENTRIES) return std::nullopt;
+    m.max_unused = *max_unused;
+    m.max_total = *max_total;
+    for (uint32_t i = 0; i < *unused; i++) {
+        auto hash = fixed_blob(in, off, HASH_BYTES);
+        auto expires = read_u64(in.data(), in.size(), off);
+        if (!hash || !expires) return std::nullopt;
+        m.unused.push_back({std::move(*hash), *expires});
+    }
+    auto joined = read_u32(in.data(), in.size(), off);
+    if (!joined || *joined > MAX_INVITE_STATUS_ENTRIES) return std::nullopt;
+    for (uint32_t i = 0; i < *joined; i++) {
+        auto id = fixed_blob(in, off, MAILBOX_ID_BYTES);
+        auto at = read_u64(in.data(), in.size(), off);
+        if (!id || !at) return std::nullopt;
+        m.joined.push_back({std::move(*id), *at});
     }
     if (!at_end(in, off)) return std::nullopt;
     return m;

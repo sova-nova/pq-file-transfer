@@ -106,8 +106,8 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     cards_button_ = new QPushButton("Cards issued…", this);
     new_group_button_ = new QPushButton("New group…", this);
     invites_button_ = new QPushButton("Group invitations", this);
-    relay_invite_button_ = new QPushButton("Relay invite…", this);
-    relay_invite_button_->setToolTip("Make a one-time invite so a friend can use this relay. You are vouching for them.");
+    relay_invite_button_ = new QPushButton("Relay invites…", this);
+    relay_invite_button_->setToolTip("Make a one-time invite so a friend can use this relay (you are vouching for them), and manage the ones you made.");
     top->addWidget(status_label_, 1);
     top->addWidget(setup_button_);
     top->addWidget(requests_button_);
@@ -795,27 +795,103 @@ void ChatWidget::create_group_dialog() {
     }
 }
 
-// A one-time invite for a friend to create their own mailbox on this relay. Making it vouches for them.
-void ChatWidget::make_relay_invite() {
-    std::string invite, error;
-    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
-    const bool ok = engine_->create_relay_invite(invite, error);
-    QGuiApplication::restoreOverrideCursor();
-    if (!ok) {
-        QMessageBox::warning(this, "Relay invite", qstr(error));
-        return;
-    }
+// Shows a freshly made invite: the string to give a friend, and what handing it over means.
+static void show_invite_box(QWidget* parent, const std::string& invite) {
     QString text = "Give this to one friend. They paste it into \"Set up messaging\". It works once and expires after 14 days.\n\n" +
                    qstr(invite) +
                    "\n\nYou are vouching for whoever uses it: the relay's operator can see that you invited them.\n\n"
                    "The invite names the relay by the address you use. If your friend reaches the relay a different way, "
                    "change the address part (after pqft-relay://) before sending it.";
-    QMessageBox box(QMessageBox::Information, "Relay invite", text, QMessageBox::NoButton, this);
-    plain_box(box);
+    QMessageBox box(QMessageBox::Information, "New relay invite", text, QMessageBox::NoButton, parent);
+    box.setTextFormat(Qt::PlainText);
     QAbstractButton* copy = box.addButton("Copy invite", QMessageBox::AcceptRole);
     box.addButton("Close", QMessageBox::RejectRole);
     box.exec();
     if (box.clickedButton() == copy) QGuiApplication::clipboard()->setText(qstr(invite));
+}
+
+// Your invites on this relay: make a new one for a friend (which vouches for them), see which are
+// still unused, and cancel one if it went to the wrong place.
+void ChatWidget::make_relay_invite() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("Relay invites");
+    dialog.setMinimumWidth(500);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* summary = new QLabel(&dialog);
+    summary->setWordWrap(true);
+    summary->setTextFormat(Qt::PlainText);
+    layout->addWidget(summary);
+    auto* unused = new QListWidget(&dialog);
+    layout->addWidget(unused);
+    auto* joined = new QLabel(&dialog);
+    joined->setWordWrap(true);
+    joined->setTextFormat(Qt::PlainText);
+    layout->addWidget(joined);
+
+    auto* buttons = new QHBoxLayout();
+    auto* make = new QPushButton("New invite", &dialog);
+    auto* cancel = new QPushButton("Cancel selected invite", &dialog);
+    auto* close = new QPushButton("Close", &dialog);
+    buttons->addStretch();
+    buttons->addWidget(make);
+    buttons->addWidget(cancel);
+    buttons->addWidget(close);
+    layout->addLayout(buttons);
+
+    auto reload = [&] {
+        MessagingEngine::RelayInviteStatus status;
+        std::string error;
+        unused->clear();
+        if (!engine_->relay_invite_status(status, error)) {
+            summary->setText(qstr(error));
+            joined->setText(QString());
+            make->setEnabled(false);
+            cancel->setEnabled(false);
+            return;
+        }
+        auto number = [](size_t n) { return QString::number(static_cast<qulonglong>(n)); };
+        summary->setText("This relay lets you have " + number(status.max_unused) + " unused invites at once and invite " + number(status.max_total) +
+                         " people in all. You have " + number(status.unused.size()) + " unused, and " + number(status.joined.size()) +
+                         " people have joined through you.\n\nThe relay doesn't know who each invite was for, only when it expires.");
+        for (const auto& u : status.unused) {
+            auto* item = new QListWidgetItem("Unused, expires " + QDateTime::fromSecsSinceEpoch(u.expires_at).toString("d MMM yyyy"));
+            item->setData(Qt::UserRole, qstr(u.id));
+            unused->addItem(item);
+        }
+        QString who;
+        for (const auto& j : status.joined)
+            who += (who.isEmpty() ? "" : ", ") + QDateTime::fromSecsSinceEpoch(j.joined_at).toString("d MMM yyyy") + " (mailbox " + qstr(j.mailbox) + ")";
+        joined->setText(who.isEmpty() ? QString("Nobody has joined through you yet.") : "Joined through you: " + who);
+        make->setEnabled(status.unused.size() < status.max_unused && status.unused.size() + status.joined.size() < status.max_total);
+        cancel->setEnabled(!status.unused.empty());
+    };
+
+    connect(close, &QPushButton::clicked, &dialog, &QDialog::accept);
+    connect(make, &QPushButton::clicked, &dialog, [&] {
+        std::string invite, error;
+        QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+        const bool ok = engine_->create_relay_invite(invite, error);
+        QGuiApplication::restoreOverrideCursor();
+        if (!ok) {
+            QMessageBox::warning(&dialog, "Relay invite", qstr(error));
+            return;
+        }
+        show_invite_box(&dialog, invite);
+        reload();
+    });
+    connect(cancel, &QPushButton::clicked, &dialog, [&] {
+        auto* item = unused->currentItem();
+        if (!item) {
+            QMessageBox::information(&dialog, "Relay invites", "Select an unused invite to cancel.");
+            return;
+        }
+        if (QMessageBox::question(&dialog, "Cancel invite", "Cancel this invite? Whoever you gave it to will no longer be able to use it.") != QMessageBox::Yes) return;
+        std::string error;
+        if (!engine_->cancel_relay_invite(item->data(Qt::UserRole).toString().toStdString(), error)) QMessageBox::warning(&dialog, "Relay invites", qstr(error));
+        reload();
+    });
+    reload();
+    dialog.exec();
 }
 
 void ChatWidget::review_group_invites() {

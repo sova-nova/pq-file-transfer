@@ -62,6 +62,27 @@ public:
     // The string names the relay by the address this app uses; a friend who reaches the relay another
     // way needs that part changed. Talks to the relay, so call it from the UI thread only when that's fine.
     bool create_relay_invite(std::string& invite, std::string& error);
+
+    // What this member has done with their invites on the relay. The relay doesn't keep the invites
+    // themselves, so an unused one is identified by `id` (a hash), and a joined person only by when
+    // they joined: you know who you gave each invite to, the relay doesn't.
+    struct RelayInviteStatus {
+        size_t max_unused = 0;  // unused invites allowed at once
+        size_t max_total = 0;   // people you may invite in all
+        struct Unused {
+            std::string id;     // lowercase hex of the invite's hash
+            int64_t expires_at = 0;
+        };
+        struct Joined {
+            std::string mailbox;  // a short form of the new mailbox's ID, for telling them apart
+            int64_t joined_at = 0;
+        };
+        std::vector<Unused> unused;  // soonest to expire first
+        std::vector<Joined> joined;  // oldest first
+    };
+    bool relay_invite_status(RelayInviteStatus& status, std::string& error);
+    // Cancels one unused invite (by `id` from relay_invite_status), so the friend can no longer use it.
+    bool cancel_relay_invite(const std::string& id, std::string& error);
     // Shown in the identity bundles this user hands out. Optional.
     void set_display_name(const std::string& name);
 
