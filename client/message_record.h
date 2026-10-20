@@ -40,6 +40,7 @@ enum class RecordType : uint32_t {
     TokenGrant = 3,    // payload: a 32-byte send token for the recipient to use when writing back
     Conversation = 4,  // payload: see conversation_payload(); creates a group (version 2 only)
     Forward = 5,       // payload: see forward_payload(); asks a group's creator to pass a sealed envelope to another member (version 2 only)
+    ArchiveGrant = 6,  // payload: see archive_grant_payload(); gives one member what they need to use the chat's archive (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -133,6 +134,28 @@ struct ForwardInfo {
 Bytes forward_payload(const Bytes& target, const Bytes& sealed_envelope);
 // std::nullopt for anything malformed, including trailing bytes.
 std::optional<ForwardInfo> parse_forward_payload(const Bytes& payload);
+
+// --- Archive grants ---
+//
+// A chat's archive is made by one person (a group's creator; in a one-to-one chat, whoever has the
+// smaller fingerprint). They give each other member a grant, sealed in that member's own envelope: where
+// the archive is, the key its entries are encrypted under, and a one-time token that lets that member
+// register their key with the relay. Like receipts and forwards, a grant is outside the transcript.
+//
+//   payload = blob relay_address | blob relay_id | blob archive_key | blob join_token
+constexpr size_t MAX_RELAY_ADDRESS_BYTES = 255;
+constexpr size_t MAX_ARCHIVE_GRANT_PAYLOAD = 512;
+
+struct ArchiveGrantInfo {
+    std::string relay_address;  // host:port of the relay that holds the archive (visible printable characters only)
+    Bytes relay_id;             // HASH_BYTES: that relay's identity, to pin
+    Bytes archive_key;          // 32 bytes: every entry is encrypted under it
+    Bytes join_token;           // 32 bytes: this member's one-time permission to join
+};
+// Throws std::runtime_error if any part has the wrong size or the address has unprintable characters.
+Bytes archive_grant_payload(const ArchiveGrantInfo& info);
+// std::nullopt for anything malformed, including trailing bytes.
+std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload);
 
 // A receipt tells the sender that these messages were delivered or read.
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids);

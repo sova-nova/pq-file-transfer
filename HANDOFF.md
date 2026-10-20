@@ -17,7 +17,8 @@ A C++17 / Qt 6 application with post-quantum cryptography (ML-KEM-768, ML-DSA-65
 | **M1** | Mailbox relay: SQLite store, invites, relay signing key pinned by clients, per-contact send tokens, challenge sign-in, expiry. Done and released. |
 | **M2** | One-to-one Saved chats: signed records, sealed envelopes, encrypted local history, receipts, message requests, per-contact cards, token revocation, Chats tab. **Built and tested; not yet confirmed on a real Qt build or two real machines.** |
 | **M3** | Groups. **Built and tested; the maintainer has tried the GUI on real Qt and reports it works.** All eight steps are done (below): the local history database is at schema version 5 (groups, members, per-member delivery, pending invitations, introduced members, member tokens, verified people; automatic upgrade), the wire formats exist (record version 2 with the creation and Forward records, envelope inner version 2), and the engine can create groups, invite, accept and decline, fan out, track delivery per member, send receipts, give members who never met a way to write to each other, and label every member's trust (Verified by you / Contact / Introduced by X); the Chats tab has the matching GUI (groups list, create, invitations, sending, per-member delivery, trust labels and fingerprint verification). Not yet confirmed by anyone: groups across more than a few real machines and a relay outside the LAN, and CI on all platforms. No group can be created from the app yet; the engine API is tested end to end. |
-| M4 to M8 | Relay archive and restore, attachments in chats, prekeys / forward secrecy, Private chats with timers, hardening. See the design document. |
+| **M4** | Chat archive: an encrypted, hash-chained copy of each chat on the relay, so a lost device can be restored. **In progress; steps 1 and 2 of 6 done** (the relay side, and the client's archive core: see "M4: decisions and build order" below). Nothing in the app calls it yet: no chat gets an archive until step 3 wires it into sending. |
+| M5 to M8 | Attachments in chats, prekeys / forward secrecy, Private chats with timers, hardening (including encrypted relay connections). See the design document. |
 
 ## Layout
 
@@ -49,7 +50,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - Code is compiled with `-Wall -Wextra -Wpedantic -Werror` against a fake liboqs and a small SQLite header shim, and the full suites run against those.
 - The Qt code (`chat_widget`, `main_window`) is only type-checked against a hand-written stub of the Qt classes. That catches typos and API mismatches in our own code, not Qt misuse.
 - **The first CI run is the real test** for the GUI, CMake, Windows and the real liboqs. If it fails, paste the compiler error.
-- Test totals at last run: **1,113 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 141, history 156, relay_protocol 69, relay_store 87, e2e 48, relay 104, chat 88, relay_setup 30, group 146). The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
+- Test totals at last run: **1,288 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 168, history 170, relay_protocol 107, relay_store 119, e2e 48, relay 134, chat 88, relay_setup 30, group 180). The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
 
 ## Operational facts and gotchas
 
@@ -75,6 +76,49 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - macOS build in CI; Windows code signing (SmartScreen warning).
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
+
+## M4: decisions and build order
+
+Archive design: see the design document, "Saved chats: transcript and archive" and "Deleting Saved chats". Settled with the maintainer, in addition to the design:
+
+| # | Decision |
+|---|---|
+| 1 | The archive lives on the **creator's relay**, named in the grant with its pinned identity; members on other relays connect to it. |
+| 2 | 1:1 chats: the person with the **smaller fingerprint** creates the archive, when they next send after upgrading. |
+| 3 | **No backfill** of history from before M4 in v1; the app says older history is device-only. |
+| 4 | An archive session is authenticated by the existing **challenge signing, one chat per connection** (restoring 100 chats is 100 short connections). |
+| 5 | A checkpoint is a **record in the chain**, signed by the member's identity key, outside the displayed transcript (like receipts). Cadence as designed: every 50 messages or each day of activity. |
+| 6 | The **keyring** holds per-chat keys and archive keys plus the small history tables that can't be rebuilt from archives (verified people, member tokens, introduced members, issued-token labels, receipt settings). Messages come back from archives. |
+| 7 | Registration closes when everyone has joined or after **30 days**; deletion then needs every *registered* key, so a member who never joins can't block it forever. |
+| 8 | Only mailbox owners may create archives (keeps the vouching model); the relay **does not record which mailbox** created one, so it still can't link a chat to its members. A per-mailbox rate limit (in memory) and a relay-wide cap bound abuse. |
+
+Build order:
+
+1. Relay: archive storage and operations (create, join, sign in, append with compare-and-swap, fetch), limits, tests. **Done.**
+2. Client archive core: per-chat keys, the grant record that delivers the archive key and join token, entry encryption, local schema. **Done.**
+3. Send and receive integration: append before sending, catch-up from the archive, checkpoints, the "behind" warning.
+4. Keyring: put and get, restore flow, "Restore from relay" in the app.
+5. Consent-based deletion and redaction (relay, engine, GUI).
+6. End-to-end tests: wipe a client and restore it, a hostile relay (withholds the tail, shows different heads), simultaneous senders.
+
+**Step 2 as built** (`client/archive.{h,cpp}`, `HistoryStore`, `MessagingEngine`):
+
+- **Entries** (`archive::seal_entry` / `open_entry`): `nonce(12) || AES-256-GCM(archive key, one signed record)` with the archive ID and entry number as associated data. **Departure from the design:** the nonce is random and stored with the entry, not the entry number. A refused (stale) append still shows the relay its ciphertext, so two members racing for the same number would encrypt different records under the same key and nonce, which leaks both. `archive::verify_chain` checks consecutive numbers and each hash from a given head; the chain hashing matches the relay's byte for byte.
+- **Grant record** (`RecordType::ArchiveGrant`, 6, version 2 only, outside the transcript like receipts and forwards): relay address, relay ID, the 32-byte archive key and that member's 32-byte join token, each member's in their own sealed envelope. Accepted only from the person whose job it is (a group's creator; in a 1:1 chat the smaller fingerprint) and only for a chat we know; a second grant for a chat that already has an archive is ignored (a replay can't swap the key). Grants arriving before a group invitation is answered are held with it and replayed on accept.
+- **Local state** (history schema 6, table `archives`): relay address and ID, role, state (granted, joined, failed), the archive key, this device's per-chat key pair, the join token until used, the checked head, and a failure note. The key, private key and token are encrypted like messages; the head only moves forward.
+- **Engine API:** `direct_conversation_id`, `archive_status`, `create_archive` (the maker only; creates the archive on this app's relay with one token hash per member including themselves, joins, then queues each other member's grant as an ordinary outbox item), `archive_sync` (fetches from the checked head, verifies the chain, decrypts, and fails if the relay's reported end differs from what its entries add up to, which catches a withheld tail or a lying head), `archive_append` (catches up, seals for the next number, appends; if someone got in first it catches up on theirs, hands them back in `others`, and goes again; checks the relay's answer matches the entry it made). `pump()` joins any granted archive each time round (a refusal is final, a relay that is down is retried).
+- **Not yet wired in:** nothing calls `create_archive` or `archive_append` during normal use. Step 3 does that: create at group creation and on a 1:1 chat's next send, append before fanning out, catch up on a gap, checkpoints.
+
+**Step 1 as built** (`RelayStore`, `RelayService`, `RelayClient`; protocol in `relay_protocol.h`, messages 0x40 to 0x4B):
+
+- **Create** (mailbox sign-in required): archive ID (the conversation ID) and one **join token hash per member** (1 to 16). The creator makes the tokens, so the relay only ever holds hashes, and gives each member theirs.
+- **Join** (no mailbox): a member presents the token and registers a fresh per-chat ML-DSA-65 public key, proving possession by signing over relay ID, archive ID, key and token hash. The token is spent. Registration closes when every member has joined or after 30 days. Wrong token and unknown archive give the same answer, so archive IDs can't be probed.
+- **Sign in**: one chat per connection, signing the connection's challenge with a registered key (same one-attempt rule as a mailbox sign-in).
+- **Append**: the sender names the head it extends (entry number and hash; the *genesis hash* is the head of an empty archive). The relay accepts only if that is still the head (compare-and-swap) and **computes the new hash itself**: SHA-256 over archive ID, entry number, previous hash and ciphertext. If the head moved it answers `ARCHIVE_STALE` with the current head and the sender fetches what it missed and re-signs on top. (Simplification of the design, which has the relay return the new entries: entries can be 64 KiB each, so they come from a fetch instead.)
+- **Fetch**: entries from a number onwards, up to 256, as separate messages then the head.
+- **Limits**: entry 64 KiB; `--archive-quota-mib` per archive (default 512); `--max-archives` per relay (default 1000). Archives nobody joined before the registration window closed are swept away. Relay database schema 4 (new tables only).
+- **Not yet on the relay:** the keyring slot and deletion/redaction (step 4 and 5), tombstones, per-archive checkpoints (those are chain entries, so the relay needs nothing).
+- Verified: chain hashes match an independent calculation in the tests; a stale append is refused; simultaneous appenders get one winner and one retry; outsiders and keys from another archive can't sign in; quota, restart, and that no table has a column linking an archive to a mailbox.
 
 ## Member-issued relay invites
 

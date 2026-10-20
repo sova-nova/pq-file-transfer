@@ -98,6 +98,54 @@ struct InviteStatus {
 };
 constexpr size_t MAX_INVITE_STATUS_ENTRIES = 4096;
 
+// --- Chat archives ---
+//
+// An archive is one chat's encrypted log on the relay. The relay can't read it: each entry is
+// ciphertext under a key only the members hold. What the relay does enforce is the order. Entries
+// are numbered from 1; entry n's hash covers the archive ID, n, the previous entry's hash and its own
+// ciphertext, so the chain can be checked by anyone who holds a copy. An append names the head it
+// extends and is accepted only if that is still the head (compare-and-swap), which gives one linear
+// chain even with simultaneous senders.
+constexpr size_t ARCHIVE_ID_BYTES = 16;       // the chat's conversation ID
+constexpr size_t JOIN_TOKEN_BYTES = 32;
+constexpr size_t MAX_ARCHIVE_MEMBERS = 16;
+constexpr size_t MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024;
+constexpr uint32_t MAX_FETCH_ENTRIES = 256;
+
+struct ArchiveCreate {
+    std::vector<uint8_t> archive_id;                    // ARCHIVE_ID_BYTES
+    std::vector<std::vector<uint8_t>> join_token_hashes; // one per member (1 to MAX_ARCHIVE_MEMBERS), HASH_BYTES each
+};
+struct ArchiveJoin {
+    std::vector<uint8_t> archive_id;
+    std::vector<uint8_t> join_token;        // JOIN_TOKEN_BYTES: the secret itself
+    std::vector<uint8_t> public_key;        // ML-DSA-65, made for this chat only
+    std::vector<uint8_t> signature;         // by that key over archive_join_signing_input()
+};
+struct ArchiveAuth {
+    std::vector<uint8_t> archive_id;
+    std::vector<uint8_t> key_hash;          // HASH_BYTES: SHA-256 of the registered public key
+    std::vector<uint8_t> signature;         // over archive_auth_signing_input()
+};
+struct ArchiveAppend {
+    uint64_t expected_number = 0;           // how many entries the sender believes there are
+    std::vector<uint8_t> expected_hash;     // HASH_BYTES: the hash of that head (the genesis hash when there are none)
+    std::vector<uint8_t> ciphertext;        // 1 to MAX_ARCHIVE_ENTRY_BYTES
+};
+struct ArchiveHead {                         // APPEND_OK, STALE and FETCH_END
+    uint64_t number = 0;
+    std::vector<uint8_t> hash;
+};
+struct ArchiveFetch {
+    uint64_t from_number = 1;
+    uint32_t limit = 0;                     // 1 to MAX_FETCH_ENTRIES
+};
+struct ArchiveEntry {
+    uint64_t number = 0;
+    std::vector<uint8_t> hash;
+    std::vector<uint8_t> ciphertext;
+};
+
 // --- Encoding. decode_* validate every length and reject trailing bytes. ---
 
 std::vector<uint8_t> encode(const Hello&);
@@ -109,6 +157,13 @@ std::vector<uint8_t> encode(const StoredEnvelope&);
 std::vector<uint8_t> encode(const IdList&);
 std::vector<uint8_t> encode(const HashOp&);
 std::vector<uint8_t> encode(const InviteStatus&);
+std::vector<uint8_t> encode(const ArchiveCreate&);
+std::vector<uint8_t> encode(const ArchiveJoin&);
+std::vector<uint8_t> encode(const ArchiveAuth&);
+std::vector<uint8_t> encode(const ArchiveAppend&);
+std::vector<uint8_t> encode(const ArchiveHead&);
+std::vector<uint8_t> encode(const ArchiveFetch&);
+std::vector<uint8_t> encode(const ArchiveEntry&);
 
 std::optional<Hello> decode_hello(const std::vector<uint8_t>&);
 std::optional<HelloReply> decode_hello_reply(const std::vector<uint8_t>&);
@@ -119,6 +174,13 @@ std::optional<StoredEnvelope> decode_stored_envelope(const std::vector<uint8_t>&
 std::optional<IdList> decode_id_list(const std::vector<uint8_t>&);
 std::optional<HashOp> decode_hash_op(const std::vector<uint8_t>&);
 std::optional<InviteStatus> decode_invite_status(const std::vector<uint8_t>&);
+std::optional<ArchiveCreate> decode_archive_create(const std::vector<uint8_t>&);
+std::optional<ArchiveJoin> decode_archive_join(const std::vector<uint8_t>&);
+std::optional<ArchiveAuth> decode_archive_auth(const std::vector<uint8_t>&);
+std::optional<ArchiveAppend> decode_archive_append(const std::vector<uint8_t>&);
+std::optional<ArchiveHead> decode_archive_head(const std::vector<uint8_t>&);
+std::optional<ArchiveFetch> decode_archive_fetch(const std::vector<uint8_t>&);
+std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>&);
 
 // --- What gets signed. Each starts with its own label, and includes the relay ID, so a
 // signature made for one purpose or one relay can't be accepted for another. ---
@@ -134,5 +196,21 @@ std::vector<uint8_t> register_signing_input(const std::vector<uint8_t>& relay_id
 std::vector<uint8_t> auth_signing_input(const std::vector<uint8_t>& auth_challenge,
                                         const std::vector<uint8_t>& relay_id,
                                         const std::vector<uint8_t>& mailbox_id);
+std::vector<uint8_t> archive_join_signing_input(const std::vector<uint8_t>& relay_id,
+                                                const std::vector<uint8_t>& archive_id,
+                                                const std::vector<uint8_t>& public_key,
+                                                const std::vector<uint8_t>& join_token_hash);
+std::vector<uint8_t> archive_auth_signing_input(const std::vector<uint8_t>& auth_challenge,
+                                                const std::vector<uint8_t>& relay_id,
+                                                const std::vector<uint8_t>& archive_id,
+                                                const std::vector<uint8_t>& key_hash);
+
+// What gets hashed (with SHA-256, by the caller) to make an archive's chain. The genesis hash is the
+// head of an empty archive; entry n's hash is over the previous head, so each entry commits to
+// everything before it.
+std::vector<uint8_t> archive_genesis_input(const std::vector<uint8_t>& archive_id);
+std::vector<uint8_t> archive_entry_hash_input(const std::vector<uint8_t>& archive_id, uint64_t number,
+                                              const std::vector<uint8_t>& previous_hash,
+                                              const std::vector<uint8_t>& ciphertext);
 
 }  // namespace relay

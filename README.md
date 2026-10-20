@@ -191,6 +191,8 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
 | `--sweep-seconds N` | 60 | How often expired envelopes are removed |
 | `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
+| `--max-archives N` | 1000 | Chat archives the relay will hold |
+| `--archive-quota-mib N` | 512 | Encrypted bytes allowed per chat archive |
 | `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
 | `--member-invites-total N` | 10 | Most people one member may ever invite |
 | `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |

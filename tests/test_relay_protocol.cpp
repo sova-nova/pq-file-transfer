@@ -161,6 +161,92 @@ int main() {
         CHECK(!decode_invite_status(lying), "invite status: a declared count of four billion is rejected without allocating");
     }
 
+    std::cout << "Chat archives\n";
+    {
+        ArchiveCreate c{fill(1, ARCHIVE_ID_BYTES), {fill(2, HASH_BYTES), fill(3, HASH_BYTES), fill(4, HASH_BYTES)}};
+        auto e = encode(c);
+        auto back = decode_archive_create(e);
+        CHECK(back && back->archive_id == c.archive_id && back->join_token_hashes == c.join_token_hashes, "archive create round trip");
+        check_framing("archive create", e, decode_archive_create);
+        fuzz("archive create", e, decode_archive_create);
+        ArchiveCreate none{fill(1, ARCHIVE_ID_BYTES), {}};
+        ArchiveCreate many{fill(1, ARCHIVE_ID_BYTES), std::vector<Bytes>(MAX_ARCHIVE_MEMBERS + 1, fill(2, HASH_BYTES))};
+        ArchiveCreate full{fill(1, ARCHIVE_ID_BYTES), std::vector<Bytes>(MAX_ARCHIVE_MEMBERS, fill(2, HASH_BYTES))};
+        ArchiveCreate bad_id{fill(1, 5), {fill(2, HASH_BYTES)}};
+        ArchiveCreate bad_hash{fill(1, ARCHIVE_ID_BYTES), {fill(2, 7)}};
+        CHECK(!decode_archive_create(encode(none)) && !decode_archive_create(encode(many)) && decode_archive_create(encode(full)) &&
+                  !decode_archive_create(encode(bad_id)) && !decode_archive_create(encode(bad_hash)),
+              "archive create: 1 to 16 members, and every ID and hash the right size");
+        Bytes lying;
+        write_blob(lying, fill(1, ARCHIVE_ID_BYTES)); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_archive_create(lying), "archive create: a declared count of four billion is rejected without allocating");
+
+        ArchiveJoin j{fill(1, ARCHIVE_ID_BYTES), fill(2, JOIN_TOKEN_BYTES), fill(3, 100), fill(4, 100)};
+        auto je = encode(j);
+        auto jb = decode_archive_join(je);
+        CHECK(jb && jb->join_token == j.join_token && jb->public_key == j.public_key && jb->signature == j.signature, "archive join round trip");
+        check_framing("archive join", je, decode_archive_join);
+        fuzz("archive join", je, decode_archive_join);
+        CHECK(!decode_archive_join(encode(ArchiveJoin{fill(1, ARCHIVE_ID_BYTES), fill(2, 5), fill(3, 10), fill(4, 10)})), "archive join: a short token is rejected");
+
+        ArchiveAuth a{fill(1, ARCHIVE_ID_BYTES), fill(2, HASH_BYTES), fill(3, 100)};
+        auto ae = encode(a);
+        CHECK(decode_archive_auth(ae) && decode_archive_auth(ae)->key_hash == a.key_hash, "archive auth round trip");
+        check_framing("archive auth", ae, decode_archive_auth);
+        fuzz("archive auth", ae, decode_archive_auth);
+
+        ArchiveAppend ap{7, fill(2, HASH_BYTES), fill(9, 500)};
+        auto ape = encode(ap);
+        auto apb = decode_archive_append(ape);
+        CHECK(apb && apb->expected_number == 7 && apb->expected_hash == ap.expected_hash && apb->ciphertext == ap.ciphertext, "archive append round trip");
+        check_framing("archive append", ape, decode_archive_append);
+        fuzz("archive append", ape, decode_archive_append);
+        CHECK(!decode_archive_append(encode(ArchiveAppend{1, fill(2, HASH_BYTES), Bytes()})) && !decode_archive_append(encode(ArchiveAppend{1, fill(2, HASH_BYTES), fill(1, MAX_ARCHIVE_ENTRY_BYTES + 1)})) &&
+                  decode_archive_append(encode(ArchiveAppend{1, fill(2, HASH_BYTES), fill(1, MAX_ARCHIVE_ENTRY_BYTES)})) && !decode_archive_append(encode(ArchiveAppend{1, fill(2, 5), fill(1, 10)})),
+              "archive append: an entry is 1 byte to 64 KiB, and the head hash is a full hash");
+
+        ArchiveHead h{42, fill(5, HASH_BYTES)};
+        auto he = encode(h);
+        CHECK(decode_archive_head(he) && decode_archive_head(he)->number == 42, "archive head round trip");
+        check_framing("archive head", he, decode_archive_head);
+        fuzz("archive head", he, decode_archive_head);
+
+        ArchiveFetch f{3, 100};
+        auto fe = encode(f);
+        CHECK(decode_archive_fetch(fe) && decode_archive_fetch(fe)->from_number == 3 && decode_archive_fetch(fe)->limit == 100, "archive fetch round trip");
+        check_framing("archive fetch", fe, decode_archive_fetch);
+        fuzz("archive fetch", fe, decode_archive_fetch);
+        CHECK(!decode_archive_fetch(encode(ArchiveFetch{0, 10})) && !decode_archive_fetch(encode(ArchiveFetch{1, 0})) && !decode_archive_fetch(encode(ArchiveFetch{1, MAX_FETCH_ENTRIES + 1})) &&
+                  decode_archive_fetch(encode(ArchiveFetch{1, MAX_FETCH_ENTRIES})), "archive fetch: numbers start at 1 and a request is for 1 to 256 entries");
+
+        ArchiveEntry en{5, fill(6, HASH_BYTES), fill(7, 300)};
+        auto ee = encode(en);
+        CHECK(decode_archive_entry(ee) && decode_archive_entry(ee)->ciphertext == en.ciphertext && decode_archive_entry(ee)->number == 5, "archive entry round trip");
+        check_framing("archive entry", ee, decode_archive_entry);
+        fuzz("archive entry", ee, decode_archive_entry);
+    }
+
+    std::cout << "Archive signing and chain inputs\n";
+    {
+        Bytes relay_id = fill(1, 32), arch = fill(2, ARCHIVE_ID_BYTES), key = fill(3, 50), token_hash = fill(4, 32), challenge = fill(5, 32), key_hash = fill(6, 32);
+        auto join = archive_join_signing_input(relay_id, arch, key, token_hash);
+        CHECK(join != archive_join_signing_input(fill(9, 32), arch, key, token_hash) && join != archive_join_signing_input(relay_id, fill(9, ARCHIVE_ID_BYTES), key, token_hash) &&
+                  join != archive_join_signing_input(relay_id, arch, fill(9, 50), token_hash) && join != archive_join_signing_input(relay_id, arch, key, fill(9, 32)),
+              "a join signature covers the relay, the archive, the key and the token");
+        auto auth = archive_auth_signing_input(challenge, relay_id, arch, key_hash);
+        CHECK(auth != archive_auth_signing_input(fill(9, 32), relay_id, arch, key_hash) && auth != archive_auth_signing_input(challenge, fill(9, 32), arch, key_hash) &&
+                  auth != archive_auth_signing_input(challenge, relay_id, fill(9, ARCHIVE_ID_BYTES), key_hash) && auth != archive_auth_signing_input(challenge, relay_id, arch, fill(9, 32)),
+              "an archive sign-in covers the challenge, the relay, the archive and the key");
+        CHECK(archive_join_signing_input(relay_id, arch, key, token_hash) != auth && auth != auth_signing_input(challenge, relay_id, arch),
+              "each signed message has its own label, so one can't be passed off as another");
+        Bytes prev = fill(7, 32), ct = fill(8, 100);
+        auto entry = archive_entry_hash_input(arch, 5, prev, ct);
+        CHECK(entry != archive_entry_hash_input(fill(9, ARCHIVE_ID_BYTES), 5, prev, ct) && entry != archive_entry_hash_input(arch, 6, prev, ct) &&
+                  entry != archive_entry_hash_input(arch, 5, fill(9, 32), ct) && entry != archive_entry_hash_input(arch, 5, prev, fill(9, 100)),
+              "an entry's hash covers the archive, its number, the previous head and its ciphertext");
+        CHECK(archive_genesis_input(arch) != archive_genesis_input(fill(9, ARCHIVE_ID_BYTES)) && archive_genesis_input(arch) != entry, "each archive has its own genesis");
+    }
+
     std::cout << "Signing inputs\n";
     {
         Bytes nonce = fill(1, 32), relay_id = fill(2, 32), chal = fill(3, 32), mailbox = fill(4, 16), key = fill(5, 100), th = fill(6, 32);

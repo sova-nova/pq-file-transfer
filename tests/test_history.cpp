@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 5, "opening it upgrades it to the current version (5)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 6, "opening it upgrades it to the current version (6)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 5, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 6, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 5 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 6 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 5, "opening it upgrades it to the current version (5)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 6, "opening it upgrades it to the current version (6)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -585,6 +585,69 @@ int main() {
         auto of = [&](uint8_t n) { return h.conversation_of_outgoing(id(n)); };
         CHECK(of(1) && *of(1) == conv_a && of(2) && *of(2) == id(0x61), "an outgoing message is found in its direct or group conversation");
         CHECK(!of(3) && !of(99), "a message we received, or one that doesn't exist, is not");
+    }
+
+    std::cout << "Chat archives\n";
+    {
+        const Bytes conv = id(0x61), other = id(0x62);
+        const std::string key_marker = "ARCHIVE-KEY-MARKER-0123456789ABC", priv_marker = "CHAT-PRIVATE-MARKER-0123456789AB", token_marker = "JOIN-TOKEN-MARKER-0123456789ABC";
+        HistoryStore::Archive a;
+        a.conversation_id = conv;
+        a.relay_address = "10.0.0.248:9000";
+        a.relay_id = id(0x71, 32);
+        a.role = HistoryStore::ArchiveMember;
+        a.state = HistoryStore::ArchiveGranted;
+        a.archive_key = text(key_marker);
+        a.chat_public_key = id(0x33, 50);
+        a.chat_private_key = text(priv_marker);
+        a.join_token = text(token_marker);
+        a.created_at = 1000;
+        {
+            HistoryStore h(dir / "archive.db", key);
+            CHECK(!h.archive(conv) && h.archives().empty(), "there is no archive to begin with");
+            CHECK(h.add_archive(a), "an archive is stored");
+            auto got = h.archive(conv);
+            CHECK(got && got->relay_address == a.relay_address && got->relay_id == a.relay_id && got->role == HistoryStore::ArchiveMember && got->state == HistoryStore::ArchiveGranted &&
+                      got->archive_key == a.archive_key && got->chat_public_key == a.chat_public_key && got->chat_private_key == a.chat_private_key && got->join_token == a.join_token &&
+                      got->head_number == 0 && got->head_hash.empty() && got->created_at == 1000,
+                  "it is read back exactly: address, relay identity, keys, token and state");
+            HistoryStore::Archive changed = a;
+            changed.relay_address = "evil:1";
+            changed.archive_key = text("A DIFFERENT KEY..................");
+            CHECK(!h.add_archive(changed) && h.archive(conv)->relay_address == a.relay_address && h.archive(conv)->archive_key == a.archive_key, "a second archive for the same chat is refused and changes nothing (a replayed grant)");
+            HistoryStore::Archive second = a;
+            second.conversation_id = other;
+            second.created_at = 2000;
+            second.state = HistoryStore::ArchiveJoined;
+            h.add_archive(second);
+            auto all = h.archives();
+            CHECK(all.size() == 2 && all[0].conversation_id == conv && all[1].conversation_id == other, "archives are listed oldest first");
+            auto waiting = h.archives_in_state(HistoryStore::ArchiveGranted);
+            CHECK(waiting.size() == 1 && waiting[0].conversation_id == conv && h.archives_in_state(HistoryStore::ArchiveJoined).size() == 1 && h.archives_in_state(HistoryStore::ArchiveFailed).empty(), "those waiting to join can be found");
+
+            h.set_archive_joined(conv);
+            auto joined = h.archive(conv);
+            CHECK(joined && joined->state == HistoryStore::ArchiveJoined && joined->join_token.empty() && joined->archive_key == a.archive_key, "joining marks it joined and forgets the one-time token");
+            h.set_archive_failed(other, "registration closed");
+            auto failed = h.archive(other);
+            CHECK(failed && failed->state == HistoryStore::ArchiveFailed && failed->note == "registration closed" && failed->join_token.empty(), "a refusal marks it failed, with the reason");
+
+            h.set_archive_head(conv, 5, id(0x55, 32));
+            CHECK(h.archive(conv)->head_number == 5 && h.archive(conv)->head_hash == id(0x55, 32), "the checked head moves forward");
+            h.set_archive_head(conv, 3, id(0x33, 32));
+            h.set_archive_head(conv, 5, id(0x56, 32));
+            CHECK(h.archive(conv)->head_number == 5 && h.archive(conv)->head_hash == id(0x55, 32), "but never backwards, and not sideways");
+            h.set_archive_head(conv, 9, id(0x59, 32));
+            CHECK(h.archive(conv)->head_number == 9, "(and on again)");
+        }
+        CHECK(!file_contains(dir / "archive.db", key_marker) && !file_contains(fs::path((dir / "archive.db").string() + "-wal"), key_marker) &&
+                  !file_contains(dir / "archive.db", priv_marker) && !file_contains(fs::path((dir / "archive.db").string() + "-wal"), priv_marker) &&
+                  !file_contains(dir / "archive.db", token_marker) && !file_contains(fs::path((dir / "archive.db").string() + "-wal"), token_marker),
+              "the archive key, this device's private key and the join token are not readable on disk");
+        HistoryStore wrong(dir / "archive.db", CryptoEngine::random_bytes(32));
+        CHECK(!wrong.archive(conv) && wrong.archives().empty(), "with a different key none of it can be read (and nothing crashes)");
+        HistoryStore again(dir / "archive.db", key);
+        CHECK(again.archive(conv) && again.archive(conv)->head_number == 9 && again.archive(conv)->archive_key == a.archive_key && again.archives().size() == 2, "archives survive a restart");
     }
 
     std::cout << "People the user has verified\n";

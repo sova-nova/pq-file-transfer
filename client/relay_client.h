@@ -72,6 +72,23 @@ public:
     // Needs sign-in. Cancels one of your unused invites, named by the hash the list gave.
     bool cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error);
 
+    // --- Chat archives (see relay_protocol.h) ---
+    // Needs a mailbox sign-in. Makes an archive for as many members as there are join token hashes.
+    bool create_archive(const std::vector<uint8_t>& archive_id, const std::vector<std::vector<uint8_t>>& join_token_hashes, std::string& error);
+    // Needs no sign-in: the join token is the permission. `chat_key` is made for this chat only.
+    bool join_archive(const std::vector<uint8_t>& archive_id, const std::vector<uint8_t>& join_token,
+                      const CryptoEngine::SigKeyPair& chat_key, std::string& error);
+    // Proves membership of one archive for this connection (one attempt per connection, like a mailbox sign-in).
+    bool authenticate_archive(const std::vector<uint8_t>& archive_id, const CryptoEngine::SigKeyPair& chat_key, std::string& error);
+    enum class AppendOutcome { Appended, Stale, Failed };
+    // Adds an entry after the head the caller knows. Appended: `head` is the new head. Stale: someone else
+    // appended first and `head` is where the head is now; fetch what was missed and try again.
+    AppendOutcome append_entry(uint64_t expected_number, const std::vector<uint8_t>& expected_hash,
+                               const std::vector<uint8_t>& ciphertext, relay::ArchiveHead& head, std::string& error);
+    // Entries numbered from_number onwards (at most `limit`), in the order the relay sends them, and the head.
+    bool fetch_entries(uint64_t from_number, uint32_t limit, std::vector<relay::ArchiveEntry>& entries,
+                       relay::ArchiveHead& head, std::string& error);
+
     bool add_token(const std::vector<uint8_t>& token_hash, std::string& error);
     bool revoke_token(const std::vector<uint8_t>& token_hash, std::string& error);
     bool ping(std::string& error);
@@ -80,6 +97,8 @@ private:
     bool send_request(MessageType type, const std::vector<uint8_t>& payload, std::string& error);
     // Waits for `expected`, queueing envelopes that arrive first. False on ERROR_MSG or failure.
     bool read_reply(MessageType expected, std::vector<uint8_t>* payload, std::string& error);
+    // The same, when either of two replies is a valid answer; `which` says which came.
+    bool read_reply_either(MessageType first, MessageType second, MessageType* which, std::vector<uint8_t>* payload, std::string& error);
     void queue_envelope(const std::vector<uint8_t>& payload);
 
     socket_t sock_ = INVALID_SOCKET_VAL;

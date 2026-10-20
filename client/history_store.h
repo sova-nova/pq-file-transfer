@@ -155,6 +155,36 @@ public:
     // Forgets everyone not in `keep` (those no longer in any group or pending invitation).
     void delete_introduced_except(const std::set<std::string>& keep);
 
+    // --- Chat archives (M4) ---
+    // What this device holds about one chat's archive on the relay: where it is, the key its entries are
+    // encrypted under, this device's own signing key for it, and how far this device has checked the
+    // chain. The secrets are encrypted like everything else here.
+    enum ArchiveRole : int { ArchiveCreator = 1, ArchiveMember = 2 };
+    enum ArchiveState : int { ArchiveGranted = 0, ArchiveJoined = 1, ArchiveFailed = 2 };
+    struct Archive {
+        Bytes conversation_id;  // also the archive's ID on the relay
+        std::string relay_address;
+        Bytes relay_id;
+        int role = ArchiveMember;
+        int state = ArchiveGranted;
+        Bytes archive_key;
+        Bytes chat_public_key, chat_private_key;
+        Bytes join_token;         // until the member has joined; then empty
+        uint64_t head_number = 0;  // how far the chain has been checked here
+        Bytes head_hash;           // empty before any entry
+        int64_t created_at = 0;
+        std::string note;          // why joining failed
+    };
+    // False if the conversation already has an archive.
+    bool add_archive(const Archive& archive);
+    std::optional<Archive> archive(const Bytes& conversation_id);
+    std::vector<Archive> archives();  // oldest first
+    std::vector<Archive> archives_in_state(int state);  // e.g. ArchiveGranted: waiting to join
+    void set_archive_joined(const Bytes& conversation_id);  // and forgets the join token
+    void set_archive_failed(const Bytes& conversation_id, const std::string& note);
+    // Moves the checked head forward; never backwards.
+    void set_archive_head(const Bytes& conversation_id, uint64_t number, const Bytes& hash);
+
     // --- People the user has verified ---
     // "I compared this person's fingerprint with them." It is about the person, not about how we
     // know them, so it holds whether they are a contact or only known from a group, and carries over

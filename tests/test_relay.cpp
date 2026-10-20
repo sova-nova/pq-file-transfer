@@ -701,6 +701,139 @@ static void test_real_relay() {
         closed.stop();
     }
 
+    std::cout << "12c. Chat archives\n";
+    {
+        const int abase = 40000 + static_cast<int>(getpid() % 5000) * 2;
+        Server arch{abase, ROOT / "relay-archive", {"--archive-quota-mib", "1"}};
+        if (!arch.start()) { std::cout << "FAIL could not start the archive relay\n"; failures++; return; }
+        auto first_invite = arch.invite();
+        const Bytes apin = first_invite->relay_id;
+        auto owner = make_box(arch, apin);
+        if (!owner) { std::cout << "FAIL setup\n"; failures++; return; }
+
+        const Bytes id = CryptoEngine::random_bytes(relay::ARCHIVE_ID_BYTES);
+        const Bytes genesis = CryptoEngine::sha256(relay::archive_genesis_input(id));
+        Bytes tokens[3] = {CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)};
+        CryptoEngine::SigKeyPair keys[3] = {CryptoEngine::generate_sig_keypair(), CryptoEngine::generate_sig_keypair(), CryptoEngine::generate_sig_keypair()};
+        std::string e;
+
+        // A chain worked out here, independently of the relay.
+        auto chain_hash = [&](const Bytes& archive, uint64_t number, const Bytes& previous, const Bytes& ciphertext) {
+            return CryptoEngine::sha256(relay::archive_entry_hash_input(archive, number, previous, ciphertext));
+        };
+        auto open_archive = [&](RelayClient& c, const Bytes& archive, const CryptoEngine::SigKeyPair& key, std::string& err) {
+            return connect_to(c, arch, apin, err) && c.authenticate_archive(archive, key, err);
+        };
+
+        {
+            RelayClient anonymous;
+            std::string err;
+            connect_to(anonymous, arch, apin, err);
+            CHECK(!anonymous.create_archive(id, {CryptoEngine::sha256(tokens[0])}, err) && has(err, "Sign in"), "making an archive needs a mailbox sign-in: " + err);
+        }
+        {
+            RelayClient owner_conn;
+            std::string err;
+            std::vector<Bytes> hashes = {CryptoEngine::sha256(tokens[0]), CryptoEngine::sha256(tokens[1]), CryptoEngine::sha256(tokens[2])};
+            CHECK(sign_in(owner_conn, arch, apin, *owner, err) && owner_conn.create_archive(id, hashes, err), "a mailbox owner makes an archive for three members (" + err + ")");
+            CHECK(!owner_conn.create_archive(id, hashes, err) && has(err, "already exists"), "the same ID again is refused: " + err);
+        }
+
+        // Joining: anyone with a token, no mailbox.
+        auto join = [&](const Bytes& archive, const Bytes& token, const CryptoEngine::SigKeyPair& key, std::string& err) {
+            RelayClient c;
+            return connect_to(c, arch, apin, err) && c.join_archive(archive, token, key, err);
+        };
+        CHECK(!join(id, CryptoEngine::random_bytes(32), keys[0], e) && has(e, "Unknown archive or join token"), "a wrong token is refused: " + e);
+        CHECK(!join(CryptoEngine::random_bytes(16), tokens[0], keys[0], e) && has(e, "Unknown archive or join token"), "...with the same answer for an archive that doesn't exist, so IDs can't be probed");
+        CHECK(join(id, tokens[0], keys[0], e) && join(id, tokens[1], keys[1], e), "two members join with their tokens (no mailbox needed)");
+        CHECK(!join(id, tokens[0], keys[2], e), "a used token can't be used again");
+        CHECK(join(id, tokens[2], keys[2], e), "the third joins");
+        CHECK(!join(id, CryptoEngine::random_bytes(32), CryptoEngine::generate_sig_keypair(), e), "and nobody else can: registration is closed");
+
+        // Appending needs to be signed in to this archive.
+        {
+            RelayClient nobody;
+            relay::ArchiveHead head;
+            connect_to(nobody, arch, apin, e);
+            CHECK(nobody.append_entry(0, genesis, Bytes(100, 1), head, e) == RelayClient::AppendOutcome::Failed && has(e, "Sign in"), "an append without signing in to the archive is refused: " + e);
+        }
+        {
+            RelayClient outsider;
+            CHECK(!open_archive(outsider, id, CryptoEngine::generate_sig_keypair(), e) && has(e, "Authentication failed"), "a key that was never registered can't sign in: " + e);
+            RelayClient wrong_archive;
+            const Bytes other = CryptoEngine::random_bytes(16);
+            CHECK(!open_archive(wrong_archive, other, keys[0], e) && has(e, "Authentication failed"), "a registered key can't sign in to a different archive: " + e);
+        }
+
+        RelayClient alice, bob, carol;
+        CHECK(open_archive(alice, id, keys[0], e) && open_archive(bob, id, keys[1], e) && open_archive(carol, id, keys[2], e), "the three members sign in to the archive");
+
+        relay::ArchiveHead head;
+        const Bytes ct1(300, 0x11), ct2(300, 0x22), ct3(300, 0x33);
+        Bytes h1 = chain_hash(id, 1, genesis, ct1);
+        CHECK(alice.append_entry(0, genesis, ct1, head, e) == RelayClient::AppendOutcome::Appended && head.number == 1 && head.hash == h1,
+              "Alice appends the first entry, and the relay's head hash matches one worked out independently");
+        // Bob and Carol both build on entry 1 at the same moment.
+        Bytes h2 = chain_hash(id, 2, h1, ct2);
+        CHECK(bob.append_entry(1, h1, ct2, head, e) == RelayClient::AppendOutcome::Appended && head.number == 2 && head.hash == h2, "Bob appends on entry 1");
+        CHECK(carol.append_entry(1, h1, ct3, head, e) == RelayClient::AppendOutcome::Stale && head.number == 2 && head.hash == h2,
+              "Carol, who also built on entry 1, is told someone got in first and where the head is");
+        std::vector<relay::ArchiveEntry> got;
+        CHECK(carol.fetch_entries(2, 10, got, head, e) && got.size() == 1 && got[0].number == 2 && got[0].hash == h2 && got[0].ciphertext == ct2, "she fetches what she missed");
+        Bytes h3 = chain_hash(id, 3, h2, ct3);
+        CHECK(carol.append_entry(2, h2, ct3, head, e) == RelayClient::AppendOutcome::Appended && head.number == 3 && head.hash == h3, "and her retry on top of it is accepted");
+        CHECK(alice.append_entry(1, h1, Bytes(10, 9), head, e) == RelayClient::AppendOutcome::Stale && head.number == 3, "a stale append later is still refused, with the current head");
+
+        CHECK(alice.fetch_entries(1, 100, got, head, e) && got.size() == 3 && head.number == 3 && head.hash == h3, "any member can fetch the whole archive");
+        bool chain_ok = got.size() == 3;
+        Bytes previous = genesis;
+        for (size_t i = 0; i < got.size() && chain_ok; i++) {
+            chain_ok = got[i].number == i + 1 && got[i].hash == chain_hash(id, got[i].number, previous, got[i].ciphertext);
+            previous = got[i].hash;
+        }
+        CHECK(chain_ok && got[0].ciphertext == ct1 && got[1].ciphertext == ct2 && got[2].ciphertext == ct3, "every entry's hash checks out against the one before it");
+        CHECK(alice.fetch_entries(1, 2, got, head, e) && got.size() == 2 && head.number == 3, "a limit returns the first entries, and still reports the head");
+        CHECK(alice.fetch_entries(4, 10, got, head, e) && got.empty() && head.number == 3, "fetching past the end returns nothing");
+
+        // Limits.
+        RelayClient big;
+        CHECK(open_archive(big, id, keys[0], e), "(Alice signs in again)");
+        const Bytes full_size(relay::MAX_ARCHIVE_ENTRY_BYTES, 0x44);
+        Bytes previous_hash = h3;
+        uint64_t number = 3;
+        int stored = 0;
+        std::string last_err;
+        for (int i = 0; i < 20; i++) {
+            auto outcome = big.append_entry(number, previous_hash, full_size, head, last_err);
+            if (outcome != RelayClient::AppendOutcome::Appended) break;
+            previous_hash = head.hash;
+            number = head.number;
+            stored++;
+        }
+        CHECK(stored >= 14 && stored <= 16 && has(last_err, "full"), "entries of 64 KiB are accepted until the archive's 1 MiB quota is reached (" + std::to_string(stored) + "), then: " + last_err);
+
+        // A second archive: its members' keys mean nothing here, and ours nothing there.
+        const Bytes other_id = CryptoEngine::random_bytes(16);
+        const Bytes other_token = CryptoEngine::random_bytes(32);
+        auto other_key = CryptoEngine::generate_sig_keypair();
+        {
+            RelayClient c;
+            CHECK(sign_in(c, arch, apin, *owner, e) && c.create_archive(other_id, {CryptoEngine::sha256(other_token)}, e) && join(other_id, other_token, other_key, e), "(a second archive with one member)");
+        }
+        RelayClient cross;
+        CHECK(!open_archive(cross, other_id, keys[0], e), "a member of one archive can't sign in to another");
+
+        // Everything survives a restart, including the chain.
+        arch.stop();
+        CHECK(arch.start(), "(the relay restarts)");
+        RelayClient again;
+        CHECK(open_archive(again, id, keys[1], e) && again.fetch_entries(1, 5, got, head, e) && got.size() == 5 && got[0].hash == h1 && got[1].hash == h2 && got[2].hash == h3,
+              "after a restart the archive and its chain are intact");
+        CHECK(again.append_entry(static_cast<uint64_t>(stored) + 3, previous_hash, full_size, head, e) == RelayClient::AppendOutcome::Failed && has(e, "full"), "(and the quota still holds after the restart)");
+        arch.stop();
+    }
+
     std::cout << "12. Rate limiting\n";
     {
         Server limited{20101 + static_cast<int>(getpid() % 5000) * 2, ROOT / "relay-limited", {"--rate-limit", "5"}};

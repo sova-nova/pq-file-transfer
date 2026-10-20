@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "archive.h"
 #include "envelope.h"
 #include "history_store.h"
 #include "identity_bundle.h"
@@ -237,6 +239,38 @@ public:
     // Forgets the invitation without telling the creator.
     void decline_group_invite(const std::string& group_id);
 
+    // --- Chat archive (M4) ---
+    // A chat's archive is an encrypted, hash-chained copy on a relay (see the design document). One person
+    // makes it (a group's creator; in a one-to-one chat, whoever has the smaller fingerprint) and gives every
+    // other member a grant; each member registers their own key with the relay. These calls talk to the relay.
+    // The ID of the one-to-one conversation with a contact, in lowercase hex, for the calls below.
+    std::optional<std::string> direct_conversation_id(const std::string& contact_fp);
+    struct ArchiveStatus {
+        bool exists = false;
+        bool joined = false;   // this device has registered its key and can use the archive
+        bool failed = false;
+        std::string note;      // why joining failed
+        bool is_creator = false;
+        uint64_t entries = 0;  // how far this device has checked the chain
+        std::string relay;     // host:port of the relay that holds it
+    };
+    ArchiveStatus archive_status(const std::string& conversation_id);
+    // Makes the archive on this app's relay and queues each other member's grant (sent by pump()). Only
+    // the person whose job it is may; the others get theirs. False, with a reason, otherwise.
+    bool create_archive(const std::string& conversation_id, std::string& error);
+    struct ArchivedRecord {
+        uint64_t number = 0;
+        std::vector<uint8_t> record;  // a signed record; empty if the entry could not be read with the archive key
+    };
+    // Adds one signed record to the archive after the latest entry. It first catches up on whatever others
+    // added meanwhile (checked, decrypted, returned in `others`), and tries again if someone gets in first.
+    // `number` is the new entry's number.
+    bool archive_append(const std::string& conversation_id, const std::vector<uint8_t>& record, uint64_t& number, std::vector<ArchivedRecord>& others,
+                        std::string& error);
+    // Fetches what this device hasn't seen yet, checks the whole chain from where it left off, and decrypts
+    // it. Fails if the relay's copy doesn't add up (altered, reordered, or its end withheld).
+    bool archive_sync(const std::string& conversation_id, std::vector<ArchivedRecord>& fresh, std::string& error);
+
     // --- Running ---
     // Handles at most a few events: connects and signs in if needed, waits up to wait_ms for the
     // relay to say something, stores and acknowledges what arrives, sends whatever is queued.
@@ -284,6 +318,20 @@ private:
     void prune_introduced();
     std::vector<Bytes> latest_heads(const Bytes& conversation_id, const std::vector<std::string>& members);
     void note_token_use(const Bytes& token_hash, const std::string& sender_fp);
+
+    // Chat archive: who a conversation's members are and whose job the archive is.
+    struct ArchiveContext {
+        std::vector<std::string> others;  // everyone but this user, lowercase hex
+        Bytes recipients_hash;
+        std::string maker_fp;             // who makes the archive
+        bool direct = false;
+    };
+    std::optional<ArchiveContext> archive_context(const Bytes& conversation_id);
+    bool receive_archive_grant(const Peer& sender, const chat::SignedRecord& record);
+    void join_pending_archives();
+    bool open_archive_session(const HistoryStore::Archive& archive, RelayClient& client, std::string& error);
+    bool archive_catch_up(RelayClient& client, const HistoryStore::Archive& archive, archive::Head& head, std::vector<ArchivedRecord>& fresh, std::string& error);
+    std::map<std::string, std::chrono::steady_clock::time_point> archive_join_retry_;  // when to try joining again
     void enqueue_receipt(const std::string& contact_fp, chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed);
     void enqueue_receipt_in(const Bytes& conversation_id, const Bytes& recipients_hash, const std::string& to_fp,
                             chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed);

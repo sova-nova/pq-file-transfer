@@ -73,6 +73,19 @@ enum class MessageType : uint8_t {
     RELAY_INVITE_LIST_OK = 0x35, // relay → owner: relay::InviteStatus
     RELAY_INVITE_CANCEL = 0x36,  // mailbox owner → relay: cancel one of my unused invites (its hash)
     RELAY_INVITE_CANCEL_OK = 0x37,
+    // --- Chat archives (M4): an encrypted, hash-chained copy of a chat that its members can append to ---
+    ARCHIVE_CREATE     = 0x40,  // mailbox owner → relay: make an archive for N members (hashes of their join tokens)
+    ARCHIVE_CREATE_OK  = 0x41,
+    ARCHIVE_JOIN       = 0x42,  // a member with a join token → relay: register this chat's public key (no mailbox needed)
+    ARCHIVE_JOIN_OK    = 0x43,
+    ARCHIVE_AUTH       = 0x44,  // a registered member → relay: sign the challenge for one archive
+    ARCHIVE_AUTH_OK    = 0x45,
+    ARCHIVE_APPEND     = 0x46,  // member → relay: add an entry, naming the head it extends
+    ARCHIVE_APPEND_OK  = 0x47,  // relay → member: the new head
+    ARCHIVE_STALE      = 0x48,  // relay → member: someone else got in first; here is the current head
+    ARCHIVE_FETCH      = 0x49,  // member → relay: send entries from a number onwards
+    ARCHIVE_ENTRY      = 0x4A,  // relay → member: one entry
+    ARCHIVE_FETCH_END  = 0x4B,  // relay → member: that was all; here is the head
     RELAY_PING         = 0x30,
     RELAY_PONG         = 0x31,
     ERROR_MSG        = 0xFE,  // either direction: UTF-8 error text

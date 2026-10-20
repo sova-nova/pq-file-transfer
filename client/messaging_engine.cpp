@@ -579,6 +579,8 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             for (const auto& id : info->message_ids) changed |= history_->raise_delivery(conv_id, id, contact.fingerprint, status);
             return changed;
         }
+        case chat::RecordType::ArchiveGrant:
+            return receive_archive_grant(peer_from_contact(contact), sr);
         case chat::RecordType::Conversation:
         case chat::RecordType::Forward:
             return false;  // these belong to a group, not to a one-to-one conversation
@@ -1088,6 +1090,8 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 history_->enqueue(target, OUTBOX_KIND_RELAY, sr.record.message_id, {info->envelope}, now, now);
                 return true;
             }
+            case chat::RecordType::ArchiveGrant:
+                return receive_archive_grant(sender, sr);
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
         }
@@ -1096,8 +1100,9 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
 
     // A group we have been invited to but haven't answered: keep what its members send until we do.
     if (auto invite = history_->group_invite(conv_id)) {
-        // Tokens members send before we answer are kept too, so that writing to them works once we join.
-        if (sr.record.type != chat::RecordType::Text && sr.record.type != chat::RecordType::TokenGrant) return false;
+        // Tokens members send before we answer are kept too, so that writing to them works once we join. So is
+        // the grant to the chat's archive.
+        if (sr.record.type != chat::RecordType::Text && sr.record.type != chat::RecordType::TokenGrant && sr.record.type != chat::RecordType::ArchiveGrant) return false;
         auto creation = chat::parse_record(invite->records.front());
         auto info = creation ? chat::conversation_from_record(*creation) : std::nullopt;
         if (!info) return false;
@@ -1329,6 +1334,262 @@ bool MessagingEngine::build_grant_forwards(const HistoryStore::OutboxItem& job, 
     return true;
 }
 
+// --- Chat archive ---
+
+std::optional<std::string> MessagingEngine::direct_conversation_id(const std::string& contact_fp) {
+    auto their = hex_to_bytes(contact_fp);
+    if (!their || their->size() != 32) return std::nullopt;
+    return bytes_to_hex(chat::conversation_id_for(my_fp_, *their));
+}
+
+std::optional<MessagingEngine::ArchiveContext> MessagingEngine::archive_context(const Bytes& conversation_id) {
+    auto conv = history_->conversation(conversation_id);
+    if (!conv) return std::nullopt;
+    ArchiveContext ctx;
+    std::vector<Bytes> everyone = {my_fp_};
+    for (const auto& fp : conv->members) {
+        auto raw = hex_to_bytes(fp);
+        if (!raw) return std::nullopt;
+        everyone.push_back(std::move(*raw));
+        ctx.others.push_back(fp);
+    }
+    ctx.recipients_hash = chat::recipients_hash_for(everyone);
+    if (conv->kind == HistoryStore::Direct) {
+        if (ctx.others.size() != 1) return std::nullopt;
+        ctx.direct = true;
+        ctx.maker_fp = std::min(my_fp_hex_, ctx.others[0]);  // the smaller fingerprint makes it: no race, no tie-break
+    } else {
+        ctx.maker_fp = conv->creator_fp;
+    }
+    return ctx;
+}
+
+MessagingEngine::ArchiveStatus MessagingEngine::archive_status(const std::string& conversation_id) {
+    ArchiveStatus st;
+    auto id = hex_to_bytes(conversation_id);
+    auto a = id ? history_->archive(*id) : std::nullopt;
+    if (!a) return st;
+    st.exists = true;
+    st.joined = a->state == HistoryStore::ArchiveJoined;
+    st.failed = a->state == HistoryStore::ArchiveFailed;
+    st.note = a->note;
+    st.is_creator = a->role == HistoryStore::ArchiveCreator;
+    st.entries = a->head_number;
+    st.relay = a->relay_address;
+    return st;
+}
+
+bool MessagingEngine::create_archive(const std::string& conversation_id, std::string& error) {
+    auto id = hex_to_bytes(conversation_id);
+    auto ctx = id ? archive_context(*id) : std::nullopt;
+    if (!ctx) { error = "That conversation isn't in your list"; return false; }
+    if (ctx->maker_fp != my_fp_hex_) { error = "Someone else makes this chat's archive; you will be given access"; return false; }
+    if (history_->archive(*id)) { error = "This chat already has an archive"; return false; }
+    auto config = keys_.load_mailbox_config();
+    if (!config) { error = "Set up messaging first"; return false; }
+
+    // Everything the others will need, and the relay's record of who may join: it keeps only token hashes.
+    const Bytes archive_key = CryptoEngine::random_bytes(archive::KEY_BYTES);
+    const Bytes my_token = CryptoEngine::random_bytes(relay::JOIN_TOKEN_BYTES);
+    std::vector<Bytes> tokens;
+    std::vector<Bytes> hashes = {CryptoEngine::sha256(my_token)};
+    for (size_t i = 0; i < ctx->others.size(); i++) {
+        tokens.push_back(CryptoEngine::random_bytes(relay::JOIN_TOKEN_BYTES));
+        hashes.push_back(CryptoEngine::sha256(tokens.back()));
+    }
+    auto chat_key = CryptoEngine::generate_sig_keypair();
+
+    RelayClient client;
+    if (!connect_authenticated(client, error) || !client.create_archive(*id, hashes, error) || !client.join_archive(*id, my_token, chat_key, error)) return false;
+
+    const int64_t now = unix_now();
+    HistoryStore::Archive a;
+    a.conversation_id = *id;
+    a.relay_address = format_server_address(ServerAddress{config->host, config->port});
+    a.relay_id = config->relay_id;
+    a.role = HistoryStore::ArchiveCreator;
+    a.state = HistoryStore::ArchiveJoined;
+    a.archive_key = archive_key;
+    a.chat_public_key = chat_key.public_key;
+    a.chat_private_key = chat_key.private_key;
+    a.created_at = now;
+    if (!history_->add_archive(a)) { error = "This chat already has an archive"; return false; }
+
+    // Each other member gets their own token, sealed in their own envelope.
+    for (size_t i = 0; i < ctx->others.size(); i++) {
+        chat::ArchiveGrantInfo info;
+        info.relay_address = a.relay_address;
+        info.relay_id = a.relay_id;
+        info.archive_key = archive_key;
+        info.join_token = tokens[i];
+        chat::Record r;
+        r.conversation_id = *id;
+        r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+        r.sender = my_fp_;
+        r.recipients_hash = ctx->recipients_hash;
+        r.sent_at = static_cast<uint64_t>(now);
+        r.type = chat::RecordType::ArchiveGrant;
+        try {
+            r.payload = chat::archive_grant_payload(info);
+            history_->enqueue(ctx->others[i], OUTBOX_KIND_MESSAGE, r.message_id, {chat::sign_record(r, dsa_private_)}, now, now);
+        } catch (const std::exception& e) {
+            error = e.what();
+            return false;
+        }
+    }
+    bump();
+    return true;
+}
+
+// A grant from the person whose job it is to make the archive: remember it, and join when pump() next runs.
+bool MessagingEngine::receive_archive_grant(const Peer& sender, const chat::SignedRecord& sr) {
+    const Bytes& id = sr.record.conversation_id;
+    auto ctx = archive_context(id);
+    if (!ctx || ctx->maker_fp == my_fp_hex_ || sender.fp != ctx->maker_fp) return false;  // not ours to receive, or not from the right person
+    if (history_->archive(id)) return false;                                            // already have one: a replay changes nothing
+    auto info = chat::parse_archive_grant_payload(sr.record.payload);
+    if (!info || !parse_server_address(info->relay_address)) return false;
+    auto chat_key = CryptoEngine::generate_sig_keypair();
+    HistoryStore::Archive a;
+    a.conversation_id = id;
+    a.relay_address = info->relay_address;
+    a.relay_id = info->relay_id;
+    a.role = HistoryStore::ArchiveMember;
+    a.state = HistoryStore::ArchiveGranted;
+    a.archive_key = info->archive_key;
+    a.chat_public_key = chat_key.public_key;
+    a.chat_private_key = chat_key.private_key;
+    a.join_token = info->join_token;
+    a.created_at = unix_now();
+    return history_->add_archive(a);
+}
+
+// Registers this device's key for every archive it has been granted but not yet joined.
+void MessagingEngine::join_pending_archives() {
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& a : history_->archives_in_state(HistoryStore::ArchiveGranted)) {
+        const std::string key = bytes_to_hex(a.conversation_id);
+        auto due = archive_join_retry_.find(key);
+        if (due != archive_join_retry_.end() && now < due->second) continue;
+        auto address = parse_server_address(a.relay_address);
+        std::string err;
+        if (!address) {
+            history_->set_archive_failed(a.conversation_id, "The archive's relay address is not valid");
+            continue;
+        }
+        RelayClient client;
+        CryptoEngine::SigKeyPair chat_key{a.chat_public_key, a.chat_private_key};
+        if (client.connect(address->host, address->port, a.relay_id, options_.connect_timeout_seconds, err) &&
+            client.join_archive(a.conversation_id, a.join_token, chat_key, err)) {
+            history_->set_archive_joined(a.conversation_id);
+            archive_join_retry_.erase(key);
+            bump();
+            continue;
+        }
+        // A refusal is final; anything else (the relay is down) is tried again shortly.
+        if (err.find("closed") != std::string::npos || err.find("Unknown archive or join token") != std::string::npos ||
+            err.find("does not match") != std::string::npos) {
+            history_->set_archive_failed(a.conversation_id, err);
+            notify("Could not join a chat's archive: " + err);
+            bump();
+        } else {
+            archive_join_retry_[key] = now + std::chrono::seconds(std::max(1, options_.retry_base_seconds) * 3);
+        }
+    }
+}
+
+bool MessagingEngine::open_archive_session(const HistoryStore::Archive& a, RelayClient& client, std::string& error) {
+    if (a.state != HistoryStore::ArchiveJoined) {
+        error = a.state == HistoryStore::ArchiveFailed ? "This chat's archive could not be joined: " + a.note : "This device has not joined the chat's archive yet";
+        return false;
+    }
+    auto address = parse_server_address(a.relay_address);
+    if (!address) { error = "The archive's relay address is not valid"; return false; }
+    CryptoEngine::SigKeyPair chat_key{a.chat_public_key, a.chat_private_key};
+    return client.connect(address->host, address->port, a.relay_id, options_.connect_timeout_seconds, error) &&
+           client.authenticate_archive(a.conversation_id, chat_key, error);
+}
+
+// Takes entries from the relay until this device is level with it, checking the chain from where it left off.
+bool MessagingEngine::archive_catch_up(RelayClient& client, const HistoryStore::Archive& a, archive::Head& head,
+                                       std::vector<ArchivedRecord>& fresh, std::string& error) {
+    while (true) {
+        std::vector<relay::ArchiveEntry> entries;
+        relay::ArchiveHead relay_head;
+        if (!client.fetch_entries(head.number + 1, 100, entries, relay_head, error)) return false;
+        auto next = archive::verify_chain(a.conversation_id, head, entries);
+        if (!next) {
+            error = "The relay's copy of this chat doesn't match what it held before: it may have been altered";
+            return false;
+        }
+        for (const auto& e : entries) {
+            ArchivedRecord r;
+            r.number = e.number;
+            if (auto record = archive::open_entry(a.archive_key, a.conversation_id, e.number, e.ciphertext)) r.record = std::move(*record);
+            fresh.push_back(std::move(r));
+        }
+        head = *next;
+        history_->set_archive_head(a.conversation_id, head.number, head.hash);
+        if (entries.empty() || head.number >= relay_head.number) {
+            // What the relay says its end is must be the end of the entries it actually gave us.
+            if (relay_head.number != head.number || relay_head.hash != head.hash) {
+                error = "The relay reports a different end to this chat than the entries it sent add up to";
+                return false;
+            }
+            return true;
+        }
+    }
+}
+
+bool MessagingEngine::archive_sync(const std::string& conversation_id, std::vector<ArchivedRecord>& fresh, std::string& error) {
+    fresh.clear();
+    auto id = hex_to_bytes(conversation_id);
+    auto a = id ? history_->archive(*id) : std::nullopt;
+    if (!a) { error = "This chat has no archive"; return false; }
+    RelayClient client;
+    if (!open_archive_session(*a, client, error)) return false;
+    archive::Head head{a->head_number, a->head_hash.empty() ? archive::genesis_hash(a->conversation_id) : a->head_hash};
+    return archive_catch_up(client, *a, head, fresh, error);
+}
+
+bool MessagingEngine::archive_append(const std::string& conversation_id, const std::vector<uint8_t>& record, uint64_t& number,
+                                     std::vector<ArchivedRecord>& others, std::string& error) {
+    others.clear();
+    auto id = hex_to_bytes(conversation_id);
+    auto a = id ? history_->archive(*id) : std::nullopt;
+    if (!a) { error = "This chat has no archive"; return false; }
+    RelayClient client;
+    if (!open_archive_session(*a, client, error)) return false;
+    archive::Head head{a->head_number, a->head_hash.empty() ? archive::genesis_hash(a->conversation_id) : a->head_hash};
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (!archive_catch_up(client, *a, head, others, error)) return false;
+        Bytes blob;
+        try {
+            blob = archive::seal_entry(a->archive_key, a->conversation_id, head.number + 1, record);
+        } catch (const std::exception& e) {
+            error = e.what();
+            return false;
+        }
+        relay::ArchiveHead new_head;
+        switch (client.append_entry(head.number, head.hash, blob, new_head, error)) {
+            case RelayClient::AppendOutcome::Appended: {
+                // The relay's answer must be the entry we made, on the head we named.
+                if (new_head.number != head.number + 1 || new_head.hash != archive::entry_hash(a->conversation_id, head.number + 1, head.hash, blob)) {
+                    error = "The relay's answer doesn't match the entry it stored";
+                    return false;
+                }
+                number = new_head.number;
+                history_->set_archive_head(a->conversation_id, new_head.number, new_head.hash);
+                return true;
+            }
+            case RelayClient::AppendOutcome::Stale: break;  // someone got in first: catch up on theirs and go again
+            case RelayClient::AppendOutcome::Failed: return false;
+        }
+    }
+    error = "This chat's archive is too busy right now; try again";
+    return false;
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
@@ -1528,5 +1789,8 @@ void MessagingEngine::pump(int wait_ms) {
         last_ping_ = std::chrono::steady_clock::now();
         if (!owner_.ping(err)) set_status("Disconnected: " + err);
     }
-    if (owner_.connected()) flush_outbox();
+    if (owner_.connected()) {
+        flush_outbox();
+        join_pending_archives();
+    }
 }

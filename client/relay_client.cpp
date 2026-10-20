@@ -125,7 +125,7 @@ void RelayClient::queue_envelope(const std::vector<uint8_t>& payload) {
     queue_.push_back(std::move(e));
 }
 
-bool RelayClient::read_reply(MessageType expected, std::vector<uint8_t>* payload, std::string& error) {
+bool RelayClient::read_reply_either(MessageType first, MessageType second, MessageType* which, std::vector<uint8_t>* payload, std::string& error) {
     while (true) {
         auto msg = recv_message(sock_, relay::MAX_MESSAGE_PAYLOAD);
         if (!msg) {
@@ -133,7 +133,8 @@ bool RelayClient::read_reply(MessageType expected, std::vector<uint8_t>* payload
             close();
             return false;
         }
-        if (msg->type == expected) {
+        if (msg->type == first || msg->type == second) {
+            if (which) *which = msg->type;
             if (payload) *payload = std::move(msg->payload);
             return true;
         }
@@ -158,6 +159,9 @@ bool RelayClient::read_reply(MessageType expected, std::vector<uint8_t>* payload
                 return false;
         }
     }
+}
+bool RelayClient::read_reply(MessageType expected, std::vector<uint8_t>* payload, std::string& error) {
+    return read_reply_either(expected, expected, nullptr, payload, error);
 }
 
 bool RelayClient::register_mailbox(const std::vector<uint8_t>& invite, const std::vector<uint8_t>& mailbox_id,
@@ -313,6 +317,98 @@ bool RelayClient::list_invites(relay::InviteStatus& status, std::string& error) 
 bool RelayClient::cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error) {
     return send_request(MessageType::RELAY_INVITE_CANCEL, relay::encode(relay::HashOp{invite_hash}), error) &&
            read_reply(MessageType::RELAY_INVITE_CANCEL_OK, nullptr, error);
+}
+
+bool RelayClient::create_archive(const std::vector<uint8_t>& archive_id, const std::vector<std::vector<uint8_t>>& join_token_hashes, std::string& error) {
+    return send_request(MessageType::ARCHIVE_CREATE, relay::encode(relay::ArchiveCreate{archive_id, join_token_hashes}), error) &&
+           read_reply(MessageType::ARCHIVE_CREATE_OK, nullptr, error);
+}
+
+bool RelayClient::join_archive(const std::vector<uint8_t>& archive_id, const std::vector<uint8_t>& join_token,
+                               const CryptoEngine::SigKeyPair& chat_key, std::string& error) {
+    relay::ArchiveJoin j;
+    j.archive_id = archive_id;
+    j.join_token = join_token;
+    j.public_key = chat_key.public_key;
+    try {
+        j.signature = CryptoEngine::sign(relay::archive_join_signing_input(relay_id_, archive_id, chat_key.public_key, CryptoEngine::sha256(join_token)),
+                                         chat_key.private_key);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    return send_request(MessageType::ARCHIVE_JOIN, relay::encode(j), error) && read_reply(MessageType::ARCHIVE_JOIN_OK, nullptr, error);
+}
+
+bool RelayClient::authenticate_archive(const std::vector<uint8_t>& archive_id, const CryptoEngine::SigKeyPair& chat_key, std::string& error) {
+    relay::ArchiveAuth a;
+    a.archive_id = archive_id;
+    a.key_hash = CryptoEngine::sha256(chat_key.public_key);
+    try {
+        a.signature = CryptoEngine::sign(relay::archive_auth_signing_input(challenge_, relay_id_, archive_id, a.key_hash), chat_key.private_key);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    bool ok = send_request(MessageType::ARCHIVE_AUTH, relay::encode(a), error) && read_reply(MessageType::ARCHIVE_AUTH_OK, nullptr, error);
+    if (!ok) close();  // the relay hangs up after a failed sign-in
+    return ok;
+}
+
+RelayClient::AppendOutcome RelayClient::append_entry(uint64_t expected_number, const std::vector<uint8_t>& expected_hash,
+                                                     const std::vector<uint8_t>& ciphertext, relay::ArchiveHead& head, std::string& error) {
+    if (!send_request(MessageType::ARCHIVE_APPEND, relay::encode(relay::ArchiveAppend{expected_number, expected_hash, ciphertext}), error))
+        return AppendOutcome::Failed;
+    MessageType which = MessageType::ERROR_MSG;
+    std::vector<uint8_t> payload;
+    if (!read_reply_either(MessageType::ARCHIVE_APPEND_OK, MessageType::ARCHIVE_STALE, &which, &payload, error)) return AppendOutcome::Failed;
+    auto decoded = relay::decode_archive_head(payload);
+    if (!decoded) {
+        error = "The relay sent an invalid answer";
+        close();
+        return AppendOutcome::Failed;
+    }
+    head = std::move(*decoded);
+    return which == MessageType::ARCHIVE_APPEND_OK ? AppendOutcome::Appended : AppendOutcome::Stale;
+}
+
+bool RelayClient::fetch_entries(uint64_t from_number, uint32_t limit, std::vector<relay::ArchiveEntry>& entries,
+                                relay::ArchiveHead& head, std::string& error) {
+    entries.clear();
+    if (!send_request(MessageType::ARCHIVE_FETCH, relay::encode(relay::ArchiveFetch{from_number, limit}), error)) return false;
+    while (true) {
+        auto msg = recv_message(sock_, relay::MAX_MESSAGE_PAYLOAD);
+        if (!msg) {
+            error = "Lost the connection to the relay";
+            close();
+            return false;
+        }
+        if (msg->type == MessageType::ARCHIVE_ENTRY) {
+            auto e = relay::decode_archive_entry(msg->payload);
+            if (!e || entries.size() >= limit) {
+                error = "The relay sent an invalid answer";
+                close();
+                return false;
+            }
+            entries.push_back(std::move(*e));
+        } else if (msg->type == MessageType::ARCHIVE_FETCH_END) {
+            auto h = relay::decode_archive_head(msg->payload);
+            if (!h) {
+                error = "The relay sent an invalid answer";
+                close();
+                return false;
+            }
+            head = std::move(*h);
+            return true;
+        } else if (msg->type == MessageType::ERROR_MSG) {
+            error = "Relay: " + clean(msg->payload);
+            return false;
+        } else {
+            error = "The relay sent something unexpected";
+            close();
+            return false;
+        }
+    }
 }
 
 bool RelayClient::add_token(const std::vector<uint8_t>& token_hash, std::string& error) {

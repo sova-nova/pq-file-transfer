@@ -46,6 +46,7 @@ bool well_formed(const Record& r) {
         case RecordType::Conversation: return r.payload.size() <= MAX_CONVERSATION_PAYLOAD && r.own_prev.empty() && r.seen.empty();
         // Control records, outside the transcript like receipts.
         case RecordType::Forward: return r.payload.size() <= 4 + HASH_BYTES + 4 + MAX_FORWARD_ENVELOPE_BYTES && r.own_prev.empty() && r.seen.empty();
+        case RecordType::ArchiveGrant: return r.payload.size() <= MAX_ARCHIVE_GRANT_PAYLOAD && r.own_prev.empty() && r.seen.empty();
     }
     return false;
 }
@@ -180,7 +181,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
         }
     }
     if (b != bd.size()) return std::nullopt;
-    const uint32_t newest_type = *version == 1 ? 3 : 5;  // Conversation and Forward records came with version 2
+    const uint32_t newest_type = *version == 1 ? 3 : 6;  // Conversation, Forward and ArchiveGrant records came with version 2
     if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
@@ -275,6 +276,45 @@ std::optional<ForwardInfo> parse_forward_payload(const Bytes& payload) {
     if (!target || !envelope || off != payload.size()) return std::nullopt;
     if (target->size() != HASH_BYTES || envelope->empty()) return std::nullopt;
     return ForwardInfo{std::move(*target), std::move(*envelope)};
+}
+
+namespace {
+bool visible_ascii(const std::string& s) {
+    for (unsigned char c : s)
+        if (c < 0x21 || c > 0x7E) return false;
+    return true;
+}
+}  // namespace
+
+Bytes archive_grant_payload(const ArchiveGrantInfo& info) {
+    if (info.relay_address.empty() || info.relay_address.size() > MAX_RELAY_ADDRESS_BYTES || !visible_ascii(info.relay_address) ||
+        info.relay_id.size() != HASH_BYTES || info.archive_key.size() != 32 || info.join_token.size() != 32)
+        throw std::runtime_error("The archive grant is not valid");
+    Bytes p;
+    write_blob(p, Bytes(info.relay_address.begin(), info.relay_address.end()));
+    write_blob(p, info.relay_id);
+    write_blob(p, info.archive_key);
+    write_blob(p, info.join_token);
+    return p;
+}
+
+std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload) {
+    if (payload.size() > MAX_ARCHIVE_GRANT_PAYLOAD) return std::nullopt;
+    size_t off = 0;
+    auto address = read_blob(payload.data(), payload.size(), off, MAX_RELAY_ADDRESS_BYTES);
+    auto relay_id = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    auto key = read_blob(payload.data(), payload.size(), off, 32);
+    auto token = read_blob(payload.data(), payload.size(), off, 32);
+    if (!address || !relay_id || !key || !token || off != payload.size()) return std::nullopt;
+    ArchiveGrantInfo info;
+    info.relay_address.assign(address->begin(), address->end());
+    info.relay_id = std::move(*relay_id);
+    info.archive_key = std::move(*key);
+    info.join_token = std::move(*token);
+    if (info.relay_address.empty() || !visible_ascii(info.relay_address) || info.relay_id.size() != HASH_BYTES || info.archive_key.size() != 32 ||
+        info.join_token.size() != 32)
+        return std::nullopt;
+    return info;
 }
 
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids) {

@@ -84,6 +84,7 @@ add_library(pq_core STATIC
     client/identity_bundle.cpp
     client/relay_client.cpp
     client/message_record.cpp
+    client/archive.cpp
     client/envelope.cpp
     client/history_store.cpp
     client/messaging_engine.cpp

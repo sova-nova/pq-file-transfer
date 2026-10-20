@@ -5,6 +5,8 @@
 #include "sqlite_helpers.h"
 
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <stdexcept>
 
 using sqlitex::exec;
@@ -48,7 +50,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 5;
+constexpr int64_t SCHEMA_VERSION = 6;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -111,7 +113,14 @@ const char SCHEMA_REST[] =
     "  PRIMARY KEY(conv_id, fp));"
     // Added in version 5:
     "CREATE TABLE IF NOT EXISTS verified_people("
-    "  fp TEXT PRIMARY KEY, verified_at INTEGER NOT NULL);";
+    "  fp TEXT PRIMARY KEY, verified_at INTEGER NOT NULL);"
+    // Added in version 6:
+    "CREATE TABLE IF NOT EXISTS archives("
+    "  conv_id BLOB PRIMARY KEY, relay_address TEXT NOT NULL, relay_id BLOB NOT NULL,"
+    "  role INTEGER NOT NULL, state INTEGER NOT NULL,"
+    "  archive_key BLOB NOT NULL, chat_public BLOB NOT NULL, chat_private BLOB NOT NULL, join_token BLOB NOT NULL,"
+    "  head_number INTEGER NOT NULL DEFAULT 0, head_hash BLOB NOT NULL DEFAULT x'',"
+    "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '');";
 
 const char CONVERSATION_COLUMNS[] =
     "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
@@ -156,17 +165,17 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
     if (has_conversations && version < 2) {
         migrate_v1_to_v2(db_path);  // rewrites a table, so it keeps a copy of the old file first
     } else if (has_conversations && version < SCHEMA_VERSION) {
-        // Versions 3 to 5 only add tables (group invitations, introduced members, member tokens,
-        // verified people): nothing to rewrite, so nothing to back up.
+        // Versions 3 to 6 only add tables (group invitations, introduced members, member tokens,
+        // verified people, chat archives): nothing to rewrite, so nothing to back up.
         Transaction tx(db_);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=5");
+        exec(db_, "PRAGMA user_version=6");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=5");
+        exec(db_, "PRAGMA user_version=6");
         tx.commit();
     }
     } catch (...) {
@@ -207,7 +216,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=5");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=6");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -650,6 +659,97 @@ void HistoryStore::delete_introduced_except(const std::set<std::string>& keep) {
         }
     }
     for (const auto& fp : doomed) Stmt(db_, "DELETE FROM introduced_members WHERE fp = ?").text(1, fp).step();
+}
+
+// --- Chat archives ---
+
+static Bytes archive_secret_aad(const Bytes& conversation_id, const char* what) {
+    return aad_of("pq-suite v3 history archive secret", conversation_id, Bytes(what, what + std::strlen(what)));
+}
+
+bool HistoryStore::add_archive(const Archive& a) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR IGNORE INTO archives(conv_id, relay_address, relay_id, role, state, archive_key, chat_public, chat_private, join_token, "
+              "head_number, head_hash, created_at, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .blob(1, a.conversation_id).text(2, a.relay_address).blob(3, a.relay_id).i64(4, a.role).i64(5, a.state)
+        .blob(6, seal(a.archive_key, archive_secret_aad(a.conversation_id, "key")))
+        .blob(7, a.chat_public_key)
+        .blob(8, seal(a.chat_private_key, archive_secret_aad(a.conversation_id, "chat")))
+        .blob(9, a.join_token.empty() ? Bytes() : seal(a.join_token, archive_secret_aad(a.conversation_id, "token")))
+        .i64(10, static_cast<int64_t>(a.head_number)).blob(11, a.head_hash).i64(12, a.created_at).text(13, a.note).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+static std::optional<HistoryStore::Archive> read_archive(Stmt& s, const std::function<std::optional<Bytes>(const Bytes&, const Bytes&)>& unseal_fn) {
+    HistoryStore::Archive a;
+    a.conversation_id = s.column_blob(0);
+    a.relay_address = s.column_text(1);
+    a.relay_id = s.column_blob(2);
+    a.role = static_cast<int>(s.column_i64(3));
+    a.state = static_cast<int>(s.column_i64(4));
+    auto key = unseal_fn(s.column_blob(5), archive_secret_aad(a.conversation_id, "key"));
+    auto priv = unseal_fn(s.column_blob(7), archive_secret_aad(a.conversation_id, "chat"));
+    if (!key || !priv) return std::nullopt;  // damaged, or sealed under another key
+    a.archive_key = std::move(*key);
+    a.chat_public_key = s.column_blob(6);
+    a.chat_private_key = std::move(*priv);
+    Bytes sealed_token = s.column_blob(8);
+    if (!sealed_token.empty()) {
+        auto token = unseal_fn(sealed_token, archive_secret_aad(a.conversation_id, "token"));
+        if (!token) return std::nullopt;
+        a.join_token = std::move(*token);
+    }
+    a.head_number = static_cast<uint64_t>(s.column_i64(9));
+    a.head_hash = s.column_blob(10);
+    a.created_at = s.column_i64(11);
+    a.note = s.column_text(12);
+    return a;
+}
+
+static const char ARCHIVE_COLUMNS[] =
+    "conv_id, relay_address, relay_id, role, state, archive_key, chat_public, chat_private, join_token, head_number, head_hash, created_at, note";
+
+std::optional<HistoryStore::Archive> HistoryStore::archive(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + ARCHIVE_COLUMNS + " FROM archives WHERE conv_id = ?").c_str());
+    s.blob(1, conversation_id);
+    if (!s.step()) return std::nullopt;
+    return read_archive(s, [this](const Bytes& c, const Bytes& a) { return unseal(c, a); });
+}
+
+std::vector<HistoryStore::Archive> HistoryStore::archives() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + ARCHIVE_COLUMNS + " FROM archives ORDER BY created_at, rowid").c_str());
+    std::vector<Archive> out;
+    while (s.step())
+        if (auto a = read_archive(s, [this](const Bytes& c, const Bytes& aad) { return unseal(c, aad); })) out.push_back(std::move(*a));
+    return out;
+}
+
+std::vector<HistoryStore::Archive> HistoryStore::archives_in_state(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + ARCHIVE_COLUMNS + " FROM archives WHERE state = ? ORDER BY created_at, rowid").c_str());
+    s.i64(1, state);
+    std::vector<Archive> out;
+    while (s.step())
+        if (auto a = read_archive(s, [this](const Bytes& c, const Bytes& aad) { return unseal(c, aad); })) out.push_back(std::move(*a));
+    return out;
+}
+
+void HistoryStore::set_archive_joined(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET state = 1, join_token = x'', note = '' WHERE conv_id = ?").blob(1, conversation_id).step();
+}
+
+void HistoryStore::set_archive_failed(const Bytes& conversation_id, const std::string& note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET state = 2, join_token = x'', note = ? WHERE conv_id = ?").text(1, note).blob(2, conversation_id).step();
+}
+
+void HistoryStore::set_archive_head(const Bytes& conversation_id, uint64_t number, const Bytes& hash) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE archives SET head_number = ?, head_hash = ? WHERE conv_id = ? AND head_number < ?")
+        .i64(1, static_cast<int64_t>(number)).blob(2, hash).blob(3, conversation_id).i64(4, static_cast<int64_t>(number)).step();
 }
 
 // --- Verified people ---

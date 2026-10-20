@@ -28,6 +28,10 @@ struct RelayLimits {
     // this off, leaving only the operator's invites), and how many people it may ever invite.
     size_t member_invites_outstanding = 3;
     size_t member_invites_total = 10;
+    // Chat archives (M4).
+    size_t max_archives = 1000;                          // on the whole relay
+    size_t archive_quota_bytes = 512ull * 1024 * 1024;   // of ciphertext, per archive
+    int64_t archive_join_window_seconds = 30ll * 24 * 3600;  // members must register their keys within this
     int idle_timeout_seconds = 180;                    // clients ping every minute or so
     int poll_millis = 250;                             // how often a connected owner is checked for news
 };

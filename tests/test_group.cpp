@@ -862,6 +862,107 @@ int main(int argc, char** argv) {
         users.erase("late");
     }
 
+
+    std::cout << "16. Chat archives between real people\n";
+    {
+        std::string err;
+        const std::string relay_address = "127.0.0.1:" + std::to_string(PORT);
+        auto text_record = [&](User& signer, const Bytes& conv, const std::vector<Bytes>& everyone, const std::string& body) {
+            chat::Record r = base_record(conv, chat::recipients_hash_for(everyone), chat::RecordType::Text);
+            r.payload.assign(body.begin(), body.end());
+            return sign_as(signer, r);
+        };
+        auto grant_inner = [&](User& signer, const Bytes& conv, const std::vector<Bytes>& everyone, const Bytes& key, const Bytes& token) {
+            chat::ArchiveGrantInfo info;
+            info.relay_address = relay_address;
+            info.relay_id = RELAY_ID;
+            info.archive_key = key;
+            info.join_token = token;
+            chat::Record r = base_record(conv, chat::recipients_hash_for(everyone), chat::RecordType::ArchiveGrant);
+            r.payload = chat::archive_grant_payload(info);
+            chat::Inner in;
+            in.records = {sign_as(signer, r)};
+            return in;
+        };
+
+        // --- A one-to-one chat: the person with the smaller fingerprint makes the archive ---
+        User& maker = alice.fp < bob.fp ? alice : bob;
+        User& other = alice.fp < bob.fp ? bob : alice;
+        const std::string direct = *maker.engine->direct_conversation_id(other.fp);
+        const Bytes direct_id = *hex_to_bytes(direct);
+        CHECK(direct == *other.engine->direct_conversation_id(maker.fp), "both sides agree on the chat's ID");
+        CHECK(!maker.engine->archive_status(direct).exists, "there is no archive yet");
+        CHECK(!other.engine->create_archive(direct, err) && has(err, "Someone else"), "the person with the larger fingerprint can't make it: " + err);
+        CHECK(!maker.engine->create_archive(std::string(32, 'a'), err) && has(err, "isn't in your list"), "nor can one be made for a chat that doesn't exist: " + err);
+        const size_t other_messages_before = other.engine->messages(maker.fp).size();
+        CHECK(maker.engine->create_archive(direct, err), "the smaller fingerprint makes it (" + err + ")");
+        auto made = maker.engine->archive_status(direct);
+        CHECK(made.exists && made.joined && made.is_creator && made.entries == 0 && made.relay == relay_address, "it exists on their relay, and they are in it");
+        CHECK(!maker.engine->create_archive(direct, err) && has(err, "already has"), "making it twice is refused: " + err);
+        CHECK(wait_for([&] { return other.engine->archive_status(direct).joined; }, 30000), "the other person receives their grant and joins");
+        auto got_grant = other.engine->archive_status(direct);
+        CHECK(got_grant.exists && !got_grant.is_creator && !got_grant.failed && got_grant.relay == relay_address, "as a member, with the relay named in the grant");
+        CHECK(other.engine->messages(maker.fp).size() == other_messages_before, "the grant is not a message: nothing new appears in the chat");
+
+        const std::vector<Bytes> pair = {a, b};
+        Bytes r1 = text_record(maker, direct_id, pair, "first, in the archive");
+        uint64_t n = 0;
+        std::vector<MessagingEngine::ArchivedRecord> others;
+        CHECK(maker.engine->archive_append(direct, r1, n, others, err) && n == 1 && others.empty(), "the maker appends the first entry (" + err + ")");
+        std::vector<MessagingEngine::ArchivedRecord> fresh;
+        CHECK(other.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 1 && fresh[0].record == r1, "the other person fetches it: checked, decrypted, and the same record");
+        CHECK(other.engine->archive_status(direct).entries == 1, "and their device remembers how far it has checked");
+        Bytes r2 = text_record(other, direct_id, pair, "second, from the other person");
+        CHECK(other.engine->archive_append(direct, r2, n, others, err) && n == 2 && others.empty(), "they append the second");
+        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 2 && fresh[0].record == r2, "the maker sees it");
+
+        // Both write without looking first: the later one finds out, catches up, and goes on top.
+        Bytes r3 = text_record(maker, direct_id, pair, "third, from the maker");
+        Bytes r4 = text_record(other, direct_id, pair, "fourth, written without seeing the third");
+        CHECK(maker.engine->archive_append(direct, r3, n, others, err) && n == 3, "the maker appends the third");
+        CHECK(other.engine->archive_append(direct, r4, n, others, err) && n == 4 && others.size() == 1 && others[0].number == 3 && others[0].record == r3,
+              "the other person's append was behind: it caught up on the third, handed it over, and landed on top as the fourth");
+        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.size() == 1 && fresh[0].number == 4 && fresh[0].record == r4, "and the maker's view is one chain");
+        CHECK(maker.engine->archive_sync(direct, fresh, err) && fresh.empty() && other.engine->archive_sync(direct, fresh, err) && fresh.empty(), "when nothing is new, nothing comes back");
+        CHECK(maker.engine->archive_status(direct).entries == 4 && other.engine->archive_status(direct).entries == 4, "both devices agree the chat has 4 entries");
+        CHECK(!maker.engine->archive_append(std::string(32, 'b'), r1, n, others, err) && has(err, "no archive"), "appending to a chat with no archive is refused: " + err);
+        CHECK(!maker.engine->archive_append(direct, Bytes(), n, others, err), "an empty record is refused");
+
+        // --- A group: its creator makes the archive for all three members ---
+        const std::string group = hiking;
+        const Bytes group_id = *hex_to_bytes(group);
+        const std::vector<Bytes> trio = {a, b, c};
+        // A member who is not the creator tries to hand Bob an archive of their own.
+        send_envelope(bob, token_for(carol, bob), grant_inner(carol, group_id, trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
+        run_for(1500);
+        CHECK(!bob.engine->archive_status(group).exists, "a grant from a member who didn't make the group is ignored");
+        send_envelope(bob, token_for(alice, bob), grant_inner(alice, *hex_to_bytes(std::string(32, 'c')), trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
+        run_for(1000);
+        CHECK(!bob.engine->archive_status(std::string(32, 'c')).exists, "a grant for a chat Bob has never heard of is ignored");
+
+        CHECK(!bob.engine->create_archive(group, err) && has(err, "Someone else"), "a member who didn't make the group can't make its archive: " + err);
+        CHECK(alice.engine->create_archive(group, err), "the group's creator makes it (" + err + ")");
+        CHECK(wait_for([&] { return bob.engine->archive_status(group).joined && carol.engine->archive_status(group).joined; }, 30000), "Bob and Carol each receive their own grant and join");
+
+        Bytes g1 = text_record(alice, group_id, trio, "welcome, archived");
+        CHECK(alice.engine->archive_append(group, g1, n, others, err) && n == 1, "Alice appends");
+        CHECK(bob.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g1 && carol.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g1,
+              "Bob and Carol both read it");
+        // A second grant, from the real creator, with a different key: a replay must not change what Bob holds.
+        send_envelope(bob, token_for(alice, bob), grant_inner(alice, group_id, trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
+        run_for(1500);
+        Bytes g2 = text_record(carol, group_id, trio, "from Carol, after a replayed grant");
+        CHECK(carol.engine->archive_append(group, g2, n, others, err) && n == 2, "Carol appends");
+        CHECK(bob.engine->archive_sync(group, fresh, err) && fresh.size() == 1 && fresh[0].record == g2, "Bob still reads it: the replayed grant did not replace his archive key");
+        Bytes g3 = text_record(bob, group_id, trio, "Bob, at the same time as Carol");
+        Bytes g4 = text_record(carol, group_id, trio, "Carol, at the same time as Bob");
+        CHECK(bob.engine->archive_append(group, g3, n, others, err) && n == 3 && carol.engine->archive_append(group, g4, n, others, err) && n == 4 && others.size() == 1 && others[0].record == g3,
+              "two members writing at once end up in one order, the second catching up on the first");
+        CHECK(alice.engine->archive_sync(group, fresh, err) && fresh.size() == 3 && fresh[0].number == 2 && fresh[1].number == 3 && fresh[2].number == 4 && alice.engine->archive_status(group).entries == 4,
+              "Alice, who was away, catches up on all three in order");
+        CHECK(!file_contains(alice.history(), "welcome, archived") && !file_contains(fs::path(alice.history().string() + "-wal"), "welcome, archived"), "(an archived record's text is not readable in the history file)");
+    }
+
     srv.stop();
     std::error_code ec;
     fs::remove_all(ROOT, ec);

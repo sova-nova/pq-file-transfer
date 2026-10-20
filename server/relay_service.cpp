@@ -181,8 +181,9 @@ std::string RelayService::create_invite() {
 size_t RelayService::sweep_once() {
     auto swept = store_->sweep(unix_now());
     rate_.prune(unix_now());
-    if (swept.envelopes || swept.invites)
-        log("Expired " + std::to_string(swept.envelopes) + " envelope(s), " + std::to_string(swept.invites) + " invite(s)");
+    if (swept.envelopes || swept.invites || swept.archives)
+        log("Expired " + std::to_string(swept.envelopes) + " envelope(s), " + std::to_string(swept.invites) + " invite(s), " +
+            std::to_string(swept.archives) + " abandoned archive(s)");
     return swept.envelopes;
 }
 
@@ -251,6 +252,7 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
     std::optional<Bytes> mailbox;  // set once the client has proven it owns one
     auto kick = std::make_shared<std::atomic<bool>>(false);
     bool challenge_used = false, collecting = false, is_owner = false;
+    std::optional<std::pair<Bytes, Bytes>> archive_session;  // (archive ID, key hash) once signed in to an archive
     auto release = make_scope_exit([&] { if (mailbox && is_owner) release_owner(*mailbox, kick); });
     int64_t last_seq = 0;
     auto last_activity = std::chrono::steady_clock::now();
@@ -377,6 +379,104 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                             break;
                         case RelayStore::IssueResult::NoSuchMailbox: send_error(sock, "Unknown mailbox"); break;
                     }
+                    break;
+                }
+
+                case MessageType::ARCHIVE_CREATE: {
+                    // Only a mailbox owner may make an archive (that keeps the vouching model), but the relay does not
+                    // record which one: nothing ties an archive to a mailbox.
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_archive_create(msg->payload);
+                    if (!m) { send_error(sock, "Malformed archive request"); return; }
+                    if (!rate_.allow("archive-create:" + hex_of(*mailbox), 10, now)) { send_error(sock, "Too many requests, try again later"); break; }
+                    switch (store_->create_archive(m->archive_id, m->join_token_hashes, CryptoEngine::sha256(archive_genesis_input(m->archive_id)), now,
+                                                   now + limits_.archive_join_window_seconds, limits_.max_archives)) {
+                        case RelayStore::CreateArchiveResult::Ok:
+                            log("Archive created: " + short_id(m->archive_id) + " for " + std::to_string(m->join_token_hashes.size()) + " member(s)");
+                            if (!send_message(sock, MessageType::ARCHIVE_CREATE_OK, {})) return;
+                            break;
+                        case RelayStore::CreateArchiveResult::Exists: send_error(sock, "That archive already exists"); break;
+                        case RelayStore::CreateArchiveResult::LimitReached: send_error(sock, "This relay can't hold more archives"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::ARCHIVE_JOIN: {
+                    // A member registers this chat's key with the one-time token they were given. No mailbox needed.
+                    auto m = decode_archive_join(msg->payload);
+                    if (!m) { send_error(sock, "Malformed archive request"); return; }
+                    if (!rate_.allow("archive-join:" + peer_ip, 30, now)) { send_error(sock, "Too many attempts, try again later"); break; }
+                    if (m->public_key.size() != CryptoEngine::sig_public_key_size()) { send_error(sock, "Invalid key"); break; }
+                    const Bytes token_hash = CryptoEngine::sha256(m->join_token);
+                    if (!CryptoEngine::verify(archive_join_signing_input(relay_id_, m->archive_id, m->public_key, token_hash), m->signature, m->public_key)) {
+                        send_error(sock, "Invalid proof of key ownership");
+                        break;
+                    }
+                    switch (store_->join_archive(m->archive_id, token_hash, CryptoEngine::sha256(m->public_key), m->public_key, now)) {
+                        case RelayStore::JoinResult::Ok:
+                            log("Archive joined: " + short_id(m->archive_id));
+                            if (!send_message(sock, MessageType::ARCHIVE_JOIN_OK, {})) return;
+                            break;
+                        // The same answer for "no such archive" and "wrong token", so archive IDs can't be probed.
+                        case RelayStore::JoinResult::NoSuchArchive:
+                        case RelayStore::JoinResult::BadToken: send_error(sock, "Unknown archive or join token"); break;
+                        case RelayStore::JoinResult::Closed: send_error(sock, "Registration for this archive is closed"); break;
+                        case RelayStore::JoinResult::KeyExists: send_error(sock, "That key is already registered"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::ARCHIVE_AUTH: {
+                    auto m = decode_archive_auth(msg->payload);
+                    if (!m) { send_error(sock, "Malformed archive request"); return; }
+                    // The same one attempt per connection as a mailbox sign-in: the challenge is spent either way.
+                    if (challenge_used) { send_error(sock, "Reconnect to authenticate again"); return; }
+                    challenge_used = true;
+                    auto key = store_->archive_member_key(m->archive_id, m->key_hash);
+                    if (!key || !CryptoEngine::verify(archive_auth_signing_input(challenge, relay_id_, m->archive_id, m->key_hash), m->signature, *key)) {
+                        log("Archive authentication failed from " + peer_ip);
+                        send_error(sock, "Authentication failed");
+                        return;
+                    }
+                    archive_session = std::make_pair(m->archive_id, m->key_hash);
+                    if (!send_message(sock, MessageType::ARCHIVE_AUTH_OK, {})) return;
+                    break;
+                }
+
+                case MessageType::ARCHIVE_APPEND: {
+                    if (!archive_session) { send_error(sock, "Sign in to an archive first"); break; }
+                    auto m = decode_archive_append(msg->payload);
+                    if (!m || m->expected_number == UINT64_MAX) { send_error(sock, "Malformed archive request"); return; }
+                    const Bytes& archive_id = archive_session->first;
+                    if (!rate_.allow("archive:" + hex_of(archive_id), limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many requests, slow down"); break; }
+                    // The relay computes the chain itself, so a bad hash can never be stored.
+                    const Bytes new_hash = CryptoEngine::sha256(archive_entry_hash_input(archive_id, m->expected_number + 1, m->expected_hash, m->ciphertext));
+                    RelayStore::ArchiveState head;
+                    switch (store_->append_entry(archive_id, m->expected_number, m->expected_hash, new_hash, m->ciphertext, now, limits_.archive_quota_bytes, &head)) {
+                        case RelayStore::AppendResult::Ok:
+                            if (!send_message(sock, MessageType::ARCHIVE_APPEND_OK, encode(ArchiveHead{head.number, head.hash}))) return;
+                            break;
+                        case RelayStore::AppendResult::Stale:
+                            // Someone else appended first: say where the head is, and the sender fetches what it missed.
+                            if (!send_message(sock, MessageType::ARCHIVE_STALE, encode(ArchiveHead{head.number, head.hash}))) return;
+                            break;
+                        case RelayStore::AppendResult::ArchiveFull: send_error(sock, "This archive is full"); break;
+                        case RelayStore::AppendResult::NoSuchArchive: send_error(sock, "Unknown archive"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::ARCHIVE_FETCH: {
+                    if (!archive_session) { send_error(sock, "Sign in to an archive first"); break; }
+                    auto m = decode_archive_fetch(msg->payload);
+                    if (!m) { send_error(sock, "Malformed archive request"); return; }
+                    const Bytes& archive_id = archive_session->first;
+                    if (!rate_.allow("archive:" + hex_of(archive_id), limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many requests, slow down"); break; }
+                    for (auto& e : store_->fetch_entries(archive_id, m->from_number, m->limit))
+                        if (!send_message(sock, MessageType::ARCHIVE_ENTRY, encode(ArchiveEntry{e.number, std::move(e.hash), std::move(e.ciphertext)}))) return;
+                    auto info = store_->archive_info(archive_id, now);
+                    if (!info) { send_error(sock, "Unknown archive"); break; }
+                    if (!send_message(sock, MessageType::ARCHIVE_FETCH_END, encode(ArchiveHead{info->head.number, info->head.hash}))) return;
                     break;
                 }
 

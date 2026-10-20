@@ -209,7 +209,7 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 3, "the schema version is now 3");
+        CHECK(version == 4, "the schema version is now 4");
         auto ms = migrated.members();
         CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
         CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
@@ -238,6 +238,7 @@ int main() {
         RelayStore s(v2_db);
         auto old_members = s.members();
         CHECK(old_members.size() == 1 && old_members[0].invited_by.empty(), "a version 2 database opens, its mailbox shown as an operator invite");
+        CHECK(s.create_archive(id(0x31), {id(0xA1, 32)}, id(0x47, 32), 1000, 5000, 10) == RelayStore::CreateArchiveResult::Ok && s.archive_count() == 1, "and it can hold chat archives straight away");
         CHECK(s.register_mailbox(Bytes(32, 0xEE), id(2), id(0x55, 64), id(0xAA, 32), 1000, 10) == R::Ok, "an invite the operator made before the upgrade still works");
 
         Bytes box1(16, 1), box2 = id(2);
@@ -278,6 +279,84 @@ int main() {
         auto joined = s.joined_through(lister);
         CHECK(joined.size() == 1 && joined[0].mailbox_id == id(10) && joined[0].joined_at == 6004 && s.joined_through(id(88)).empty(), "the people who used a member's invites are listed with when they joined");
 
+    }
+
+
+    std::cout << "Chat archives\n";
+    {
+        RelayStore s(dir / "archives.db");
+        using C = RelayStore::CreateArchiveResult;
+        using J = RelayStore::JoinResult;
+        using A = RelayStore::AppendResult;
+        const Bytes arch = id(0x31), genesis = id(0x47, 32), k1 = id(0xB1, 32), k2 = id(0xB2, 32), k3 = id(0xB3, 32);
+        const std::vector<Bytes> tokens = {id(0xA1, 32), id(0xA2, 32), id(0xA3, 32)};
+
+        CHECK(s.create_archive(arch, tokens, genesis, 1000, 5000, 2) == C::Ok, "an archive is created for three members");
+        CHECK(s.create_archive(arch, tokens, genesis, 1000, 5000, 2) == C::Exists, "creating one with the same ID is refused");
+        CHECK(s.create_archive(id(0x32), tokens, genesis, 1000, 5000, 2) == C::Ok && s.create_archive(id(0x33), tokens, genesis, 1000, 5000, 2) == C::LimitReached && s.archive_count() == 2,
+              "the relay-wide limit on archives is enforced");
+        auto info = s.archive_info(arch, 1000);
+        CHECK(info && info->member_count == 3 && info->joined == 0 && info->registration_open && info->head.number == 0 && info->head.hash == genesis && info->bytes == 0, "a new archive is empty, at its genesis, open for members to join");
+        CHECK(!s.archive_info(id(0x99), 1000), "an unknown archive has no info");
+
+        CHECK(s.join_archive(arch, id(0xEE, 32), k1, id(1, 50), 1001) == J::BadToken && s.join_archive(id(0x99), tokens[0], k1, id(1, 50), 1001) == J::NoSuchArchive, "a wrong token, or an unknown archive, is refused");
+        CHECK(s.join_archive(arch, tokens[0], k1, id(1, 50), 1001) == J::Ok, "a member joins with their token");
+        CHECK(s.join_archive(arch, tokens[0], k2, id(2, 50), 1001) == J::BadToken, "a token works once");
+        CHECK(s.join_archive(arch, tokens[1], k1, id(1, 50), 1001) == J::KeyExists, "a key can't be registered twice...");
+        CHECK(s.join_archive(arch, tokens[1], k2, id(2, 50), 1002) == J::Ok, "...and that refused attempt did not spend the token");
+        CHECK(s.archive_member_key(arch, k1) == id(1, 50) && s.archive_member_key(arch, k2) == id(2, 50) && !s.archive_member_key(arch, k3) && !s.archive_member_key(id(0x32), k1), "registered keys are found, others and other archives' are not");
+        CHECK(s.join_archive(arch, tokens[2], k3, id(3, 50), 1003) == J::Ok, "the third joins");
+        info = s.archive_info(arch, 1003);
+        CHECK(info && info->joined == 3 && !info->registration_open, "registration closes once everyone has joined");
+        CHECK(s.join_archive(arch, id(0xA9, 32), id(0xB9, 32), id(9, 50), 1004) == J::BadToken, "and there is no token left to join with");
+
+        const Bytes late = id(0x34);
+        s.create_archive(late, {id(0xA1, 32), id(0xA2, 32)}, genesis, 1000, 2000, 10);
+        CHECK(s.join_archive(late, id(0xA1, 32), k1, id(1, 50), 1999) == J::Ok && s.join_archive(late, id(0xA2, 32), k2, id(2, 50), 2000) == J::Closed, "after the registration window, nobody else can join");
+        CHECK(!s.archive_info(late, 2000)->registration_open, "(and it is reported closed)");
+
+        // Appending: compare and swap on the head.
+        Bytes h1 = id(0xC1, 32), h2 = id(0xC2, 32), h3 = id(0xC3, 32);
+        RelayStore::ArchiveState head;
+        CHECK(s.append_entry(arch, 0, genesis, h1, envelope(100, 1), 1100, 1 << 20, &head) == A::Ok && head.number == 1 && head.hash == h1, "the first entry extends the genesis");
+        CHECK(s.append_entry(arch, 0, genesis, id(0xCC, 32), envelope(100, 9), 1101, 1 << 20, &head) == A::Stale && head.number == 1 && head.hash == h1,
+              "a second sender who also extended the genesis is told the head moved, and where it is");
+        CHECK(s.append_entry(arch, 1, id(0xDD, 32), id(0xCC, 32), envelope(100, 9), 1102, 1 << 20, &head) == A::Stale, "naming the right number but the wrong hash is stale too");
+        CHECK(s.append_entry(arch, 1, h1, h2, envelope(50, 2), 1103, 1 << 20, &head) == A::Ok && head.number == 2 && head.hash == h2, "extending the real head works");
+        CHECK(s.append_entry(id(0x99), 0, genesis, h1, envelope(10), 1104, 1 << 20, &head) == A::NoSuchArchive, "an unknown archive refuses appends");
+        info = s.archive_info(arch, 1200);
+        CHECK(info && info->head.number == 2 && info->head.hash == h2 && info->bytes == 150, "the head and the byte count follow the appends");
+        CHECK(s.append_entry(arch, 2, h2, h3, envelope(100, 3), 1105, 200, &head) == A::ArchiveFull && head.number == 2, "an archive over its quota refuses more, and says nothing changed");
+        CHECK(s.archive_info(arch, 1200)->head.number == 2, "(the refused entry was not stored)");
+
+        auto all = s.fetch_entries(arch, 1, 10);
+        CHECK(all.size() == 2 && all[0].number == 1 && all[0].hash == h1 && all[0].ciphertext == envelope(100, 1) && all[1].number == 2 && all[1].hash == h2, "entries come back in order with their hashes");
+        auto tail = s.fetch_entries(arch, 2, 10);
+        CHECK(tail.size() == 1 && tail[0].number == 2 && s.fetch_entries(arch, 3, 10).empty() && s.fetch_entries(arch, 1, 1).size() == 1 && s.fetch_entries(id(0x99), 1, 10).empty(),
+              "fetching from a number onwards, with a limit, from an unknown archive, or past the end");
+
+        // Nothing ties an archive to a mailbox or a person.
+        sqlite3* raw = nullptr;
+        sqlite3_open_v2((dir / "archives.db").string().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+        std::string columns;
+        for (const char* table : {"archives", "archive_join_tokens", "archive_keys", "archive_entries"}) {
+            sqlite3_stmt* st = nullptr;
+            std::string sql = std::string("SELECT name FROM pragma_table_info('") + table + "')";
+            sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr);
+            while (sqlite3_step(st) == SQLITE_ROW) columns += std::string(static_cast<const char*>(sqlite3_column_blob(st, 0)), static_cast<size_t>(sqlite3_column_bytes(st, 0))) + " ";
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(raw);
+        CHECK(columns.find("mailbox") == std::string::npos && columns.find("creator") == std::string::npos, "the relay stores nothing that links an archive to a mailbox");
+
+        // Archives nobody joined are cleaned up; ones with members are kept.
+        s.create_archive(id(0x35), {id(0xA1, 32)}, genesis, 1000, 3000, 10);
+        auto swept = s.sweep(2500);
+        CHECK(swept.archives == 0 && s.archive_info(id(0x35), 2500), "an archive still inside its registration window is kept");
+        swept = s.sweep(3001);
+        CHECK(swept.archives >= 1 && !s.archive_info(id(0x35), 3001), "one nobody joined by the end of the window is removed");
+        CHECK(s.archive_info(arch, 3001) && s.fetch_entries(arch, 1, 10).size() == 2, "while one with members keeps all its entries");
+        { RelayStore reopened(dir / "archives.db"); CHECK(reopened.archive_info(arch, 3001) && reopened.archive_info(arch, 3001)->head.hash == h2, "archives survive a restart"); }
     }
 
     fs::remove_all(dir);

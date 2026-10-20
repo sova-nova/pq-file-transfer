@@ -97,9 +97,50 @@ public:
     size_t ack(const Bytes& mailbox_id, const std::vector<Bytes>& envelope_ids);
     size_t envelope_count(const Bytes& mailbox_id);
 
+    // --- Chat archives: one chat's encrypted, hash-chained log ---
+    // The relay never records which mailbox created an archive, nor who its members are: a member is
+    // only a public key registered with a one-time join token. It sees an ID, a member count, entry
+    // sizes and when they arrive.
+    struct ArchiveState {
+        uint64_t number = 0;  // how many entries there are
+        Bytes hash;           // the head: the genesis hash when there are none
+    };
+    struct ArchiveInfo {
+        size_t member_count = 0;
+        size_t joined = 0;
+        bool registration_open = false;  // fewer keys than members, and the window hasn't passed
+        ArchiveState head;
+        uint64_t bytes = 0;
+    };
+    enum class CreateArchiveResult { Ok, Exists, LimitReached };
+    // One join token hash per member (at least one). Registration closes when every member has joined or
+    // at `closes_at`, whichever is first.
+    CreateArchiveResult create_archive(const Bytes& archive_id, const std::vector<Bytes>& join_token_hashes, const Bytes& genesis_hash,
+                                       int64_t now, int64_t closes_at, size_t max_archives);
+    enum class JoinResult { Ok, NoSuchArchive, BadToken, Closed, KeyExists };
+    // Registers a chat key and spends the token, atomically.
+    JoinResult join_archive(const Bytes& archive_id, const Bytes& token_hash, const Bytes& key_hash, const Bytes& public_key, int64_t now);
+    std::optional<Bytes> archive_member_key(const Bytes& archive_id, const Bytes& key_hash);
+    std::optional<ArchiveInfo> archive_info(const Bytes& archive_id, int64_t now);
+    size_t archive_count();
+    enum class AppendResult { Ok, Stale, ArchiveFull, NoSuchArchive };
+    // Adds an entry only if the head is still (expected_number, expected_hash). `new_hash` is the hash the
+    // caller computed for the new entry from them. `head` receives the head after the call (the new one, or
+    // the current one if the append was refused).
+    AppendResult append_entry(const Bytes& archive_id, uint64_t expected_number, const Bytes& expected_hash, const Bytes& new_hash,
+                              const Bytes& ciphertext, int64_t now, size_t quota_bytes, ArchiveState* head);
+    struct StoredEntry {
+        uint64_t number = 0;
+        Bytes hash;
+        Bytes ciphertext;
+    };
+    // Up to `limit` entries numbered from_number onwards, in order.
+    std::vector<StoredEntry> fetch_entries(const Bytes& archive_id, uint64_t from_number, size_t limit);
+
     struct Swept {
         size_t envelopes = 0;
         size_t invites = 0;
+        size_t archives = 0;  // never joined by anyone before their registration window closed
     };
     Swept sweep(int64_t now);  // removes expired envelopes and invites
 

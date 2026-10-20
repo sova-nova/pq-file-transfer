@@ -18,6 +18,10 @@ bool at_end(const std::vector<uint8_t>& in, size_t off) { return off == in.size(
 const char HELLO_LABEL[] = "pq-suite v3 relay hello";
 const char REGISTER_LABEL[] = "pq-suite v3 relay register";
 const char AUTH_LABEL[] = "pq-suite v3 relay auth";
+const char ARCHIVE_JOIN_LABEL[] = "pq-suite v3 archive join";
+const char ARCHIVE_AUTH_LABEL[] = "pq-suite v3 archive auth";
+const char ARCHIVE_GENESIS_LABEL[] = "pq-suite v3 archive genesis";
+const char ARCHIVE_ENTRY_LABEL[] = "pq-suite v3 archive entry";
 
 }  // namespace
 
@@ -94,6 +98,55 @@ std::vector<uint8_t> encode(const InviteStatus& m) {
         write_blob(b, j.mailbox_id);
         write_u64(b, j.joined_at);
     }
+    return b;
+}
+
+std::vector<uint8_t> encode(const ArchiveCreate& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.archive_id);
+    write_u32(b, static_cast<uint32_t>(m.join_token_hashes.size()));
+    for (const auto& h : m.join_token_hashes) write_blob(b, h);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveJoin& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.archive_id);
+    write_blob(b, m.join_token);
+    write_blob(b, m.public_key);
+    write_blob(b, m.signature);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveAuth& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.archive_id);
+    write_blob(b, m.key_hash);
+    write_blob(b, m.signature);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveAppend& m) {
+    std::vector<uint8_t> b;
+    write_u64(b, m.expected_number);
+    write_blob(b, m.expected_hash);
+    write_blob(b, m.ciphertext);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveHead& m) {
+    std::vector<uint8_t> b;
+    write_u64(b, m.number);
+    write_blob(b, m.hash);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveFetch& m) {
+    std::vector<uint8_t> b;
+    write_u64(b, m.from_number);
+    write_u32(b, m.limit);
+    return b;
+}
+std::vector<uint8_t> encode(const ArchiveEntry& m) {
+    std::vector<uint8_t> b;
+    write_u64(b, m.number);
+    write_blob(b, m.hash);
+    write_blob(b, m.ciphertext);
     return b;
 }
 
@@ -228,6 +281,69 @@ std::optional<InviteStatus> decode_invite_status(const std::vector<uint8_t>& in)
     return m;
 }
 
+std::optional<ArchiveCreate> decode_archive_create(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, ARCHIVE_ID_BYTES);
+    auto count = read_u32(in.data(), in.size(), off);
+    if (!id || !count || *count < 1 || *count > MAX_ARCHIVE_MEMBERS) return std::nullopt;
+    ArchiveCreate m;
+    m.archive_id = std::move(*id);
+    for (uint32_t i = 0; i < *count; i++) {
+        auto h = fixed_blob(in, off, HASH_BYTES);
+        if (!h) return std::nullopt;
+        m.join_token_hashes.push_back(std::move(*h));
+    }
+    if (!at_end(in, off)) return std::nullopt;
+    return m;
+}
+std::optional<ArchiveJoin> decode_archive_join(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, ARCHIVE_ID_BYTES);
+    auto token = fixed_blob(in, off, JOIN_TOKEN_BYTES);
+    auto key = read_blob(in.data(), in.size(), off, MAX_KEY_BLOB);
+    auto sig = read_blob(in.data(), in.size(), off, MAX_KEY_BLOB);
+    if (!id || !token || !key || !sig || !at_end(in, off)) return std::nullopt;
+    return ArchiveJoin{std::move(*id), std::move(*token), std::move(*key), std::move(*sig)};
+}
+std::optional<ArchiveAuth> decode_archive_auth(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto id = fixed_blob(in, off, ARCHIVE_ID_BYTES);
+    auto key_hash = fixed_blob(in, off, HASH_BYTES);
+    auto sig = read_blob(in.data(), in.size(), off, MAX_KEY_BLOB);
+    if (!id || !key_hash || !sig || !at_end(in, off)) return std::nullopt;
+    return ArchiveAuth{std::move(*id), std::move(*key_hash), std::move(*sig)};
+}
+std::optional<ArchiveAppend> decode_archive_append(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto number = read_u64(in.data(), in.size(), off);
+    auto hash = fixed_blob(in, off, HASH_BYTES);
+    auto ct = read_blob(in.data(), in.size(), off, MAX_ARCHIVE_ENTRY_BYTES);
+    if (!number || !hash || !ct || ct->empty() || !at_end(in, off)) return std::nullopt;
+    return ArchiveAppend{*number, std::move(*hash), std::move(*ct)};
+}
+std::optional<ArchiveHead> decode_archive_head(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto number = read_u64(in.data(), in.size(), off);
+    auto hash = fixed_blob(in, off, HASH_BYTES);
+    if (!number || !hash || !at_end(in, off)) return std::nullopt;
+    return ArchiveHead{*number, std::move(*hash)};
+}
+std::optional<ArchiveFetch> decode_archive_fetch(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto from = read_u64(in.data(), in.size(), off);
+    auto limit = read_u32(in.data(), in.size(), off);
+    if (!from || !limit || *from < 1 || *limit < 1 || *limit > MAX_FETCH_ENTRIES || !at_end(in, off)) return std::nullopt;
+    return ArchiveFetch{*from, *limit};
+}
+std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto number = read_u64(in.data(), in.size(), off);
+    auto hash = fixed_blob(in, off, HASH_BYTES);
+    auto ct = read_blob(in.data(), in.size(), off, MAX_ARCHIVE_ENTRY_BYTES);
+    if (!number || !hash || !ct || ct->empty() || !at_end(in, off)) return std::nullopt;
+    return ArchiveEntry{*number, std::move(*hash), std::move(*ct)};
+}
+
 std::optional<HashOp> decode_hash_op(const std::vector<uint8_t>& in) {
     size_t off = 0;
     auto hash = fixed_blob(in, off, HASH_BYTES);
@@ -263,6 +379,42 @@ std::vector<uint8_t> register_signing_input(const std::vector<uint8_t>& relay_id
     return b;
 }
 
+std::vector<uint8_t> archive_join_signing_input(const std::vector<uint8_t>& relay_id, const std::vector<uint8_t>& archive_id,
+                                                const std::vector<uint8_t>& public_key, const std::vector<uint8_t>& join_token_hash) {
+    std::vector<uint8_t> b;
+    write_string(b, ARCHIVE_JOIN_LABEL);
+    write_blob(b, relay_id);
+    write_blob(b, archive_id);
+    write_blob(b, public_key);
+    write_blob(b, join_token_hash);
+    return b;
+}
+std::vector<uint8_t> archive_auth_signing_input(const std::vector<uint8_t>& auth_challenge, const std::vector<uint8_t>& relay_id,
+                                                const std::vector<uint8_t>& archive_id, const std::vector<uint8_t>& key_hash) {
+    std::vector<uint8_t> b;
+    write_string(b, ARCHIVE_AUTH_LABEL);
+    write_blob(b, relay_id);
+    write_blob(b, archive_id);
+    write_blob(b, key_hash);
+    write_blob(b, auth_challenge);
+    return b;
+}
+std::vector<uint8_t> archive_genesis_input(const std::vector<uint8_t>& archive_id) {
+    std::vector<uint8_t> b;
+    write_string(b, ARCHIVE_GENESIS_LABEL);
+    write_blob(b, archive_id);
+    return b;
+}
+std::vector<uint8_t> archive_entry_hash_input(const std::vector<uint8_t>& archive_id, uint64_t number,
+                                              const std::vector<uint8_t>& previous_hash, const std::vector<uint8_t>& ciphertext) {
+    std::vector<uint8_t> b;
+    write_string(b, ARCHIVE_ENTRY_LABEL);
+    write_blob(b, archive_id);
+    write_u64(b, number);
+    write_blob(b, previous_hash);
+    write_blob(b, ciphertext);
+    return b;
+}
 std::vector<uint8_t> auth_signing_input(const std::vector<uint8_t>& auth_challenge,
                                         const std::vector<uint8_t>& relay_id,
                                         const std::vector<uint8_t>& mailbox_id) {

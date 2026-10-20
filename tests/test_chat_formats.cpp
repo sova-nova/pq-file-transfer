@@ -1,4 +1,5 @@
 // Tests for signed message records and sealed envelopes.
+#include "archive.h"
 #include "crypto_engine.h"
 #include "envelope.h"
 #include "message_record.h"
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <set>
 #include <iostream>
 #include <string>
 
@@ -533,6 +535,121 @@ int main() {
         CHECK(as_record(2, Bytes(), 0).has_value(), "(control) a forward record parses as version 2");
         CHECK(!as_record(1, Bytes(), 0), "...but not as version 1");
         CHECK(!as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 0) && !as_record(2, Bytes(), 1), "it is outside the transcript: it can't claim a previous entry or anything seen");
+    }
+
+    std::cout << "Archive grants\n";
+    {
+        ArchiveGrantInfo info;
+        info.relay_address = "10.0.0.248:9000";
+        info.relay_id = CryptoEngine::random_bytes(HASH_BYTES);
+        info.archive_key = CryptoEngine::random_bytes(32);
+        info.join_token = CryptoEngine::random_bytes(32);
+        Bytes payload = archive_grant_payload(info);
+        auto back = parse_archive_grant_payload(payload);
+        CHECK(back && back->relay_address == info.relay_address && back->relay_id == info.relay_id && back->archive_key == info.archive_key && back->join_token == info.join_token,
+              "a grant carries the relay's address and identity, the archive key and the member's join token, exactly");
+        CHECK(payload.size() <= MAX_ARCHIVE_GRANT_PAYLOAD, "and fits its limit (" + std::to_string(payload.size()) + " bytes)");
+        auto changed = [&](const std::function<void(ArchiveGrantInfo&)>& f) { ArchiveGrantInfo c = info; f(c); return c; };
+        CHECK(throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_address.clear(); })); }) &&
+                  throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_address = std::string(MAX_RELAY_ADDRESS_BYTES + 1, 'a'); })); }) &&
+                  throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_address = "host name:9000"; })); }) &&
+                  throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_address = std::string("h\nost:1"); })); }) &&
+                  throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_address = "h\xC3\xA9st:1"; })); }),
+              "an address that is empty, too long, or has spaces, line breaks or non-ASCII characters is refused");
+        CHECK(throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.relay_id.pop_back(); })); }) && throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.archive_key.pop_back(); })); }) &&
+                  throws([&] { archive_grant_payload(changed([](ArchiveGrantInfo& c) { c.join_token.push_back(0); })); }),
+              "a relay ID, key or token of the wrong size is refused");
+        Bytes trailing = payload; trailing.push_back(0);
+        bool prefixes = true;
+        for (size_t n = 0; n < payload.size(); n++)
+            if (parse_archive_grant_payload(Bytes(payload.begin(), payload.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes lying; write_u32(lying, 0xFFFFFFFF);
+        CHECK(!parse_archive_grant_payload(trailing) && prefixes && !parse_archive_grant_payload(Bytes()) && !parse_archive_grant_payload(lying) && !parse_archive_grant_payload(Bytes(MAX_ARCHIVE_GRANT_PAYLOAD + 1, 1)),
+              "trailing bytes, every truncation, an empty payload, a huge declared length and an oversized payload are rejected");
+        Bytes bad_address;  // hand-written: a payload whose address has a space in it
+        write_blob(bad_address, Bytes{'a', ' ', 'b'}); write_blob(bad_address, info.relay_id); write_blob(bad_address, info.archive_key); write_blob(bad_address, info.join_token);
+        CHECK(!parse_archive_grant_payload(bad_address), "a hostile address is rejected on the receiving side too");
+
+        Bytes recipients = recipients_hash_for({alice.fingerprint, bob.fingerprint});
+        auto as_record = [&](uint32_t version, const Bytes& own_prev, uint32_t seen_count, const Bytes& body) {
+            return parse_record(hand_record(alice, version, 6, alice.fingerprint, recipients, body, own_prev,
+                                            [&](Bytes& b) { if (version == 1) write_blob(b, Bytes()); else { write_u32(b, seen_count); for (uint32_t i = 0; i < seen_count; i++) write_blob(b, CryptoEngine::random_bytes(HASH_BYTES)); } }));
+        };
+        CHECK(as_record(2, Bytes(), 0, payload).has_value(), "(control) a grant record parses as version 2");
+        CHECK(!as_record(1, Bytes(), 0, payload), "...but not as version 1");
+        CHECK(!as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 0, payload) && !as_record(2, Bytes(), 1, payload), "it is outside the transcript: no previous entry, nothing seen");
+        CHECK(!as_record(2, Bytes(), 0, Bytes(MAX_ARCHIVE_GRANT_PAYLOAD + 1, 1)), "and its payload has a limit");
+    }
+
+    std::cout << "Archive entries and chain\n";
+    {
+        const Bytes key = CryptoEngine::random_bytes(archive::KEY_BYTES), id = CryptoEngine::random_bytes(16);
+        const Bytes record = CryptoEngine::random_bytes(300);
+        Bytes blob = archive::seal_entry(key, id, 7, record);
+        auto opened = archive::open_entry(key, id, 7, blob);
+        CHECK(opened && *opened == record && blob.size() == record.size() + archive::NONCE_BYTES + archive::TAG_BYTES, "an entry opens to the record it was made from, with 28 bytes of overhead");
+        CHECK(!contains(blob, std::string(record.begin(), record.begin() + 16)), "the record is not visible in it");
+        CHECK(archive::seal_entry(key, id, 7, record) != blob, "sealing the same record twice gives different entries");
+        std::set<Bytes> nonces;
+        for (int i = 0; i < 300; i++) {
+            Bytes b = archive::seal_entry(key, id, 7, record);
+            nonces.insert(Bytes(b.begin(), b.begin() + archive::NONCE_BYTES));
+        }
+        CHECK(nonces.size() == 300, "the nonce is random each time: two members racing for the same entry number never share one");
+        CHECK(!archive::open_entry(CryptoEngine::random_bytes(32), id, 7, blob) && !archive::open_entry(key, CryptoEngine::random_bytes(16), 7, blob) &&
+                  !archive::open_entry(key, id, 8, blob) && !archive::open_entry(key, id, 6, blob),
+              "it opens only under its own key, in its own archive, at its own entry number");
+        int opened_after_flip = 0;
+        for (size_t i = 0; i < blob.size(); i++) {
+            Bytes bad = blob;
+            bad[i] ^= 0x01;
+            if (archive::open_entry(key, id, 7, bad)) opened_after_flip++;
+        }
+        bool prefixes_fail = true;
+        for (size_t n = 0; n < blob.size(); n++)
+            if (archive::open_entry(key, id, 7, Bytes(blob.begin(), blob.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes_fail = false;
+        CHECK(opened_after_flip == 0 && prefixes_fail && !archive::open_entry(key, id, 7, Bytes()), "a one-bit change anywhere, any truncation, or nothing at all, is refused");
+        CHECK(throws([&] { archive::seal_entry(Bytes(31, 1), id, 1, record); }) && throws([&] { archive::seal_entry(key, id, 1, Bytes()); }) &&
+                  throws([&] { archive::seal_entry(key, id, 1, Bytes(archive::MAX_RECORD_BYTES + 1, 1)); }),
+              "a key of the wrong size, an empty record or an oversized one is refused");
+        Bytes biggest = archive::seal_entry(key, id, 1, Bytes(archive::MAX_RECORD_BYTES, 1));
+        CHECK(biggest.size() == relay::MAX_ARCHIVE_ENTRY_BYTES && archive::open_entry(key, id, 1, biggest), "the largest record makes exactly the relay's largest entry");
+        CHECK(MAX_RECORD_BYTES + 3500 < archive::MAX_RECORD_BYTES, "(any signed record we make fits: they are at most 40 KiB)");
+
+        // The chain.
+        std::vector<relay::ArchiveEntry> entries;
+        archive::Head head{0, archive::genesis_hash(id)};
+        const archive::Head start = head;
+        for (uint64_t n = 1; n <= 5; n++) {
+            relay::ArchiveEntry e;
+            e.number = n;
+            e.ciphertext = archive::seal_entry(key, id, n, CryptoEngine::random_bytes(50));
+            e.hash = archive::entry_hash(id, n, head.hash, e.ciphertext);
+            head = {n, e.hash};
+            entries.push_back(e);
+        }
+        auto ok = archive::verify_chain(id, start, entries);
+        CHECK(ok && ok->number == 5 && ok->hash == head.hash, "an unbroken chain verifies and gives its head");
+        CHECK(archive::genesis_hash(id) != archive::genesis_hash(CryptoEngine::random_bytes(16)), "each archive starts from its own genesis");
+        auto none = archive::verify_chain(id, start, {});
+        CHECK(none && none->number == 0 && none->hash == start.hash, "an empty list leaves the head where it was");
+        std::vector<relay::ArchiveEntry> tail(entries.begin() + 2, entries.end());
+        auto from_middle = archive::verify_chain(id, {2, entries[1].hash}, tail);
+        CHECK(from_middle && from_middle->number == 5 && from_middle->hash == head.hash, "it can continue from a head already checked");
+        CHECK(!archive::verify_chain(id, start, tail) && !archive::verify_chain(id, {2, entries[0].hash}, tail), "starting from the wrong head fails");
+        auto gap = entries; gap.erase(gap.begin() + 2);
+        auto swapped = entries; std::swap(swapped[1], swapped[2]);
+        auto repeated = entries; repeated.insert(repeated.begin() + 3, repeated[2]);
+        auto altered = entries; altered[3].ciphertext[10] ^= 1;
+        auto rehashed = entries; rehashed[1].hash = CryptoEngine::sha256(Bytes{1});
+        auto renumbered = entries; renumbered[2].number = 9;
+        auto truncated_chain = entries; truncated_chain.pop_back();
+        CHECK(!archive::verify_chain(id, start, gap) && !archive::verify_chain(id, start, swapped) && !archive::verify_chain(id, start, repeated) && !archive::verify_chain(id, start, altered) &&
+                  !archive::verify_chain(id, start, rehashed) && !archive::verify_chain(id, start, renumbered),
+              "a missing, reordered, repeated, altered, re-hashed or renumbered entry breaks the chain");
+        auto shorter = archive::verify_chain(id, start, truncated_chain);
+        CHECK(shorter && shorter->number == 4, "a chain with its last entry withheld still verifies, but ends earlier (the caller compares it with the relay's reported end)");
+        CHECK(!archive::verify_chain(CryptoEngine::random_bytes(16), start, entries), "the same entries under another archive's ID do not verify");
     }
 
     std::cout << "The inside of an envelope: versions and hostile input\n";
