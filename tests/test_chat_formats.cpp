@@ -1,6 +1,7 @@
 // Tests for signed message records and sealed envelopes.
 #include "archive.h"
 #include "crypto_engine.h"
+#include "keyring.h"
 #include "envelope.h"
 #include "message_record.h"
 #include "protocol.h"
@@ -607,6 +608,87 @@ int main() {
         CHECK(!as_record(1, Bytes(), 0, payload), "...but not as version 1");
         CHECK(!as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 0, payload) && !as_record(2, Bytes(), 1, payload), "it is outside the transcript: no previous entry, nothing seen");
         CHECK(!as_record(2, Bytes(), 0, Bytes(100, 1)), "and its payload has a small limit");
+    }
+
+    std::cout << "The keyring\n";
+    {
+        keyring::Contents c;
+        for (int i = 0; i < 2; i++) {
+            keyring::ArchiveItem a;
+            a.conversation_id = CryptoEngine::random_bytes(16);
+            a.relay_address = "10.0.0.248:9000";
+            a.relay_id = CryptoEngine::random_bytes(32);
+            a.role = i + 1;
+            a.state = i == 0 ? 1 : 0;
+            a.archive_key = CryptoEngine::random_bytes(32);
+            a.chat_public_key = CryptoEngine::random_bytes(1952);
+            a.chat_private_key = CryptoEngine::random_bytes(4032);
+            if (i == 1) a.join_token = CryptoEngine::random_bytes(32);
+            c.archives.push_back(a);
+        }
+        c.verified = {std::string(64, 'a'), std::string(64, 'b')};
+        c.member_tokens = {{CryptoEngine::random_bytes(16), std::string(64, 'c'), CryptoEngine::random_bytes(32)}};
+        c.introduced = {{std::string(64, 'd'), CryptoEngine::random_bytes(6597), 1700000000, std::string(64, 'e'), 1700000100}};
+        c.issued_tokens = {{CryptoEngine::random_bytes(32), "for Bob", 1700000200, std::string(64, 'f'), true}, {CryptoEngine::random_bytes(32), "unnamed card", 1700000300, "", false}};
+        c.receipts = {{CryptoEngine::random_bytes(16), false, true}, {CryptoEngine::random_bytes(16), true, false}};
+
+        Bytes data = keyring::serialize(c);
+        auto back = keyring::parse(data);
+        CHECK(back && back->archives.size() == 2 && back->archives[0].conversation_id == c.archives[0].conversation_id && back->archives[0].chat_private_key == c.archives[0].chat_private_key &&
+                  back->archives[1].join_token == c.archives[1].join_token && back->archives[0].join_token.empty() && back->archives[1].role == 2 && back->archives[1].state == 0,
+              "archives round trip, with their keys and the join token only where there is one");
+        CHECK(back && back->verified == c.verified && back->member_tokens.size() == 1 && back->member_tokens[0].token == c.member_tokens[0].token && back->introduced.size() == 1 &&
+                  back->introduced[0].bundle == c.introduced[0].bundle && back->introduced[0].first_seen == 1700000100 && back->introduced[0].introduced_by == c.introduced[0].introduced_by,
+              "so do verified people, member tokens and introduced members");
+        CHECK(back && back->issued_tokens.size() == 2 && back->issued_tokens[0].revoked && back->issued_tokens[0].label == "for Bob" && !back->issued_tokens[1].revoked && back->issued_tokens[1].bound_fp.empty() &&
+                  back->receipts.size() == 2 && !back->receipts[0].delivery && back->receipts[0].read && back->receipts[1].delivery && !back->receipts[1].read,
+              "and issued tokens (with revocation and who they are bound to) and receipt settings");
+        CHECK(keyring::serialize(*back) == data, "the same contents always give the same bytes, so a changed keyring can be told from an unchanged one");
+        CHECK(data.size() < 20000, "(a two-chat keyring is " + std::to_string(data.size()) + " bytes, about 6 KB per chat)");
+        keyring::Contents none;
+        auto empty_back = keyring::parse(keyring::serialize(none));
+        CHECK(none.empty() && empty_back && empty_back->empty() && !c.empty(), "an empty keyring is valid and knows it is empty");
+
+        bool prefixes = true;
+        for (size_t n = 0; n < data.size(); n += 17)
+            if (keyring::parse(Bytes(data.begin(), data.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes trailing = data; trailing.push_back(0);
+        CHECK(prefixes && !keyring::parse(trailing) && !keyring::parse(Bytes()) && !keyring::parse(Bytes(500, 0xFF)), "truncations, trailing bytes, an empty input and garbage are rejected");
+
+        auto altered = [&](const std::function<void(keyring::Contents&)>& f) { keyring::Contents x = c; f(x); return keyring::parse(keyring::serialize(x)); };
+        CHECK(!altered([](keyring::Contents& x) { x.archives[0].role = 0; }) && !altered([](keyring::Contents& x) { x.archives[0].role = 3; }) && !altered([](keyring::Contents& x) { x.archives[0].state = 3; }),
+              "an archive role or state out of range is rejected");
+        CHECK(!altered([](keyring::Contents& x) { x.archives[0].archive_key.pop_back(); }) && !altered([](keyring::Contents& x) { x.archives[0].relay_id.push_back(0); }) &&
+                  !altered([](keyring::Contents& x) { x.archives[0].conversation_id.pop_back(); }) && !altered([](keyring::Contents& x) { x.member_tokens[0].token.push_back(0); }) &&
+                  !altered([](keyring::Contents& x) { x.issued_tokens[0].hash.pop_back(); }), "keys, IDs and tokens of the wrong size are rejected");
+        CHECK(!altered([](keyring::Contents& x) { x.archives[0].relay_address.clear(); }) && !altered([](keyring::Contents& x) { x.archives[0].chat_private_key.clear(); }) && !altered([](keyring::Contents& x) { x.introduced[0].bundle.clear(); }),
+              "an archive with no address or key, or an introduced member with no bundle, is rejected");
+        CHECK(!altered([](keyring::Contents& x) { x.archives[0].relay_address = std::string(256, 'a'); }), "an over-long address is rejected");
+        CHECK(throws([&] { keyring::Contents big; big.verified = {std::string(5000, 'x')}; keyring::serialize(big); }), "something too long to store is refused when making a keyring");
+
+        Bytes newer = data;
+        newer[4 + 19 + 3] = 2;  // the version field: after the length-prefixed label
+        Bytes wrong_label = data;
+        wrong_label[6] ^= 1;
+        CHECK(!keyring::parse(newer) && !keyring::parse(wrong_label), "a keyring from a newer version, or one that isn't a keyring, is rejected");
+        Bytes lying;
+        write_string(lying, "pq-suite v3 keyring"); write_u32(lying, 1); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!keyring::parse(lying), "a declared count of four billion archives is rejected without allocating");
+
+        const Bytes key = CryptoEngine::random_bytes(32), mailbox = CryptoEngine::random_bytes(16);
+        Bytes sealed = keyring::seal(key, mailbox, data);
+        auto opened = keyring::open(key, mailbox, sealed);
+        CHECK(opened && *opened == data && sealed.size() == data.size() + 28, "a sealed keyring opens to what was sealed, with 28 bytes of overhead");
+        CHECK(!contains(sealed, std::string(c.archives[0].archive_key.begin(), c.archives[0].archive_key.begin() + 16)) && !contains(sealed, "10.0.0.248"), "none of it is visible in the sealed form");
+        CHECK(keyring::seal(key, mailbox, data) != sealed, "sealing twice gives different bytes");
+        CHECK(!keyring::open(CryptoEngine::random_bytes(32), mailbox, sealed) && !keyring::open(key, CryptoEngine::random_bytes(16), sealed), "it opens only under its own key, for its own mailbox");
+        int opened_after_flip = 0;
+        for (size_t i = 0; i < sealed.size(); i += 7) {
+            Bytes bad = sealed;
+            bad[i] ^= 1;
+            if (keyring::open(key, mailbox, bad)) opened_after_flip++;
+        }
+        CHECK(opened_after_flip == 0 && !keyring::open(key, mailbox, Bytes()) && !keyring::open(key, mailbox, Bytes(sealed.begin(), sealed.begin() + 20)), "a changed byte, a truncation or nothing at all is refused");
     }
 
     std::cout << "Archive entries and chain\n";

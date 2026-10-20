@@ -368,6 +368,7 @@ int main(int argc, char** argv) {
     const Bytes a = fp_raw(alice), b = fp_raw(bob), c = fp_raw(carol), d = fp_raw(dave), m = fp_raw(mallory);
 
     std::string hiking;  // the group of Alice, Bob and Carol
+    std::string archive_test_group;  // a group whose archive is made by hand (section 16)
 
     std::cout << "1. Creating a group\n";
     {
@@ -974,6 +975,7 @@ int main(int argc, char** argv) {
         restart_engine(alice);
         std::string manual;
         CHECK(alice.engine->create_group("Archive test", {bob.fp, carol.fp}, manual, err), "(Alice makes a group, with her own archive creation paused)");
+        archive_test_group = manual;
         CHECK(wait_for([&] { return find_invite(bob, manual) && find_invite(carol, manual); }), "(Bob and Carol are invited)");
         CHECK(bob.engine->accept_group_invite(manual, err) && carol.engine->accept_group_invite(manual, err), "(and join)");
         const Bytes group_id = *hex_to_bytes(manual);
@@ -990,22 +992,25 @@ int main(int argc, char** argv) {
         CHECK(!bob.engine->create_archive(manual, err) && has(err, "Someone else"), "a member who didn't make the group can't make its archive: " + err);
         CHECK(alice.engine->create_archive(manual, err), "the group's creator makes it (" + err + ")");
         CHECK(wait_for([&] { return bob.engine->archive_status(manual).joined && carol.engine->archive_status(manual).joined; }, 30000), "Bob and Carol each receive their own grant and join");
+        CHECK(wait_for([&] { return alice.engine->archive_status(manual).entries >= 1 && bob.engine->archive_status(manual).entries >= 1 && carol.engine->archive_status(manual).entries >= 1; }, 30000),
+              "the group's creation record is the archive's first entry, and all three have checked it");
+        const uint64_t gbase = alice.engine->archive_status(manual).entries;
 
         Bytes g1 = text_record(alice, group_id, trio, "welcome, archived");
-        CHECK(alice.engine->archive_append(manual, g1, n, others, err) && n == 1, "Alice appends");
+        CHECK(alice.engine->archive_append(manual, g1, n, others, err) && n == gbase + 1, "Alice appends");
         CHECK(bob.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g1 && carol.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g1,
               "Bob and Carol both read it");
         // A second grant, from the real creator, with a different key: a replay must not change what Bob holds.
         send_envelope(bob, token_for(alice, bob), grant_inner(alice, group_id, trio, CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)));
         run_for(1500);
         Bytes g2 = text_record(carol, group_id, trio, "from Carol, after a replayed grant");
-        CHECK(carol.engine->archive_append(manual, g2, n, others, err) && n == 2, "Carol appends");
+        CHECK(carol.engine->archive_append(manual, g2, n, others, err) && n == gbase + 2, "Carol appends");
         CHECK(bob.engine->archive_sync(manual, fresh, err) && fresh.size() == 1 && fresh[0].record == g2, "Bob still reads it: the replayed grant did not replace his archive key");
         Bytes g3 = text_record(bob, group_id, trio, "Bob, at the same time as Carol");
         Bytes g4 = text_record(carol, group_id, trio, "Carol, at the same time as Bob");
-        CHECK(bob.engine->archive_append(manual, g3, n, others, err) && n == 3 && carol.engine->archive_append(manual, g4, n, others, err) && n == 4 && others.size() == 1 && others[0].record == g3,
+        CHECK(bob.engine->archive_append(manual, g3, n, others, err) && n == gbase + 3 && carol.engine->archive_append(manual, g4, n, others, err) && n == gbase + 4 && others.size() == 1 && others[0].record == g3,
               "two members writing at once end up in one order, the second catching up on the first");
-        CHECK(alice.engine->archive_sync(manual, fresh, err) && fresh.size() == 3 && fresh[0].number == 2 && fresh[2].number == 4 && alice.engine->archive_status(manual).entries == 4,
+        CHECK(alice.engine->archive_sync(manual, fresh, err) && fresh.size() == 3 && fresh[0].number == gbase + 2 && fresh[2].number == gbase + 4 && alice.engine->archive_status(manual).entries == gbase + 4,
               "Alice, who was away, catches up on all three in order");
         CHECK(!file_contains(alice.history(), "welcome, archived") && !file_contains(fs::path(alice.history().string() + "-wal"), "welcome, archived"), "(an archived record's text is not readable in the history file)");
 
@@ -1044,10 +1049,94 @@ int main(int argc, char** argv) {
         CHECK(genuine, "and as Alice's: it carried her signature, checked as for any message");
 
         // Checkpoints: after a few entries each member signs where they have got to.
-        for (int i = 1; i <= 7; i++) alice.engine->send_group_text(hiking, "filler " + std::to_string(i), err);
+        const uint64_t before_fillers = alice.engine->archive_status(hiking).entries;
+        std::string filler_errors;
+        for (int i = 1; i <= 7; i++) {
+            std::string fe;
+            if (!alice.engine->send_group_text(hiking, "filler " + std::to_string(i), fe)) filler_errors += " [" + std::to_string(i) + ": " + fe + "]";
+        }
+        CHECK(filler_errors.empty(), "Alice sends seven more messages" + filler_errors);
+        CHECK(wait_for([&] { return alice.engine->archive_status(hiking).entries >= before_fillers + 7; }, 60000), "and all seven reach the archive");
         CHECK(wait_for([&] { return bob.engine->archive_status(hiking).checkpoint_seen > 0 && carol.engine->archive_status(hiking).checkpoint_seen > 0; }, 60000),
               "after enough entries, other members' signed checkpoints appear in the archive and are seen");
         CHECK(bob.engine->archive_status(hiking).warning.empty() && carol.engine->archive_status(hiking).warning.empty() && alice.engine->archive_status(hiking).warning.empty(), "all of which agree with the relay's copy: no warnings");
+
+
+        // --- A reinstall: Bob's history is gone, only his keys folder is left ---
+        std::cout << "17b. Restoring after a reinstall\n";
+        {
+            CHECK(wait_for([&] { return bob.engine->archive_status(mixed).joined && bob.engine->archive_status(archive_test_group).joined; }, 30000), "(Bob has joined the archives of the groups he is in)");
+            const std::vector<std::string> expected_hiking = {"this one is archived too", "only the archive will bring this one", "filler 1", "filler 7"};
+            const std::vector<std::string> expected_manual = {"welcome, archived", "from Carol, after a replayed grant", "Bob, at the same time as Carol", "Carol, at the same time as Bob"};
+            CHECK(bob.engine->is_verified(dave.fp), "(Bob had marked Dave as verified)");
+            const uint64_t hiking_entries = bob.engine->archive_status(hiking).entries;
+            CHECK(bob.engine->save_keyring(err), "Bob's keyring is stored on the relay, encrypted (" + err + ")");
+
+            // A damaged keyring is refused, with a reason; a good one can be stored over it.
+            sql_exec(ROOT / "relay-data/s/v3/relay.db", "UPDATE keyrings SET blob = zeroblob(200)");
+            MessagingEngine::RestoreReport bad;
+            CHECK(!bob.engine->restore_from_relay(bad, err) && !bad.found && has(err, "could not be opened"), "a keyring that has been damaged on the relay is refused: " + err);
+            CHECK(bob.engine->save_keyring(err), "(Bob stores a good one again)");
+
+            // The reinstall: no history at all.
+            bob.engine.reset();
+            fs::remove(bob.history());
+            fs::remove(fs::path(bob.history().string() + "-wal"));
+            fs::remove(fs::path(bob.history().string() + "-shm"));
+            restart_engine(bob);
+            CHECK(bob.engine->groups().empty() && !bob.engine->is_verified(dave.fp) && !bob.engine->archive_status(hiking).exists, "(Bob's history is gone: no chats, no verified people, no archives)");
+
+            MessagingEngine::RestoreReport report;
+            CHECK(bob.engine->restore_from_relay(report, err), "Bob restores from the relay (" + err + ")");
+            CHECK(report.found && report.archives >= 3 && report.chats_restored >= 3 && report.messages > 0, "it found his keyring and read back several chats (" + std::to_string(report.chats_restored) + " chats, " + std::to_string(report.messages) + " messages)");
+
+            auto find_group = [&](const std::string& id) -> std::optional<MessagingEngine::GroupSummary> {
+                for (auto& g : bob.engine->groups()) if (g.id == id) return g;
+                return std::nullopt;
+            };
+            auto h = find_group(hiking);
+            auto m = find_group(mixed);
+            auto t = find_group(archive_test_group);
+            CHECK(h && m && t, "the groups are back");
+            CHECK(h && h->members.size() == 2 && h->creator_fp == alice.fp && !h->created_by_me, "rebuilt from the creation record in the archive: who is in the group and who made it");
+            CHECK(t && t->title == "Archive test", "with its title");
+            std::string missing;
+            for (auto& text : expected_hiking) if (!got(bob, hiking, text)) missing += " [hiking: " + text + "]";
+            for (auto& text : expected_manual) {
+                bool found = false;
+                for (auto& msg : bob.engine->group_messages(archive_test_group)) found |= msg.text == text;
+                if (!found) missing += " [archive test: " + text + "]";
+            }
+            if (!missing.empty()) {
+                std::string have;
+                for (auto& msg : bob.engine->group_messages(hiking)) have += " [" + msg.text.substr(0, 24) + (msg.outgoing ? " (mine)" : "") + "]";
+                missing += " -- restored hiking has:" + have + " -- entries: bob " + std::to_string(bob.engine->archive_status(hiking).entries) + ", alice " + std::to_string(alice.engine->archive_status(hiking).entries);
+            }
+            CHECK(missing.empty(), "and the messages that were archived, from every member" + (missing.empty() ? std::string() : ", but missing:" + missing));
+            bool own = false, from_carol = false;
+            for (auto& msg : bob.engine->group_messages(archive_test_group)) {
+                if (msg.text == "Bob, at the same time as Carol" && msg.outgoing) own = true;
+                if (msg.text == "from Carol, after a replayed grant" && !msg.outgoing && msg.sender_fp == carol.fp && msg.sender_name == "Carol") from_carol = true;
+            }
+            CHECK(own && from_carol, "Bob's own messages come back as his, and others' with their names, every signature checked again");
+            CHECK(h && h->unread == 0 && t && t->unread == 0, "nothing restored is marked unread");
+            CHECK(bob.engine->is_verified(dave.fp), "Dave is still marked verified");
+            bool dave_ok = false;
+            if (m) for (auto& mem : m->members) if (mem.fp == dave.fp && mem.label == "Verified by you" && !mem.is_contact) dave_ok = true;
+            CHECK(dave_ok, "...and in the group he is still the introduced member Bob verified: the keyring held his bundle");
+            auto status = bob.engine->archive_status(hiking);
+            CHECK(status.joined && !status.is_creator && status.entries >= hiking_entries && status.warning.empty(), "his archives are back in use, as a member, with the chain checked from the start");
+
+            // Restoring again adds nothing twice.
+            MessagingEngine::RestoreReport again;
+            size_t before = bob.engine->group_messages(hiking).size();
+            CHECK(bob.engine->restore_from_relay(again, err) && again.messages == 0 && bob.engine->group_messages(hiking).size() == before, "restoring a second time changes nothing");
+
+            // And the restored device can take part again, using the restored keys.
+            CHECK(bob.engine->send_group_text(hiking, "back after a reinstall", err), "Bob sends a message");
+            CHECK(wait_for([&] { return got(alice, hiking, "back after a reinstall") && got(carol, hiking, "back after a reinstall"); }, 30000), "the others receive it");
+            CHECK(wait_for([&] { return bob.engine->archive_status(hiking).entries > status.entries; }, 30000), "and it reaches the archive, with the key Bob made before the reinstall");
+        }
 
         // The relay drops the end of the log.
         wait_for([&] { return alice.engine->archive_status(hiking).entries == bob.engine->archive_status(hiking).entries && bob.engine->archive_status(hiking).entries == carol.engine->archive_status(hiking).entries; }, 30000);

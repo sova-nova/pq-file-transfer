@@ -212,6 +212,12 @@ public:
     // A token lets us write to one member's mailbox, and is good for one group only. It is a bearer
     // secret, so it is stored encrypted like the messages. Saving again for the same group and
     // member replaces it.
+    struct MemberTokenRow {
+        Bytes conversation_id;
+        std::string member_fp;
+        Bytes token;
+    };
+    std::vector<MemberTokenRow> all_member_tokens();  // for the keyring; rows that can't be opened are left out
     void save_member_token(const Bytes& conversation_id, const std::string& member_fp, const Bytes& token, int64_t now);
     std::optional<Bytes> member_token(const Bytes& conversation_id, const std::string& member_fp);
 

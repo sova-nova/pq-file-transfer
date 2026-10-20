@@ -150,6 +150,15 @@ std::vector<uint8_t> encode(const ArchiveEntry& m) {
     return b;
 }
 
+std::vector<uint8_t> encode(const KeyringChunk& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.total_size);
+    write_u32(b, m.index);
+    write_u32(b, m.count);
+    write_blob(b, m.data);
+    return b;
+}
+
 std::vector<uint8_t> encode(const HashOp& m) {
     std::vector<uint8_t> b;
     write_blob(b, m.token_hash);
@@ -342,6 +351,23 @@ std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>& in)
     auto ct = read_blob(in.data(), in.size(), off, MAX_ARCHIVE_ENTRY_BYTES);
     if (!number || !hash || !ct || ct->empty() || !at_end(in, off)) return std::nullopt;
     return ArchiveEntry{*number, std::move(*hash), std::move(*ct)};
+}
+
+std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto total = read_u32(in.data(), in.size(), off);
+    auto index = read_u32(in.data(), in.size(), off);
+    auto count = read_u32(in.data(), in.size(), off);
+    auto data = read_blob(in.data(), in.size(), off, KEYRING_CHUNK_BYTES);
+    if (!total || !index || !count || !data || !at_end(in, off)) return std::nullopt;
+    KeyringChunk c{*total, *index, *count, std::move(*data)};
+    if (c.total_size == 0) return c.index == 0 && c.count == 0 && c.data.empty() ? std::optional<KeyringChunk>(c) : std::nullopt;  // "none"
+    if (c.total_size > MAX_KEYRING_BYTES) return std::nullopt;
+    const uint32_t expected_count = static_cast<uint32_t>((static_cast<uint64_t>(c.total_size) + KEYRING_CHUNK_BYTES - 1) / KEYRING_CHUNK_BYTES);
+    if (c.count != expected_count || c.index >= c.count) return std::nullopt;
+    const uint64_t expected_size = c.index + 1 < c.count ? KEYRING_CHUNK_BYTES : c.total_size - static_cast<uint64_t>(KEYRING_CHUNK_BYTES) * (c.count - 1);
+    if (c.data.size() != expected_size) return std::nullopt;
+    return c;
 }
 
 std::optional<HashOp> decode_hash_op(const std::vector<uint8_t>& in) {

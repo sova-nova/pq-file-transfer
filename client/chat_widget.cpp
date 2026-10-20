@@ -114,6 +114,9 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     top->addWidget(invites_button_);
     top->addWidget(new_group_button_);
     top->addWidget(relay_invite_button_);
+    restore_button_ = new QPushButton("Restore history…", this);
+    restore_button_->setToolTip("After reinstalling: get your saved chats back from the relay");
+    top->addWidget(restore_button_);
     top->addWidget(cards_button_);
     root->addLayout(top);
 
@@ -189,6 +192,7 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         cards_button_->setEnabled(false);
         new_group_button_->setEnabled(false);
         relay_invite_button_->setEnabled(false);
+        restore_button_->setEnabled(false);
         invites_button_->setEnabled(false);
         input_->setEnabled(false);
         send_button_->setEnabled(false);
@@ -204,6 +208,7 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(cards_button_, &QPushButton::clicked, this, [this] { show_cards_issued(); });
     connect(new_group_button_, &QPushButton::clicked, this, [this] { create_group_dialog(); });
     connect(relay_invite_button_, &QPushButton::clicked, this, [this] { make_relay_invite(); });
+    connect(restore_button_, &QPushButton::clicked, this, [this] { restore_history(); });
     connect(invites_button_, &QPushButton::clicked, this, [this] { review_group_invites(); });
     connect(revoke_button_, &QPushButton::clicked, this, [this] { revoke_access_for_current(); });
     connect(people_button_, &QPushButton::clicked, this, [this] { people_clicked(); });
@@ -261,6 +266,7 @@ void ChatWidget::refresh_if_changed() {
     cards_button_->setEnabled(engine_->is_set_up());
     new_group_button_->setEnabled(engine_->is_set_up());
     relay_invite_button_->setEnabled(engine_->is_set_up());
+    restore_button_->setEnabled(engine_->is_set_up());
     const size_t pending = engine_->requests().size();
     requests_button_->setText(pending ? QString("Message requests (%1)").arg(static_cast<qulonglong>(pending)) : QString("Message requests"));
     const size_t invitations = engine_->group_invites().size();
@@ -892,6 +898,42 @@ void ChatWidget::make_relay_invite() {
     });
     reload();
     dialog.exec();
+}
+
+// After a reinstall: read the user's chats back from the relay. It needs the same keys folder and passphrase as
+// before, because the saved keyring and every archive are encrypted under keys derived from them.
+void ChatWidget::restore_history() {
+    QMessageBox ask(QMessageBox::Question, "Restore history",
+                    "This fetches your saved chats from the relay, using the keys on this computer, and rebuilds them here.\n\n"
+                    "It only works for chats that had been archived, and only with the same keys folder and passphrase you used before: "
+                    "without those, there is nothing to restore from. Private chats are never restored.\n\nRestore now?",
+                    QMessageBox::Yes | QMessageBox::No, this);
+    plain_box(ask);
+    if (ask.exec() != QMessageBox::Yes) return;
+    MessagingEngine::RestoreReport report;
+    std::string error;
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool ok = engine_->restore_from_relay(report, error);
+    QGuiApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::warning(this, "Restore history", qstr(error));
+        return;
+    }
+    auto number = [](size_t n) { return QString::number(static_cast<qulonglong>(n)); };
+    QString text = "Restored " + number(report.chats_restored) + " chats, with " + number(report.messages) + " messages.";
+    if (report.chats_skipped) {
+        text += "\n\n" + number(report.chats_skipped) + " could not be restored:";
+        size_t shown = 0;
+        for (const auto& note : report.notes) {
+            if (shown++ == 6) { text += "\n...and more"; break; }
+            text += "\n  " + qstr(note);
+        }
+    }
+    text += "\n\nChats from before archives existed, and Private chats, cannot come back.";
+    QMessageBox done(QMessageBox::Information, "Restore history", text, QMessageBox::Ok, this);
+    plain_box(done);
+    done.exec();
+    refresh();
 }
 
 void ChatWidget::review_group_invites() {

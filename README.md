@@ -95,7 +95,7 @@ cmake ..            # macOS: cmake -DCMAKE_PREFIX_PATH=$(brew --prefix qt) ..
 cmake --build . -j
 ```
 
-To build only the relay server and the command-line tools, for example on a headless machine without Qt, use `cmake -DPQ_BUILD_CLIENT=OFF ..`. They still need liboqs and SQLite. You don't have to compile them on the relay machine at all: the release page has a ready-made `pq-server-linux-x86_64` (it needs the system's `libssl3` and `libsqlite3-0`, both present on current Debian and Ubuntu).
+To build only the relay server and the command-line tools, for example on a headless machine without Qt, use `cmake -DPQ_BUILD_CLIENT=OFF ..`. They still need liboqs and SQLite. On a small machine, build just the relay with `cmake --build . --target pq-server`: the default build also compiles the client core (for `pq-relay-check`), and its largest file, `messaging_engine.cpp`, can take a long time or a lot of memory on a small or single-core box (about 10 seconds and 320 MB on a desktop). You don't have to compile them on the relay machine at all: the release page has a ready-made `pq-server-linux-x86_64` (it needs the system's `libssl3` and `libsqlite3-0`, both present on current Debian and Ubuntu).
 
 **Optional: OS keychain support.** If QtKeychain for Qt 6 is installed, CMake finds it and the client can remember your key passphrase. Without it the client still works and just asks for the passphrase at every start. To build it yourself:
 
@@ -173,6 +173,8 @@ To see who is on the relay and who vouched for whom, or to undo it:
 
 The first columns of `--list-mailboxes` are the IDs to use (at least 8 characters). Removing a mailbox deletes its queued messages and its owner can no longer sign in. A relay with existing mailboxes upgrades its database automatically the first time the new version starts.
 
+**Chat archives and restoring.** The app keeps an encrypted, tamper-evident copy of each chat on the relay, so a lost or wiped device doesn't lose its chats. The relay holds only ciphertext and can't read or alter it undetected; it also keeps one encrypted keyring per mailbox, which holds the keys a reinstalled app needs to find and open those archives. To restore after a reinstall, put your keys folder back, enter the same passphrase, set up messaging against the same relay and mailbox, and press **Restore history…**. This needs the keys folder and its passphrase: without them there is nothing to restore from, and the relay cannot help. Only chats that had been archived come back (not chats from before archives existed, and never Private chats), restored messages are marked read, and delivery detail for messages you sent is not kept. Each chat's archive is limited by `--archive-quota-mib`, and a mailbox's keyring by `--keyring-max-kib` (each chat adds about 6 KB to it, so the default holds roughly 600 chats).
+
 **Checking it from the outside.** `pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
 
 ```bash
@@ -193,6 +195,7 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
 | `--max-archives N` | 1000 | Chat archives the relay will hold |
 | `--archive-quota-mib N` | 512 | Encrypted bytes allowed per chat archive |
+| `--keyring-max-kib N` | 4096 | Largest keyring one mailbox may store (see below) |
 | `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
 | `--member-invites-total N` | 10 | Most people one member may ever invite |
 | `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |

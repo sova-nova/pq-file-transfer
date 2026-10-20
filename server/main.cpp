@@ -496,6 +496,7 @@ static void print_usage(const char* prog) {
               << "  --sweep-seconds N           how often expired envelopes are removed (default 60)\n"
               << "  --max-archives N            chat archives the relay will hold (default 1000)\n"
               << "  --archive-quota-mib N       encrypted bytes allowed per chat archive (default 512)\n"
+              << "  --keyring-max-kib N         largest keyring one mailbox may store (default 4096)\n"
               << "\nMembers vouching for friends: anyone on the relay can make single-use invites from the app.\n"
               << "The relay records who vouched for whom.\n"
               << "  --member-invites N          unused invites one member may have at once (default 3; 0 turns\n"
@@ -570,6 +571,8 @@ int main(int argc, char* argv[]) {
                 with_invitees = true;
             } else if (arg == "--max-archives" && has_value) {
                 limits.max_archives = std::stoull(argv[++i]);
+            } else if (arg == "--keyring-max-kib" && has_value) {
+                limits.keyring_max_bytes = std::stoull(argv[++i]) * 1024;
             } else if (arg == "--archive-quota-mib" && has_value) {
                 limits.archive_quota_bytes = std::stoull(argv[++i]) * 1024 * 1024;
             } else if (arg == "--member-invites" && has_value) {

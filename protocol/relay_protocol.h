@@ -146,6 +146,22 @@ struct ArchiveEntry {
     std::vector<uint8_t> ciphertext;
 };
 
+// --- Keyring ---
+//
+// A mailbox owner can keep one opaque, encrypted blob on the relay: what a reinstalled app needs, beyond
+// the keys folder, to find and open its chats' archives. The relay can't read it. It is sent in chunks,
+// because it can be much larger than one message, and replaces the previous one only when the last chunk
+// has arrived.
+constexpr size_t KEYRING_CHUNK_BYTES = 48 * 1024;
+constexpr uint32_t MAX_KEYRING_BYTES = 16u * 1024 * 1024;  // the most the format allows; a relay sets its own lower limit
+
+struct KeyringChunk {
+    uint32_t total_size = 0;  // the whole keyring
+    uint32_t index = 0;       // this chunk's place, from 0
+    uint32_t count = 0;       // how many chunks there are
+    std::vector<uint8_t> data;
+};
+
 // --- Encoding. decode_* validate every length and reject trailing bytes. ---
 
 std::vector<uint8_t> encode(const Hello&);
@@ -164,6 +180,7 @@ std::vector<uint8_t> encode(const ArchiveAppend&);
 std::vector<uint8_t> encode(const ArchiveHead&);
 std::vector<uint8_t> encode(const ArchiveFetch&);
 std::vector<uint8_t> encode(const ArchiveEntry&);
+std::vector<uint8_t> encode(const KeyringChunk&);
 
 std::optional<Hello> decode_hello(const std::vector<uint8_t>&);
 std::optional<HelloReply> decode_hello_reply(const std::vector<uint8_t>&);
@@ -181,6 +198,10 @@ std::optional<ArchiveAppend> decode_archive_append(const std::vector<uint8_t>&);
 std::optional<ArchiveHead> decode_archive_head(const std::vector<uint8_t>&);
 std::optional<ArchiveFetch> decode_archive_fetch(const std::vector<uint8_t>&);
 std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>&);
+// A chunk is valid only if its numbers fit together: the count is what the total needs, the index is in
+// range, and the data is a full chunk (or the remainder, for the last). An all-zero chunk with no data
+// means "no keyring".
+std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>&);
 
 // --- What gets signed. Each starts with its own label, and includes the relay ID, so a
 // signature made for one purpose or one relay can't be accepted for another. ---

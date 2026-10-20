@@ -50,6 +50,11 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  token_hash BLOB);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at);"
+         // Version 5: one encrypted keyring per mailbox, removed with it.
+         "CREATE TABLE IF NOT EXISTS keyrings("
+         "  mailbox_id BLOB PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE,"
+         "  blob BLOB NOT NULL,"
+         "  updated_at INTEGER NOT NULL);"
          // Version 4: chat archives. Nothing here refers to a mailbox.
          "CREATE TABLE IF NOT EXISTS archives("
          "  id BLOB PRIMARY KEY,"
@@ -79,8 +84,8 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  PRIMARY KEY(archive_id, number))");
 
     // Schema versions: 1 = the first release (envelopes without token_hash), 2 = token hashes,
-    // 3 = invites and mailboxes remember who vouched, 4 = current (chat archives; new tables only, so
-    // nothing to alter). A brand-new database is created at the current shape and starts at 0.
+    // 3 = invites and mailboxes remember who vouched, 4 = chat archives, 5 = current (keyrings; new
+    // tables only, so nothing to alter). A brand-new database is created at the current shape and starts at 0.
     int64_t version = 0;
     {
         Stmt v(db_, "PRAGMA user_version");
@@ -91,7 +96,7 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
         exec(db_, "ALTER TABLE invites ADD COLUMN issued_by BLOB");
         exec(db_, "ALTER TABLE mailboxes ADD COLUMN invited_by BLOB");
     }
-    if (version < 4) exec(db_, "PRAGMA user_version=4");
+    if (version < 5) exec(db_, "PRAGMA user_version=5");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -318,6 +323,19 @@ size_t RelayStore::envelope_count(const Bytes& mailbox_id) {
 }
 
 // --- Chat archives ---
+
+void RelayStore::put_keyring(const Bytes& mailbox_id, const Bytes& blob, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR REPLACE INTO keyrings(mailbox_id, blob, updated_at) VALUES(?, ?, ?)").blob(1, mailbox_id).blob(2, blob).i64(3, now).step();
+}
+
+std::optional<Bytes> RelayStore::get_keyring(const Bytes& mailbox_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT blob FROM keyrings WHERE mailbox_id = ?");
+    s.blob(1, mailbox_id);
+    if (!s.step()) return std::nullopt;
+    return s.column_blob(0);
+}
 
 RelayStore::CreateArchiveResult RelayStore::create_archive(const Bytes& archive_id, const std::vector<Bytes>& join_token_hashes,
                                                            const Bytes& genesis_hash, int64_t now, int64_t closes_at, size_t max_archives) {

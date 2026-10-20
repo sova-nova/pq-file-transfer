@@ -32,6 +32,7 @@ struct RelayLimits {
     size_t max_archives = 1000;                          // on the whole relay
     size_t archive_quota_bytes = 512ull * 1024 * 1024;   // of ciphertext, per archive
     int64_t archive_join_window_seconds = 30ll * 24 * 3600;  // members must register their keys within this
+    size_t keyring_max_bytes = 4ull * 1024 * 1024;       // one mailbox's keyring (each chat's key alone is about 4 KB)
     int idle_timeout_seconds = 180;                    // clients ping every minute or so
     int poll_millis = 250;                             // how often a connected owner is checked for news
 };

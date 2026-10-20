@@ -17,6 +17,7 @@
 #include "history_store.h"
 #include "identity_bundle.h"
 #include "key_store.h"
+#include "keyring.h"
 #include "message_record.h"
 #include "relay_client.h"
 #include "sharing.h"
@@ -51,6 +52,7 @@ public:
         int archive_sync_seconds = 300;
         int archive_checkpoint_every = 50;
         int archive_checkpoint_max_age_seconds = 24 * 3600;
+        int keyring_check_seconds = 60;  // how often to see whether the keyring on the relay needs updating
     };
 
     // Throws std::runtime_error if the keys are locked or the history can't be opened.
@@ -280,6 +282,25 @@ public:
     // it. Fails if the relay's copy doesn't add up (altered, reordered, or its end withheld).
     bool archive_sync(const std::string& conversation_id, std::vector<ArchivedRecord>& fresh, std::string& error);
 
+    // --- Restoring after a reinstall (M4) ---
+    // The keyring is what a reinstalled app needs, beyond the keys folder, to find and open its chats'
+    // archives. It is encrypted so the relay can't read it and kept in a slot of the user's own mailbox;
+    // pump() keeps it up to date. Without the keys folder and its passphrase there is nothing to restore from.
+    // Builds the keyring and stores it on the relay now, instead of waiting for pump() to.
+    bool save_keyring(std::string& error);
+    struct RestoreReport {
+        bool found = false;               // the relay held a keyring that these keys could open
+        size_t archives = 0;              // chats whose archive details were restored
+        size_t chats_restored = 0;        // chats whose messages were read back from their archive
+        size_t chats_skipped = 0;         // chats that could not be rebuilt or read
+        size_t messages = 0;              // messages read back (all marked read)
+        std::vector<std::string> notes;   // what could not be restored, in words
+    };
+    // Fetches and opens the keyring, restores what it holds, then reads every chat's archive, checking each
+    // chain, and rebuilds the chats and their messages. Safe to run again: nothing held is added twice.
+    // Chats that were never archived (older than M4, and Private chats) cannot come back.
+    bool restore_from_relay(RestoreReport& report, std::string& error);
+
     // --- Running ---
     // Handles at most a few events: connects and signs in if needed, waits up to wait_ms for the
     // relay to say something, stores and acknowledges what arrives, sends whatever is queued.
@@ -346,6 +367,14 @@ private:
     bool process_checkpoint(const Bytes& conversation_id, const chat::SignedRecord& record, const std::string& sender_fp);
     void maybe_post_checkpoint(const Bytes& conversation_id);
     void warn_archive(const Bytes& conversation_id, const std::string& what);
+    keyring::Contents build_keyring();
+    bool store_keyring(const Bytes& plaintext, std::string& error);
+    void maintain_keyring();
+    bool rebuild_direct_chat(const Bytes& conversation_id);
+    bool rebuild_group_chat(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records, std::string& why);
+    size_t restore_records(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records);
+    Bytes keyring_uploaded_hash_;
+    std::chrono::steady_clock::time_point next_keyring_check_{};
     std::map<std::string, std::chrono::steady_clock::time_point> archive_create_retry_;
     std::map<std::string, std::chrono::steady_clock::time_point> archive_next_sync_;
     std::set<std::string> archive_sync_now_;  // chats where a message showed a gap

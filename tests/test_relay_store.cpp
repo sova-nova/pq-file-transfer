@@ -209,7 +209,7 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 4, "the schema version is now 4");
+        CHECK(version == 5, "the schema version is now 5");
         auto ms = migrated.members();
         CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
         CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
@@ -281,6 +281,23 @@ int main() {
 
     }
 
+
+    std::cout << "Keyrings\n";
+    {
+        RelayStore s(dir / "keyrings.db");
+        using R = RelayStore::RegisterResult;
+        s.add_invite(id(0xA1, 32), 99999);
+        s.add_invite(id(0xA2, 32), 99999);
+        CHECK(s.register_mailbox(id(0xA1, 32), id(1), id(0x55, 64), id(0xAA, 32), 1000, 10) == R::Ok && s.register_mailbox(id(0xA2, 32), id(2), id(0x55, 64), id(0xAB, 32), 1000, 10) == R::Ok, "(setup) two mailboxes");
+        CHECK(!s.get_keyring(id(1)), "a mailbox has no keyring to begin with");
+        s.put_keyring(id(1), envelope(1000, 1), 2000);
+        CHECK(s.get_keyring(id(1)) == envelope(1000, 1) && !s.get_keyring(id(2)), "a keyring is stored for its own mailbox only");
+        s.put_keyring(id(1), envelope(50, 2), 3000);
+        CHECK(s.get_keyring(id(1)) == envelope(50, 2), "storing again replaces it as a whole");
+        s.put_keyring(id(2), envelope(10, 3), 3000);
+        CHECK(s.delete_mailbox(id(1)) && !s.get_keyring(id(1)) && s.get_keyring(id(2)) == envelope(10, 3), "removing a mailbox removes its keyring and no one else's");
+        { RelayStore again(dir / "keyrings.db"); CHECK(again.get_keyring(id(2)) == envelope(10, 3), "a keyring survives a restart"); }
+    }
 
     std::cout << "Chat archives\n";
     {

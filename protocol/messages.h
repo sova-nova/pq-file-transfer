@@ -86,6 +86,11 @@ enum class MessageType : uint8_t {
     ARCHIVE_FETCH      = 0x49,  // member → relay: send entries from a number onwards
     ARCHIVE_ENTRY      = 0x4A,  // relay → member: one entry
     ARCHIVE_FETCH_END  = 0x4B,  // relay → member: that was all; here is the head
+    // --- Keyring (M4): one encrypted blob per mailbox, for restoring a device. Sent in chunks. ---
+    KEYRING_PUT        = 0x4C,  // mailbox owner → relay: one chunk of the new keyring
+    KEYRING_PUT_OK     = 0x4D,  // relay → owner: that chunk is accepted (after the last, the keyring is stored)
+    KEYRING_GET        = 0x4E,  // mailbox owner → relay: send me my keyring
+    KEYRING_DATA       = 0x4F,  // relay → owner: one chunk of it (or a marker that there is none)
     RELAY_PING         = 0x30,
     RELAY_PONG         = 0x31,
     ERROR_MSG        = 0xFE,  // either direction: UTF-8 error text

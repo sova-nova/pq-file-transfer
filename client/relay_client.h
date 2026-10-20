@@ -72,6 +72,11 @@ public:
     // Needs sign-in. Cancels one of your unused invites, named by the hash the list gave.
     bool cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error);
 
+    // --- Keyring (needs a mailbox sign-in): one encrypted blob per mailbox, sent in chunks ---
+    bool put_keyring(const std::vector<uint8_t>& blob, std::string& error);
+    // `exists` is false (and `blob` empty) if the relay holds none.
+    bool get_keyring(std::vector<uint8_t>& blob, bool& exists, std::string& error);
+
     // --- Chat archives (see relay_protocol.h) ---
     // Needs a mailbox sign-in. Makes an archive for as many members as there are join token hashes.
     bool create_archive(const std::vector<uint8_t>& archive_id, const std::vector<std::vector<uint8_t>>& join_token_hashes, std::string& error);

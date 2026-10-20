@@ -319,6 +319,56 @@ bool RelayClient::cancel_invite(const std::vector<uint8_t>& invite_hash, std::st
            read_reply(MessageType::RELAY_INVITE_CANCEL_OK, nullptr, error);
 }
 
+bool RelayClient::put_keyring(const std::vector<uint8_t>& blob, std::string& error) {
+    if (blob.empty() || blob.size() > relay::MAX_KEYRING_BYTES) {
+        error = "That keyring is empty or too large";
+        return false;
+    }
+    const uint32_t count = static_cast<uint32_t>((blob.size() + relay::KEYRING_CHUNK_BYTES - 1) / relay::KEYRING_CHUNK_BYTES);
+    for (uint32_t i = 0; i < count; i++) {
+        const size_t from = static_cast<size_t>(i) * relay::KEYRING_CHUNK_BYTES;
+        const size_t to = std::min(blob.size(), from + relay::KEYRING_CHUNK_BYTES);
+        relay::KeyringChunk chunk{static_cast<uint32_t>(blob.size()), i, count, std::vector<uint8_t>(blob.begin() + static_cast<std::ptrdiff_t>(from), blob.begin() + static_cast<std::ptrdiff_t>(to))};
+        if (!send_request(MessageType::KEYRING_PUT, relay::encode(chunk), error) || !read_reply(MessageType::KEYRING_PUT_OK, nullptr, error)) return false;
+    }
+    return true;
+}
+
+bool RelayClient::get_keyring(std::vector<uint8_t>& blob, bool& exists, std::string& error) {
+    blob.clear();
+    exists = false;
+    if (!send_request(MessageType::KEYRING_GET, {}, error)) return false;
+    uint32_t total = 0, count = 0, next = 0;
+    while (true) {
+        std::vector<uint8_t> payload;
+        if (!read_reply(MessageType::KEYRING_DATA, &payload, error)) return false;
+        auto chunk = relay::decode_keyring_chunk(payload);
+        if (!chunk) {
+            error = "The relay sent an invalid answer";
+            close();
+            return false;
+        }
+        if (chunk->count == 0) {  // the relay holds none
+            if (next != 0) { error = "The relay sent an invalid answer"; close(); return false; }
+            return true;
+        }
+        if (next == 0) {
+            total = chunk->total_size;
+            count = chunk->count;
+            blob.reserve(total);
+        }
+        if (chunk->index != next || chunk->total_size != total || chunk->count != count) {
+            error = "The relay sent the keyring out of order";
+            close();
+            return false;
+        }
+        blob.insert(blob.end(), chunk->data.begin(), chunk->data.end());
+        if (++next == count) break;
+    }
+    exists = true;
+    return true;
+}
+
 bool RelayClient::create_archive(const std::vector<uint8_t>& archive_id, const std::vector<std::vector<uint8_t>>& join_token_hashes, std::string& error) {
     return send_request(MessageType::ARCHIVE_CREATE, relay::encode(relay::ArchiveCreate{archive_id, join_token_hashes}), error) &&
            read_reply(MessageType::ARCHIVE_CREATE_OK, nullptr, error);

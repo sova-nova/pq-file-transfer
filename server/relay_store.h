@@ -97,6 +97,10 @@ public:
     size_t ack(const Bytes& mailbox_id, const std::vector<Bytes>& envelope_ids);
     size_t envelope_count(const Bytes& mailbox_id);
 
+    // --- Keyring: one opaque encrypted blob per mailbox, replaced as a whole ---
+    void put_keyring(const Bytes& mailbox_id, const Bytes& blob, int64_t now);
+    std::optional<Bytes> get_keyring(const Bytes& mailbox_id);
+
     // --- Chat archives: one chat's encrypted, hash-chained log ---
     // The relay never records which mailbox created an archive, nor who its members are: a member is
     // only a public key registered with a one-time join token. It sees an ID, a member count, entry

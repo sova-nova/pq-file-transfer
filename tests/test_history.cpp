@@ -702,6 +702,23 @@ int main() {
         CHECK(first && first->record == text("the first one") && first->message_id == id(1), "the first message stored is found");
     }
 
+    std::cout << "Member tokens, for the keyring\n";
+    {
+        HistoryStore h(dir / "membertokens.db", key);
+        CHECK(h.all_member_tokens().empty(), "there are none to begin with");
+        h.save_member_token(id(0x62), fp_b, id(0x11, 32), 100);
+        h.save_member_token(id(0x61), fp_a, id(0x22, 32), 101);
+        h.save_member_token(id(0x61), fp_b, id(0x33, 32), 102);
+        auto all = h.all_member_tokens();
+        CHECK(all.size() == 3 && all[0].conversation_id == id(0x61) && all[0].member_fp == fp_a && all[0].token == id(0x22, 32) && all[1].member_fp == fp_b && all[1].token == id(0x33, 32) &&
+                  all[2].conversation_id == id(0x62) && all[2].token == id(0x11, 32),
+              "every token comes back with its chat and member, in a fixed order");
+        h.save_member_token(id(0x61), fp_a, id(0x44, 32), 200);
+        CHECK(h.all_member_tokens().size() == 3 && h.all_member_tokens()[0].token == id(0x44, 32), "a token saved again replaces the old one");
+        HistoryStore wrong(dir / "membertokens.db", CryptoEngine::random_bytes(32));
+        CHECK(wrong.all_member_tokens().empty(), "with a different key none can be opened, and nothing crashes");
+    }
+
     std::cout << "Upgrading a version 6 history\n";
     {
         fs::path v6 = dir / "v6.db";

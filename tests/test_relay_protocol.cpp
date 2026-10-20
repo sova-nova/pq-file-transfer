@@ -226,6 +226,31 @@ int main() {
         fuzz("archive entry", ee, decode_archive_entry);
     }
 
+    std::cout << "Keyring chunks\n";
+    {
+        auto chunk = [&](uint32_t total, uint32_t index, uint32_t count, size_t data) { return KeyringChunk{total, index, count, fill(7, data)}; };
+        const uint32_t total = static_cast<uint32_t>(2 * KEYRING_CHUNK_BYTES + 1696);  // three chunks: two full, one short
+        auto first = chunk(total, 0, 3, KEYRING_CHUNK_BYTES);
+        auto e = encode(first);
+        auto back = decode_keyring_chunk(e);
+        CHECK(back && back->total_size == total && back->index == 0 && back->count == 3 && back->data == first.data, "a keyring chunk round trips");
+        check_framing("keyring chunk", e, decode_keyring_chunk);
+        CHECK(decode_keyring_chunk(encode(chunk(total, 1, 3, KEYRING_CHUNK_BYTES))) && decode_keyring_chunk(encode(chunk(total, 2, 3, 1696))), "a middle chunk is a full chunk, the last is what remains");
+        CHECK(decode_keyring_chunk(encode(chunk(100, 0, 1, 100))) && decode_keyring_chunk(encode(chunk(1, 0, 1, 1))) && decode_keyring_chunk(encode(chunk(KEYRING_CHUNK_BYTES, 0, 1, KEYRING_CHUNK_BYTES))),
+              "a small keyring is one chunk, down to a single byte, up to exactly one full chunk");
+        CHECK(!decode_keyring_chunk(encode(chunk(total, 0, 4, KEYRING_CHUNK_BYTES))) && !decode_keyring_chunk(encode(chunk(total, 0, 2, KEYRING_CHUNK_BYTES))), "a chunk count the total doesn't need is rejected");
+        CHECK(!decode_keyring_chunk(encode(chunk(total, 3, 3, 10))) && !decode_keyring_chunk(encode(chunk(total, 0xFFFFFFFF, 3, 10))), "an index outside the count is rejected");
+        CHECK(!decode_keyring_chunk(encode(chunk(total, 1, 3, 1000))) && !decode_keyring_chunk(encode(chunk(total, 2, 3, 1697))) && !decode_keyring_chunk(encode(chunk(total, 2, 3, 1695))) &&
+                  !decode_keyring_chunk(encode(chunk(total, 0, 3, 0))), "a chunk of the wrong size for its place is rejected");
+        CHECK(!decode_keyring_chunk(encode(KeyringChunk{MAX_KEYRING_BYTES + 1, 0, 1, fill(1, 10)})), "a keyring over the format's ceiling is rejected");
+        CHECK(decode_keyring_chunk(encode(KeyringChunk())) && !decode_keyring_chunk(encode(KeyringChunk{0, 0, 0, fill(1, 5)})) && !decode_keyring_chunk(encode(KeyringChunk{0, 1, 0, Bytes()})) &&
+                  !decode_keyring_chunk(encode(KeyringChunk{0, 0, 1, Bytes()})), "the \"there is none\" marker is all zeros with no data, and nothing else is accepted as it");
+        Bytes lying;
+        write_u32(lying, 100); write_u32(lying, 0); write_u32(lying, 1); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_keyring_chunk(lying), "a declared data length of four billion is rejected without allocating");
+        fuzz("keyring chunk", e, decode_keyring_chunk);
+    }
+
     std::cout << "Archive signing and chain inputs\n";
     {
         Bytes relay_id = fill(1, 32), arch = fill(2, ARCHIVE_ID_BYTES), key = fill(3, 50), token_hash = fill(4, 32), challenge = fill(5, 32), key_hash = fill(6, 32);

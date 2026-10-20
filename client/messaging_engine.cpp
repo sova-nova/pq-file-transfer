@@ -56,6 +56,7 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     // The first look for chats that need an archive comes one interval after start, not at once: starting up
     // has enough to do already.
     next_archive_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
+    next_keyring_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.keyring_check_seconds));
 
     my_fp_hex_ = keys_.own_fingerprint();
     auto fp = hex_to_bytes(my_fp_hex_);
@@ -1193,7 +1194,10 @@ std::vector<MessagingEngine::GroupInvite> MessagingEngine::group_invites() {
         for (const auto& m : info->members)
             if (m != my_fp_) gi.members.push_back(member_info(bytes_to_hex(m)));
         gi.received_at = invite.received_at;
-        gi.held_messages = invite.records.size() - 1;
+        // Only what the person would read counts: not the grants that ride along (tokens, the chat's archive).
+        gi.held_messages = 0;
+        for (size_t i = 1; i < invite.records.size(); i++)
+            if (auto held = chat::parse_record(invite.records[i]); held && held->record.type == chat::RecordType::Text) gi.held_messages++;
         out.push_back(std::move(gi));
     }
     return out;
@@ -1449,6 +1453,11 @@ bool MessagingEngine::create_archive(const std::string& conversation_id, std::st
             return false;
         }
     }
+    // A group's creation record is the archive's first entry: it says who is in the group, which restoring needs.
+    if (auto conv = history_->conversation(*id); conv && conv->kind == HistoryStore::Group)
+        if (auto first = history_->first_message(*id))
+            if (auto parsed = chat::parse_record(first->record); parsed && parsed->record.type == chat::RecordType::Conversation)
+                queue_archive_entry(*id, first->record, first->message_id);
     bump();
     return true;
 }
@@ -1747,11 +1756,6 @@ void MessagingEngine::ensure_archives() {
         std::string err;
         if (create_archive(hex, err)) {
             archive_create_retry_.erase(hex);
-            // A group's creation record is the archive's first entry: it says who is in the group.
-            if (conv.kind == HistoryStore::Group)
-                if (auto first = history_->first_message(conv.id))
-                    if (auto parsed = chat::parse_record(first->record); parsed && parsed->record.type == chat::RecordType::Conversation)
-                        queue_archive_entry(conv.id, first->record, first->message_id);
         } else {
             archive_create_retry_[hex] = now + std::chrono::seconds(std::max(1, options_.retry_base_seconds) * 6);
         }
@@ -1773,6 +1777,239 @@ void MessagingEngine::sync_archives() {
         if (handle_archived_records(id, fresh)) bump();
         maybe_post_checkpoint(id);
     }
+}
+
+// --- The keyring, and restoring from it ---
+
+keyring::Contents MessagingEngine::build_keyring() {
+    keyring::Contents c;
+    for (const auto& a : history_->archives()) {
+        keyring::ArchiveItem item;
+        item.conversation_id = a.conversation_id;
+        item.relay_address = a.relay_address;
+        item.relay_id = a.relay_id;
+        item.role = a.role;
+        item.state = a.state;
+        item.archive_key = a.archive_key;
+        item.chat_public_key = a.chat_public_key;
+        item.chat_private_key = a.chat_private_key;
+        item.join_token = a.join_token;
+        c.archives.push_back(std::move(item));
+    }
+    c.verified = history_->verified_people();
+    for (const auto& t : history_->all_member_tokens()) c.member_tokens.push_back({t.conversation_id, t.member_fp, t.token});
+    for (const auto& m : history_->introduced_members()) c.introduced.push_back({m.fp, m.bundle, m.issued_at, m.introduced_by, m.first_seen});
+    for (const auto& t : history_->issued_tokens()) c.issued_tokens.push_back({t.hash, t.label, t.created_at, t.bound_fp, t.revoked});
+    for (const auto& conv : history_->conversations()) c.receipts.push_back({conv.id, conv.send_delivery_receipts, conv.send_read_receipts});
+    // The same state always gives the same bytes, whatever order the store happened to list it in.
+    std::sort(c.receipts.begin(), c.receipts.end(), [](const keyring::Receipts& x, const keyring::Receipts& y) { return x.conversation_id < y.conversation_id; });
+    std::sort(c.verified.begin(), c.verified.end());
+    return c;
+}
+
+bool MessagingEngine::store_keyring(const Bytes& plaintext, std::string& error) {
+    auto config = keys_.load_mailbox_config();
+    if (!config) { error = "Set up messaging first"; return false; }
+    Bytes key = keys_.derive_local_key("archive keyring");
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(key); });
+    if (key.size() != 32) { error = "Your keys could not be read (are they unlocked?)"; return false; }
+    RelayClient client;
+    return connect_authenticated(client, error) && client.put_keyring(keyring::seal(key, config->mailbox_id, plaintext), error);
+}
+
+bool MessagingEngine::save_keyring(std::string& error) {
+    Bytes plain;
+    try {
+        plain = keyring::serialize(build_keyring());
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    if (!store_keyring(plain, error)) return false;
+    keyring_uploaded_hash_ = CryptoEngine::sha256(plain);
+    return true;
+}
+
+// Keeps the keyring on the relay in step with this device: stored again only when something in it changed.
+void MessagingEngine::maintain_keyring() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_keyring_check_) return;
+    next_keyring_check_ = now + std::chrono::seconds(std::max(1, options_.keyring_check_seconds));
+    auto contents = build_keyring();
+    if (contents.empty()) return;  // nothing worth keeping yet
+    Bytes plain;
+    try {
+        plain = keyring::serialize(contents);
+    } catch (const std::exception&) {
+        return;
+    }
+    const Bytes hash = CryptoEngine::sha256(plain);
+    if (hash == keyring_uploaded_hash_) return;
+    std::string err;
+    if (store_keyring(plain, err)) keyring_uploaded_hash_ = hash;  // if the relay can't be reached, the next look tries again
+}
+
+// A one-to-one chat: its ID is derived from the two fingerprints, so it can be recognised among the contacts.
+bool MessagingEngine::rebuild_direct_chat(const Bytes& conversation_id) {
+    for (const auto& name : keys_.list_contacts()) {
+        auto contact = keys_.load_contact(name);
+        auto their = contact ? hex_to_bytes(contact->fingerprint) : std::nullopt;
+        if (their && chat::conversation_id_for(my_fp_, *their) == conversation_id) {
+            history_->ensure_conversation(conversation_id, contact->fingerprint, unix_now());
+            return true;
+        }
+    }
+    return false;
+}
+
+// A group: its creation record is the archive's first entry, signed by its creator.
+bool MessagingEngine::rebuild_group_chat(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records, std::string& why) {
+    if (records.empty() || records.front().number != 1 || records.front().record.empty()) { why = "its archive does not start with the group's record"; return false; }
+    auto sr = chat::parse_record(records.front().record);
+    if (!sr || sr->record.type != chat::RecordType::Conversation || sr->record.conversation_id != conversation_id) { why = "its archive does not start with the group's record"; return false; }
+    auto info = chat::conversation_from_record(*sr);
+    if (!info) { why = "the group's record is not valid"; return false; }
+    const std::string creator_hex = bytes_to_hex(sr->record.sender);
+    bool verified = false;
+    if (sr->record.sender == my_fp_) {
+        verified = chat::verify_record(*sr, keys_.load_public_dsa());
+    } else if (auto creator = resolve_peer(creator_hex, conversation_id)) {
+        verified = chat::verify_record(*sr, creator->pub_dsa);
+    }
+    if (!verified) { why = "the group's creator could not be verified (they may not be in your contacts)"; return false; }
+    std::vector<std::string> others;
+    bool me_in = false;
+    for (const auto& m : info->members) {
+        if (m == my_fp_) me_in = true;
+        else others.push_back(bytes_to_hex(m));
+    }
+    if (!me_in || others.empty()) { why = "you are not one of the group's members"; return false; }
+    try {
+        history_->create_group(conversation_id, info->title, creator_hex, HistoryStore::Saved, 0, info->previous_id, others, HistoryStore::Active,
+                               static_cast<int64_t>(sr->record.sent_at));
+    } catch (const std::exception& e) {
+        why = e.what();
+        return false;
+    }
+    return true;
+}
+
+// Messages read back from an archive: checked exactly as when they arrived, then stored as read.
+size_t MessagingEngine::restore_records(const Bytes& conversation_id, const std::vector<ArchivedRecord>& records) {
+    auto ctx = archive_context(conversation_id);
+    if (!ctx) return 0;
+    size_t added = 0;
+    for (const auto& ar : records) {
+        if (ar.record.empty()) continue;
+        auto sr = chat::parse_record(ar.record);
+        if (!sr || sr->record.conversation_id != conversation_id || sr->record.recipients_hash != ctx->recipients_hash) continue;
+        const bool mine = sr->record.sender == my_fp_;
+        const std::string sender_hex = bytes_to_hex(sr->record.sender);
+        if (mine) {
+            if (!chat::verify_record(*sr, keys_.load_public_dsa())) continue;
+        } else {
+            if (std::find(ctx->others.begin(), ctx->others.end(), sender_hex) == ctx->others.end()) continue;
+            auto peer = resolve_peer(sender_hex, conversation_id);
+            if (!peer || !chat::verify_record(*sr, peer->pub_dsa)) continue;
+        }
+        if (sr->record.type == chat::RecordType::Checkpoint) {
+            if (!mine) process_checkpoint(conversation_id, *sr, sender_hex);
+            continue;
+        }
+        if (sr->record.type != chat::RecordType::Text && sr->record.type != chat::RecordType::Conversation) continue;
+        HistoryStore::Message m;
+        m.conversation_id = conversation_id;
+        m.message_id = sr->record.message_id;
+        m.outgoing = mine;
+        m.sent_at = static_cast<int64_t>(sr->record.sent_at);
+        m.received_at = m.sent_at;
+        m.status = mine ? HistoryStore::Sent : 1;  // what we sent is sent; what we received is already read
+        m.entry_hash = sr->entry_hash;
+        m.record = ar.record;
+        if (history_->add_message(m)) added++;
+    }
+    return added;
+}
+
+bool MessagingEngine::restore_from_relay(RestoreReport& report, std::string& error) {
+    report = RestoreReport();
+    auto config = keys_.load_mailbox_config();
+    if (!config) { error = "Set up messaging first"; return false; }
+
+    Bytes blob;
+    bool exists = false;
+    {
+        RelayClient client;
+        if (!connect_authenticated(client, error) || !client.get_keyring(blob, exists, error)) return false;
+    }
+    if (!exists) {
+        error = "The relay holds no saved keyring for this mailbox. It was never saved, or this isn't the mailbox your chats used.";
+        return false;
+    }
+    Bytes key = keys_.derive_local_key("archive keyring");
+    auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(key); });
+    auto plain = key.size() == 32 ? keyring::open(key, config->mailbox_id, blob) : std::nullopt;
+    if (!plain) { error = "The saved keyring could not be opened. Your keys must be the ones this mailbox was set up with."; return false; }
+    auto contents = keyring::parse(*plain);
+    if (!contents) { error = "The saved keyring is damaged, or was made by a newer version of this app"; return false; }
+    report.found = true;
+
+    // The small facts that can't be rebuilt from archives.
+    const int64_t now = unix_now();
+    for (const auto& fp : contents->verified) history_->set_verified(fp, true, now);
+    for (const auto& t : contents->member_tokens) history_->save_member_token(t.conversation_id, t.member_fp, t.token, now);
+    for (const auto& i : contents->introduced) history_->save_introduced(i.fp, i.bundle, i.issued_at, i.introduced_by, i.first_seen);
+    for (const auto& t : contents->issued_tokens) {
+        if (!history_->find_issued_token(t.hash)) history_->add_issued_token(t.hash, t.label, t.bound_fp, t.created_at);
+        if (t.revoked) history_->mark_token_revoked(t.hash);
+    }
+    for (const auto& a : contents->archives) {
+        HistoryStore::Archive row;
+        row.conversation_id = a.conversation_id;
+        row.relay_address = a.relay_address;
+        row.relay_id = a.relay_id;
+        row.role = a.role;
+        row.state = a.state;
+        row.archive_key = a.archive_key;
+        row.chat_public_key = a.chat_public_key;
+        row.chat_private_key = a.chat_private_key;
+        row.join_token = a.join_token;
+        row.created_at = now;
+        if (history_->add_archive(row)) report.archives++;
+    }
+
+    // Each chat: read its archive from the start (checking the chain), rebuild the chat, read the messages back.
+    for (const auto& a : contents->archives) {
+        const std::string hex = bytes_to_hex(a.conversation_id);
+        const std::string name = hex.substr(0, 8);
+        if (a.state != HistoryStore::ArchiveJoined) {
+            report.chats_skipped++;
+            report.notes.push_back("Chat " + name + ": this device had not finished joining its archive, so there is nothing to read yet.");
+            continue;
+        }
+        std::vector<ArchivedRecord> records;
+        std::string err;
+        if (!archive_sync(hex, records, err)) {
+            report.chats_skipped++;
+            report.notes.push_back("Chat " + name + ": its archive could not be read: " + err);
+            continue;
+        }
+        if (!history_->conversation(a.conversation_id)) {
+            std::string why = "it is not one of your contacts' chats";
+            if (!rebuild_direct_chat(a.conversation_id) && !rebuild_group_chat(a.conversation_id, records, why)) {
+                report.chats_skipped++;
+                report.notes.push_back("Chat " + name + ": could not be rebuilt: " + why + ".");
+                continue;
+            }
+        }
+        report.messages += restore_records(a.conversation_id, records);
+        report.chats_restored++;
+    }
+    for (const auto& r : contents->receipts)
+        if (history_->conversation(r.conversation_id)) history_->set_receipt_settings(r.conversation_id, r.delivery, r.read);
+    keyring_uploaded_hash_.clear();  // the next look at the keyring may store it again
+    bump();
+    return true;
 }
 
 // --- Sending ---
@@ -1984,5 +2221,6 @@ void MessagingEngine::pump(int wait_ms) {
         join_pending_archives();
         ensure_archives();
         sync_archives();
+        maintain_keyring();
     }
 }

@@ -253,6 +253,11 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
     auto kick = std::make_shared<std::atomic<bool>>(false);
     bool challenge_used = false, collecting = false, is_owner = false;
     std::optional<std::pair<Bytes, Bytes>> archive_session;  // (archive ID, key hash) once signed in to an archive
+    struct KeyringUpload {  // a keyring arriving in chunks: kept apart until the last one, so a dropped connection changes nothing
+        bool active = false;
+        uint32_t total = 0, count = 0, next = 0;
+        Bytes buffer;
+    } keyring_upload;
     auto release = make_scope_exit([&] { if (mailbox && is_owner) release_owner(*mailbox, kick); });
     int64_t last_seq = 0;
     auto last_activity = std::chrono::steady_clock::now();
@@ -477,6 +482,53 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     auto info = store_->archive_info(archive_id, now);
                     if (!info) { send_error(sock, "Unknown archive"); break; }
                     if (!send_message(sock, MessageType::ARCHIVE_FETCH_END, encode(ArchiveHead{info->head.number, info->head.hash}))) return;
+                    break;
+                }
+
+                case MessageType::KEYRING_PUT: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_keyring_chunk(msg->payload);
+                    if (!m || m->count == 0) { send_error(sock, "Malformed keyring request"); return; }
+                    if (m->index == 0) {
+                        if (!rate_.allow("keyring:" + hex_of(*mailbox), 20, now)) { send_error(sock, "Too many requests, try again later"); break; }
+                        keyring_upload = KeyringUpload();
+                        if (m->total_size > limits_.keyring_max_bytes) {
+                            send_error(sock, "Your keyring is larger than this relay allows (" + std::to_string(limits_.keyring_max_bytes / 1024) + " KiB)");
+                            break;
+                        }
+                        keyring_upload.active = true;
+                        keyring_upload.total = m->total_size;
+                        keyring_upload.count = m->count;
+                    } else if (!keyring_upload.active || m->index != keyring_upload.next || m->total_size != keyring_upload.total || m->count != keyring_upload.count) {
+                        keyring_upload = KeyringUpload();
+                        send_error(sock, "Keyring chunks out of order");
+                        break;
+                    }
+                    keyring_upload.buffer.insert(keyring_upload.buffer.end(), m->data.begin(), m->data.end());
+                    keyring_upload.next++;
+                    if (keyring_upload.next == keyring_upload.count) {
+                        store_->put_keyring(*mailbox, keyring_upload.buffer, now);
+                        log("Keyring stored by " + short_id(*mailbox));
+                        keyring_upload = KeyringUpload();
+                    }
+                    if (!send_message(sock, MessageType::KEYRING_PUT_OK, {})) return;
+                    break;
+                }
+
+                case MessageType::KEYRING_GET: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto blob = store_->get_keyring(*mailbox);
+                    if (!blob) {
+                        if (!send_message(sock, MessageType::KEYRING_DATA, encode(KeyringChunk()))) return;  // "none"
+                        break;
+                    }
+                    const uint32_t count = static_cast<uint32_t>((blob->size() + KEYRING_CHUNK_BYTES - 1) / KEYRING_CHUNK_BYTES);
+                    for (uint32_t i = 0; i < count; i++) {
+                        const size_t from = static_cast<size_t>(i) * KEYRING_CHUNK_BYTES;
+                        const size_t to = std::min(blob->size(), from + KEYRING_CHUNK_BYTES);
+                        KeyringChunk chunk{static_cast<uint32_t>(blob->size()), i, count, Bytes(blob->begin() + static_cast<std::ptrdiff_t>(from), blob->begin() + static_cast<std::ptrdiff_t>(to))};
+                        if (!send_message(sock, MessageType::KEYRING_DATA, encode(chunk))) return;
+                    }
                     break;
                 }
 

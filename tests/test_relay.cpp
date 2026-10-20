@@ -701,6 +701,98 @@ static void test_real_relay() {
         closed.stop();
     }
 
+    std::cout << "12d. Keyrings\n";
+    {
+        const int kbase = 50000 + static_cast<int>(getpid() % 5000) * 2;
+        Server keyring{kbase, ROOT / "relay-keyring", {"--keyring-max-kib", "128"}};
+        if (!keyring.start()) { std::cout << "FAIL could not start the keyring relay\n"; failures++; return; }
+        auto kinvite = keyring.invite();
+        const Bytes kpin = kinvite->relay_id;
+        auto owner = make_box(keyring, kpin);
+        auto neighbour = make_box(keyring, kpin);
+        if (!owner || !neighbour) { std::cout << "FAIL setup\n"; failures++; return; }
+        std::string e;
+        auto blob_of = [](size_t size, uint8_t seed) { Bytes b(size); for (size_t i = 0; i < size; i++) b[i] = static_cast<uint8_t>(seed + i * 31); return b; };
+        auto fetch = [&](const Box& who, Bytes& blob, bool& exists, std::string& err) {
+            RelayClient c;
+            return sign_in(c, keyring, kpin, who, err) && c.get_keyring(blob, exists, err);
+        };
+        auto store = [&](const Box& who, const Bytes& blob, std::string& err) {
+            RelayClient c;
+            return sign_in(c, keyring, kpin, who, err) && c.put_keyring(blob, err);
+        };
+
+        {
+            RelayClient anonymous;
+            Bytes ignored;
+            bool exists = true;
+            connect_to(anonymous, keyring, kpin, e);
+            CHECK(!anonymous.put_keyring(blob_of(100, 1), e) && has(e, "Sign in"), "storing a keyring needs a mailbox sign-in: " + e);
+            RelayClient anonymous2;
+            connect_to(anonymous2, keyring, kpin, e);
+            CHECK(!anonymous2.get_keyring(ignored, exists, e) && has(e, "Sign in"), "and so does fetching one: " + e);
+        }
+        Bytes got;
+        bool exists = true;
+        CHECK(fetch(*owner, got, exists, e) && !exists && got.empty(), "a mailbox that never stored one is told there is none");
+
+        const Bytes small = blob_of(1000, 3);
+        CHECK(store(*owner, small, e), "a small keyring is stored (" + e + ")");
+        CHECK(fetch(*owner, got, exists, e) && exists && got == small, "and comes back exactly");
+        const Bytes big = blob_of(120 * 1024 + 77, 9);  // three chunks, the last one short
+        CHECK(store(*owner, big, e) && fetch(*owner, got, exists, e) && exists && got == big, "a keyring of several chunks replaces it and comes back exactly (120 KiB)");
+        CHECK(store(*owner, small, e) && fetch(*owner, got, exists, e) && got == small, "and a smaller one replaces that");
+        CHECK(fetch(*neighbour, got, exists, e) && !exists, "another mailbox's owner sees none: each is read by its own mailbox only");
+        CHECK(!store(*owner, blob_of(200 * 1024, 4), e) && has(e, "larger than this relay allows"), "a keyring over the relay's limit is refused: " + e);
+        CHECK(fetch(*owner, got, exists, e) && got == small, "(and the stored one is unchanged)");
+
+        // Uploads that go wrong change nothing: the keyring is replaced only when the last chunk has arrived.
+        auto raw_session = [&](Raw& r, const Box& who) {
+            if (!r.open(keyring) || !r.hello()) return false;
+            relay::Auth auth;
+            auth.mailbox_id = who.id;
+            auth.signature = CryptoEngine::sign(relay::auth_signing_input(r.challenge, kpin, who.id), who.access.private_key);
+            return send_message(r.s, MessageType::RELAY_AUTH, relay::encode(auth)) && r.answer() == "type 37";  // AUTH_OK
+        };
+        const uint32_t three_chunks = static_cast<uint32_t>(2 * relay::KEYRING_CHUNK_BYTES + 1000);  // two full chunks and a short one: under the 128 KiB limit
+        auto chunk = [&](uint32_t total, uint32_t index, uint32_t count) {
+            const size_t size = index + 1 < count ? relay::KEYRING_CHUNK_BYTES : total - relay::KEYRING_CHUNK_BYTES * (count - 1);
+            return relay::encode(relay::KeyringChunk{total, index, count, Bytes(size, 0x77)});
+        };
+        {
+            Raw r;
+            CHECK(raw_session(r, *owner), "(a raw signed-in connection)");
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 0, 3)) && r.answer() == "type 77", "the first chunk of a new keyring is accepted (3 chunks)... ");
+            CHECK(fetch(*owner, got, exists, e) && got == small, "...but until the rest arrive the stored keyring is untouched");
+        }  // the connection drops here, half way through
+        CHECK(fetch(*owner, got, exists, e) && got == small, "when the connection drops half way the old keyring stays, and nothing partial is kept");
+        {
+            Raw r;
+            raw_session(r, *owner);
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 1, 3)) && has(r.answer(), "out of order"), "a chunk with no first chunk before it is refused");
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 0, 3)) && r.answer() == "type 77" &&
+                      send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 2, 3)) && has(r.answer(), "out of order"), "skipping a chunk is refused");
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 1, 3)) && has(r.answer(), "out of order"), "(and that abandoned the upload: the next chunk has nothing to follow)");
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks, 0, 3)) && r.answer() == "type 77" &&
+                      send_message(r.s, MessageType::KEYRING_PUT, chunk(three_chunks + 5, 1, 3)) && has(r.answer(), "out of order"), "a chunk that disagrees with the first about the total is refused");
+            // A new first chunk starts over, and a complete upload after all that still works.
+            Bytes whole(relay::KEYRING_CHUNK_BYTES + 10, 0x42);
+            relay::KeyringChunk c0{static_cast<uint32_t>(whole.size()), 0, 2, Bytes(whole.begin(), whole.begin() + relay::KEYRING_CHUNK_BYTES)};
+            relay::KeyringChunk c1{static_cast<uint32_t>(whole.size()), 1, 2, Bytes(whole.begin() + relay::KEYRING_CHUNK_BYTES, whole.end())};
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, relay::encode(c0)) && r.answer() == "type 77" && send_message(r.s, MessageType::KEYRING_PUT, relay::encode(c1)) && r.answer() == "type 77",
+                  "a clean upload on the same connection afterwards completes");
+            CHECK(fetch(*owner, got, exists, e) && got == whole, "and replaces the keyring");
+            CHECK(store(*owner, small, e), "(back to the small one)");
+            CHECK(send_message(r.s, MessageType::KEYRING_PUT, relay::encode(relay::KeyringChunk{3, 0, 1, Bytes(10, 1)})) && has(r.answer(), "Malformed"), "a chunk whose data doesn't match its declared size is a protocol error");
+        }
+        CHECK(fetch(*owner, got, exists, e) && got == small, "(the keyring is still the last complete one)");
+
+        keyring.stop();
+        CHECK(keyring.start(), "(the relay restarts)");
+        CHECK(fetch(*owner, got, exists, e) && exists && got == small, "after a restart the keyring is still there");
+        keyring.stop();
+    }
+
     std::cout << "12c. Chat archives\n";
     {
         const int abase = 40000 + static_cast<int>(getpid() % 5000) * 2;

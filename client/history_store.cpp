@@ -870,6 +870,22 @@ void HistoryStore::save_member_token(const Bytes& conversation_id, const std::st
         .blob(1, conversation_id).text(2, member_fp).blob(3, seal(token, member_token_aad(conversation_id, member_fp))).i64(4, now).step();
 }
 
+std::vector<HistoryStore::MemberTokenRow> HistoryStore::all_member_tokens() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT conv_id, fp, sealed FROM member_tokens ORDER BY conv_id, fp");
+    std::vector<MemberTokenRow> out;
+    while (s.step()) {
+        MemberTokenRow row;
+        row.conversation_id = s.column_blob(0);
+        row.member_fp = s.column_text(1);
+        if (auto token = unseal(s.column_blob(2), member_token_aad(row.conversation_id, row.member_fp))) {
+            row.token = std::move(*token);
+            out.push_back(std::move(row));
+        }
+    }
+    return out;
+}
+
 std::optional<HistoryStore::Bytes> HistoryStore::member_token(const Bytes& conversation_id, const std::string& member_fp) {
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt s(db_, "SELECT sealed FROM member_tokens WHERE conv_id = ? AND fp = ?");
