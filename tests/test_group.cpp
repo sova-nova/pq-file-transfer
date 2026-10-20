@@ -1138,6 +1138,104 @@ int main(int argc, char** argv) {
             CHECK(wait_for([&] { return bob.engine->archive_status(hiking).entries > status.entries; }, 30000), "and it reaches the archive, with the key Bob made before the reinstall");
         }
 
+        // --- Deleting by agreement: every member must accept ---
+        std::cout << "17c. Deleting by agreement\n";
+        {
+            const std::string room = hiking;  // messages sent the ordinary way, so every member holds them
+            const Bytes room_id = *hex_to_bytes(room);
+            const std::string whole_room = archive_test_group;
+            auto message_with = [&](User& u, const std::string& text) {
+                for (auto& m : u.engine->group_messages(room)) if (m.text == text) return m.message_id;
+                return std::string();
+            };
+            auto find_request = [&](User& u, int state, const std::string& where = std::string()) -> std::optional<MessagingEngine::DeletionInfo> {
+                for (auto& d : u.engine->deletions()) if (d.conversation_id == (where.empty() ? room : where) && d.state == state) return d;
+                return std::nullopt;
+            };
+            auto is_deleted = [&](User& u, const std::string& original) {
+                // The message's place is kept but its text is gone: count messages, and look for one marked deleted.
+                bool marked = false;
+                for (auto& m : u.engine->group_messages(room)) marked |= m.deleted;
+                return marked && message_with(u, original).empty();
+            };
+            auto text_record = [&](User& signer, const Bytes& conv, const std::vector<Bytes>& everyone, const std::string& body) {
+                chat::Record r = base_record(conv, chat::recipients_hash_for(everyone), chat::RecordType::Text);
+                r.payload.assign(body.begin(), body.end());
+                return sign_as(signer, r);
+            };
+            const std::string target = "filler 3";
+            const std::string mid = message_with(alice, target);
+            CHECK(!mid.empty() && !message_with(bob, target).empty() && !message_with(carol, target).empty(), "(all three can see the message)");
+            const size_t shown_before = alice.engine->group_messages(room).size();
+            const size_t bob_shown_before = bob.engine->group_messages(room).size();  // Bob's history was rebuilt from the archive, so it is shorter
+
+            // First request: Carol doesn't agree. Nothing is deleted.
+            CHECK(alice.engine->request_message_deletion(room, {mid}, err), "Alice asks everyone to delete one message (" + err + ")");
+            CHECK(wait_for([&] { return find_request(bob, HistoryStore::DeletionPending) && find_request(carol, HistoryStore::DeletionPending); }, 30000), "Bob and Carol are each asked");
+            auto asked = find_request(bob, HistoryStore::DeletionPending);
+            const std::string asked_op = asked ? asked->op_id : std::string();
+            CHECK(asked && !asked->whole_chat && asked->entries == 1 && asked->requester_name == "Alice" && !asked->mine && asked->members == 3, "the request says who asked, and for what");
+            CHECK(bob.engine->accept_deletion(asked_op, err), "Bob accepts");
+            auto carols = find_request(carol, HistoryStore::DeletionPending);
+            const std::string carols_op = carols ? carols->op_id : std::string();
+            CHECK(carol.engine->decline_deletion(carols_op) && !carol.engine->accept_deletion(carols_op, err), "Carol declines, and can't then accept");
+            run_for(6000);
+            CHECK(!is_deleted(alice, target) && !is_deleted(bob, target) && !is_deleted(carol, target), "with Carol's no, nothing is deleted: two of three is not enough");
+            CHECK(alice.engine->group_messages(room).size() == shown_before && message_with(alice, target) == mid, "(Alice's chat is exactly as it was)");
+            CHECK(find_request(alice, HistoryStore::DeletionAccepted).has_value() && !find_request(alice, HistoryStore::DeletionDone), "(and the request just stays waiting)");
+            CHECK(!bob.engine->accept_deletion(asked_op, err), "answering twice is refused: " + err);
+
+            // A second request, this time everyone agrees.
+            CHECK(alice.engine->request_message_deletion(room, {mid}, err), "Alice asks again");
+            CHECK(wait_for([&] {
+                      for (auto& d : bob.engine->deletions()) if (d.conversation_id == room && d.state == HistoryStore::DeletionPending) return true;
+                      return false;
+                  }, 30000), "Bob is asked again");
+            std::string bob_op, carol_op;
+            wait_for([&] {
+                for (auto& d : carol.engine->deletions()) if (d.conversation_id == room && d.state == HistoryStore::DeletionPending) carol_op = d.op_id;
+                return !carol_op.empty();
+            }, 30000);
+            for (auto& d : bob.engine->deletions()) if (d.conversation_id == room && d.state == HistoryStore::DeletionPending) bob_op = d.op_id;
+            CHECK(!bob_op.empty() && !carol_op.empty() && bob_op == carol_op, "both see the same new request");
+            CHECK(bob.engine->accept_deletion(bob_op, err) && carol.engine->accept_deletion(carol_op, err), "Bob and Carol both accept");
+            CHECK(wait_for([&] { return is_deleted(alice, target) && is_deleted(bob, target) && is_deleted(carol, target); }, 60000), "with everyone agreeing, the message is deleted on all three devices");
+            CHECK(alice.engine->group_messages(room).size() == shown_before && bob.engine->group_messages(room).size() == bob_shown_before, "its place is kept: each chat has as many entries as before, one of them marked deleted");
+            CHECK(message_with(alice, "filler 4").size() > 0 && message_with(bob, "filler 5").size() > 0 && message_with(carol, "filler 2").size() > 0, "and the others are untouched");
+            bool placeholder = false;
+            for (auto& m : bob.engine->group_messages(room)) if (m.deleted) placeholder = m.text.empty() && m.sender_name.empty();
+            CHECK(placeholder, "the deleted one has no text and no sender: nothing of it is left");
+            CHECK(wait_for([&] { return find_request(alice, HistoryStore::DeletionDone) && find_request(bob, HistoryStore::DeletionDone) && find_request(carol, HistoryStore::DeletionDone); }, 30000), "every device records the deletion as done");
+            CHECK(alice.engine->archive_status(room).warning.empty() && bob.engine->archive_status(room).warning.empty() && carol.engine->archive_status(room).warning.empty(),
+                  "the archive's chain still checks out on every device with that entry gone: no warnings");
+            // The chain carries on after a redaction.
+            Bytes more = text_record(alice, room_id, {a, b, c}, "after the deletion");
+            uint64_t n2 = 0;
+            std::vector<MessagingEngine::ArchivedRecord> o2;
+            CHECK(alice.engine->archive_append(room, more, n2, o2, err), "the archive carries on after the redaction");
+            CHECK(bob.engine->archive_sync(room, o2, err) && o2.size() == 1 && o2[0].record == more, "and members read on from there");
+
+            // The whole chat.
+            CHECK(bob.engine->request_chat_deletion(whole_room, err), "Bob asks to delete the whole chat");
+            CHECK(!bob.engine->request_chat_deletion(whole_room, err) && has(err, "already"), "a second request for the same thing is refused while one is waiting: " + err);
+            CHECK(wait_for([&] { return find_request(alice, HistoryStore::DeletionPending, whole_room) && find_request(carol, HistoryStore::DeletionPending, whole_room); }, 30000), "Alice and Carol are asked");
+            auto whole = find_request(alice, HistoryStore::DeletionPending, whole_room);
+            CHECK(whole && whole->whole_chat && whole->requester_name == "Bob", "(for the whole chat, from Bob)");
+            CHECK(alice.engine->accept_deletion(whole ? whole->op_id : std::string(), err), "Alice accepts");
+            run_for(4000);
+            CHECK(alice.engine->archive_status(whole_room).exists && bob.engine->archive_status(whole_room).exists && carol.engine->archive_status(whole_room).exists && !bob.engine->group_messages(whole_room).empty(), "with Carol yet to answer, everything is still there");
+            auto carols2 = find_request(carol, HistoryStore::DeletionPending, whole_room);
+            CHECK(carols2 && carol.engine->accept_deletion(carols2 ? carols2->op_id : std::string(), err), "Carol accepts too");
+            CHECK(wait_for([&] { return !alice.engine->archive_status(whole_room).exists && !bob.engine->archive_status(whole_room).exists && !carol.engine->archive_status(whole_room).exists; }, 60000), "now the whole archive is gone, on all three devices");
+            CHECK(alice.engine->group_messages(whole_room).empty() && bob.engine->group_messages(whole_room).empty() && carol.engine->group_messages(whole_room).empty(), "and so is every message");
+            run_for(4000);
+            CHECK(!alice.engine->archive_status(whole_room).exists && !carol.engine->archive_status(whole_room).exists, "nobody quietly makes a new archive for the deleted chat");
+            CHECK(!alice.engine->archive_sync(whole_room, o2, err) && has(err, "no archive"), "(there is nothing to read from: " + err + ")");
+            bool group_still = false;
+            for (auto& g : alice.engine->groups()) group_still |= g.id == whole_room;
+            CHECK(group_still, "the group itself remains: people can go on talking in it");
+        }
+
         // The relay drops the end of the log.
         wait_for([&] { return alice.engine->archive_status(hiking).entries == bob.engine->archive_status(hiking).entries && bob.engine->archive_status(hiking).entries == carol.engine->archive_status(hiking).entries; }, 30000);
         const uint64_t head = bob.engine->archive_status(hiking).entries;

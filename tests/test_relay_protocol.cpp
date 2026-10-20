@@ -226,6 +226,53 @@ int main() {
         fuzz("archive entry", ee, decode_archive_entry);
     }
 
+    std::cout << "Deleting by agreement\n";
+    {
+        ArchiveEntry live{5, fill(6, HASH_BYTES), fill(7, 300), false};
+        ArchiveEntry stone{5, fill(6, HASH_BYTES), Bytes(), true};
+        auto le = encode(live), se = encode(stone);
+        CHECK(decode_archive_entry(le) && !decode_archive_entry(le)->tombstone && decode_archive_entry(se) && decode_archive_entry(se)->tombstone && decode_archive_entry(se)->ciphertext.empty() && decode_archive_entry(se)->hash == stone.hash,
+              "an entry is either content or a tombstone that keeps its hash");
+        CHECK(!decode_archive_entry(encode(ArchiveEntry{5, fill(6, HASH_BYTES), Bytes(), false})) && !decode_archive_entry(encode(ArchiveEntry{5, fill(6, HASH_BYTES), fill(7, 10), true})), "never both content and a tombstone, never neither");
+        check_framing("archive tombstone", se, decode_archive_entry);
+        fuzz("archive tombstone", se, decode_archive_entry);
+
+        ArchiveDelete order;
+        order.scope = DELETE_SCOPE_ENTRIES;
+        order.op_id = fill(1, 16);
+        order.expires_at = 1700000000;
+        order.entry_hashes = {fill(2, HASH_BYTES), fill(3, HASH_BYTES)};
+        order.signatures = {{fill(4, HASH_BYTES), fill(9, 100)}, {fill(5, HASH_BYTES), fill(9, 100)}, {fill(6, HASH_BYTES), fill(9, 100)}};
+        auto oe = encode(order);
+        auto back = decode_archive_delete(oe);
+        CHECK(back && back->scope == DELETE_SCOPE_ENTRIES && back->op_id == order.op_id && back->expires_at == order.expires_at && back->entry_hashes == order.entry_hashes && back->signatures.size() == 3 && back->signatures[2].key_hash == fill(6, HASH_BYTES),
+              "a delete order round trips: scope, operation, expiry, the entries and one signature per key");
+        check_framing("delete order", oe, decode_archive_delete);
+        fuzz("delete order", oe, decode_archive_delete);
+        auto changed = [&](const std::function<void(ArchiveDelete&)>& f) { ArchiveDelete x = order; f(x); return decode_archive_delete(encode(x)); };
+        CHECK(!changed([](ArchiveDelete& x) { x.scope = 0; }) && !changed([](ArchiveDelete& x) { x.scope = 3; }), "a scope other than the chat or entries is rejected");
+        CHECK(!changed([](ArchiveDelete& x) { x.scope = DELETE_SCOPE_CHAT; }) && changed([](ArchiveDelete& x) { x.scope = DELETE_SCOPE_CHAT; x.entry_hashes.clear(); }), "a whole-chat order names no entries, and nothing else is accepted for it");
+        CHECK(!changed([](ArchiveDelete& x) { x.entry_hashes.clear(); }) && !changed([](ArchiveDelete& x) { x.entry_hashes.assign(MAX_DELETE_ENTRIES + 1, Bytes()); for (size_t i = 0; i < x.entry_hashes.size(); i++) x.entry_hashes[i] = Bytes(HASH_BYTES, static_cast<uint8_t>(i)); }) &&
+                  changed([](ArchiveDelete& x) { x.entry_hashes.clear(); for (size_t i = 0; i < MAX_DELETE_ENTRIES; i++) x.entry_hashes.push_back(Bytes(HASH_BYTES, static_cast<uint8_t>(i))); }),
+              "an entries order names between 1 and 64 entries");
+        CHECK(!changed([](ArchiveDelete& x) { x.entry_hashes[1] = x.entry_hashes[0]; }) && !changed([](ArchiveDelete& x) { x.signatures[1].key_hash = x.signatures[0].key_hash; }), "an entry or a key named twice is rejected");
+        CHECK(!changed([](ArchiveDelete& x) { x.signatures.clear(); }) && !changed([](ArchiveDelete& x) { x.signatures.assign(MAX_ARCHIVE_MEMBERS + 1, ArchiveSignature()); }) && !changed([](ArchiveDelete& x) { x.signatures[0].signature.clear(); }) &&
+                  !changed([](ArchiveDelete& x) { x.op_id.pop_back(); }) && !changed([](ArchiveDelete& x) { x.entry_hashes[0].pop_back(); }) && !changed([](ArchiveDelete& x) { x.signatures[0].key_hash.pop_back(); }),
+              "no signatures, too many, an empty one, or IDs and hashes of the wrong size are rejected");
+        Bytes lying;
+        write_u32(lying, 2); write_blob(lying, fill(1, 16)); write_u64(lying, 5); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!decode_archive_delete(lying), "a declared count of four billion entries is rejected without allocating");
+
+        Bytes relay_id = fill(1, 32), arch = fill(2, 16), op = fill(3, 16);
+        std::vector<Bytes> hashes = {fill(4, 32), fill(5, 32)};
+        auto input = archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_ENTRIES, op, 1000, hashes);
+        CHECK(input != archive_delete_signing_input(fill(9, 32), arch, DELETE_SCOPE_ENTRIES, op, 1000, hashes) && input != archive_delete_signing_input(relay_id, fill(9, 16), DELETE_SCOPE_ENTRIES, op, 1000, hashes) &&
+                  input != archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_CHAT, op, 1000, hashes) && input != archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_ENTRIES, fill(9, 16), 1000, hashes) &&
+                  input != archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_ENTRIES, op, 1001, hashes) && input != archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_ENTRIES, op, 1000, {hashes[0]}) &&
+                  input != archive_delete_signing_input(relay_id, arch, DELETE_SCOPE_ENTRIES, op, 1000, {hashes[1], hashes[0]}),
+              "what each member signs covers the relay, the chat, the scope, the operation, the expiry and the entries in order");
+    }
+
     std::cout << "Keyring chunks\n";
     {
         auto chunk = [&](uint32_t total, uint32_t index, uint32_t count, size_t data) { return KeyringChunk{total, index, count, fill(7, data)}; };

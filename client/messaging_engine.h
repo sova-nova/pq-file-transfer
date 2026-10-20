@@ -142,6 +142,7 @@ public:
         std::string text;
         int status = 0;   // outgoing: 0 queued, 1 sent, 2 delivered, 3 read. Incoming: 0 unread, 1 read.
         bool gap = false; // the sender's record points at a message we never got
+        bool deleted = false;  // removed by agreement of everyone in the chat: only its place is left
     };
     std::vector<ChatMessage> messages(const std::string& contact_fp, size_t limit = 300);
 
@@ -215,6 +216,7 @@ public:
         std::string text;
         int status = 0;    // outgoing: 0 queued, 1 sent, 2 delivered, 3 read (the lowest across all members). Incoming: 0 unread, 1 read.
         bool gap = false;  // the sender's record points at a message of theirs we never got
+        bool deleted = false;  // removed by agreement of everyone in the chat: only its place is left
     };
     std::vector<GroupMessage> group_messages(const std::string& group_id, size_t limit = 300);
     struct MemberDelivery {
@@ -281,6 +283,31 @@ public:
     // Fetches what this device hasn't seen yet, checks the whole chain from where it left off, and decrypts
     // it. Fails if the relay's copy doesn't add up (altered, reordered, or its end withheld).
     bool archive_sync(const std::string& conversation_id, std::vector<ArchivedRecord>& fresh, std::string& error);
+
+    // --- Deleting by agreement (M4) ---
+    // Any member can ask to delete the whole chat, or particular messages, from the archive and from every
+    // device. It happens only if EVERY member accepts; one who declines, or doesn't answer, stops it, and the
+    // request lapses after 7 days. Each acceptance is signed with that member's archive key, so the relay can
+    // check that all of them agreed before it acts. Messages sent before the chat's archive was made can't be
+    // named, because the archive doesn't hold them.
+    struct DeletionInfo {
+        std::string op_id;            // lowercase hex
+        std::string conversation_id;  // lowercase hex
+        bool whole_chat = true;
+        size_t entries = 0;           // how many messages, when it isn't the whole chat
+        std::string requester_fp;
+        std::string requester_name;
+        bool mine = false;            // this user asked for it
+        int64_t expires_at = 0;
+        int state = 0;                // HistoryStore::DeletionState: pending (your answer is wanted), accepted, declined, done, expired
+        size_t accepted = 0;          // acceptances held, including this user's
+        size_t members = 0;           // everyone in the chat, including this user
+    };
+    bool request_chat_deletion(const std::string& conversation_id, std::string& error);
+    bool request_message_deletion(const std::string& conversation_id, const std::vector<std::string>& message_ids, std::string& error);
+    std::vector<DeletionInfo> deletions();  // newest first
+    bool accept_deletion(const std::string& op_id, std::string& error);
+    bool decline_deletion(const std::string& op_id);
 
     // --- Restoring after a reinstall (M4) ---
     // The keyring is what a reinstalled app needs, beyond the keys folder, to find and open its chats'
@@ -367,6 +394,15 @@ private:
     bool process_checkpoint(const Bytes& conversation_id, const chat::SignedRecord& record, const std::string& sender_fp);
     void maybe_post_checkpoint(const Bytes& conversation_id);
     void warn_archive(const Bytes& conversation_id, const std::string& what);
+    bool start_deletion(const Bytes& conversation_id, uint32_t scope, const std::vector<Bytes>& entries, std::string& error);
+    bool receive_deletion_request(const Peer& sender, const chat::SignedRecord& record);
+    bool receive_deletion_accept(const Peer& sender, const chat::SignedRecord& record);
+    Bytes sign_deletion(const HistoryStore::Archive& archive, const HistoryStore::Deletion& deletion);
+    void try_submit_deletion(const Bytes& op_id);
+    void apply_deletion_locally(const HistoryStore::Deletion& deletion);
+    void check_deletions();
+    std::map<std::string, size_t> deletion_submit_attempts_;  // operation -> acceptances held at the last attempt
+    std::chrono::steady_clock::time_point next_deletion_check_{};
     keyring::Contents build_keyring();
     bool store_keyring(const Bytes& plaintext, std::string& error);
     void maintain_keyring();

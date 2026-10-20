@@ -81,11 +81,12 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  hash BLOB NOT NULL,"
          "  ciphertext BLOB NOT NULL,"
          "  appended_at INTEGER NOT NULL,"
+         "  redacted INTEGER NOT NULL DEFAULT 0,"
          "  PRIMARY KEY(archive_id, number))");
 
     // Schema versions: 1 = the first release (envelopes without token_hash), 2 = token hashes,
-    // 3 = invites and mailboxes remember who vouched, 4 = chat archives, 5 = current (keyrings; new
-    // tables only, so nothing to alter). A brand-new database is created at the current shape and starts at 0.
+    // 3 = invites and mailboxes remember who vouched, 4 = chat archives, 5 = keyrings, 6 = current (a
+    // redacted flag on archive entries). A brand-new database is created at the current shape and starts at 0.
     int64_t version = 0;
     {
         Stmt v(db_, "PRAGMA user_version");
@@ -96,7 +97,8 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
         exec(db_, "ALTER TABLE invites ADD COLUMN issued_by BLOB");
         exec(db_, "ALTER TABLE mailboxes ADD COLUMN invited_by BLOB");
     }
-    if (version < 5) exec(db_, "PRAGMA user_version=5");
+    if (version == 4 || version == 5) exec(db_, "ALTER TABLE archive_entries ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0");
+    if (version < 6) exec(db_, "PRAGMA user_version=6");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -459,12 +461,53 @@ RelayStore::AppendResult RelayStore::append_entry(const Bytes& archive_id, uint6
     return AppendResult::Ok;
 }
 
+std::vector<RelayStore::MemberKey> RelayStore::archive_member_keys(const Bytes& archive_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT key_hash, public_key FROM archive_keys WHERE archive_id = ? ORDER BY joined_at, key_hash");
+    s.blob(1, archive_id);
+    std::vector<MemberKey> out;
+    while (s.step()) out.push_back({s.column_blob(0), s.column_blob(1)});
+    return out;
+}
+
+bool RelayStore::delete_archive(const Bytes& archive_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "DELETE FROM archives WHERE id = ?").blob(1, archive_id).step();  // entries, keys and tokens go with it
+    return sqlite3_changes(db_) > 0;
+}
+
+RelayStore::RedactResult RelayStore::redact_entries(const Bytes& archive_id, const std::vector<Bytes>& entry_hashes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    {
+        Stmt exists(db_, "SELECT 1 FROM archives WHERE id = ?");
+        exists.blob(1, archive_id);
+        if (!exists.step()) return RedactResult::NoSuchArchive;
+    }
+    int64_t freed = 0;
+    for (const auto& hash : entry_hashes) {
+        int64_t size = 0;
+        bool found = false;
+        {
+            Stmt e(db_, "SELECT length(ciphertext) FROM archive_entries WHERE archive_id = ? AND hash = ?");
+            e.blob(1, archive_id).blob(2, hash);
+            if (e.step()) { found = true; size = e.column_i64(0); }
+        }
+        if (!found) return RedactResult::UnknownEntry;  // nothing has been changed yet that the transaction won't undo
+        Stmt(db_, "UPDATE archive_entries SET ciphertext = x'', redacted = 1 WHERE archive_id = ? AND hash = ?").blob(1, archive_id).blob(2, hash).step();
+        freed += size;
+    }
+    Stmt(db_, "UPDATE archives SET bytes = bytes - ? WHERE id = ?").i64(1, freed).blob(2, archive_id).step();
+    tx.commit();
+    return RedactResult::Ok;
+}
+
 std::vector<RelayStore::StoredEntry> RelayStore::fetch_entries(const Bytes& archive_id, uint64_t from_number, size_t limit) {
     std::lock_guard<std::mutex> lock(mutex_);
-    Stmt s(db_, "SELECT number, hash, ciphertext FROM archive_entries WHERE archive_id = ? AND number >= ? ORDER BY number LIMIT ?");
+    Stmt s(db_, "SELECT number, hash, ciphertext, redacted FROM archive_entries WHERE archive_id = ? AND number >= ? ORDER BY number LIMIT ?");
     s.blob(1, archive_id).i64(2, static_cast<int64_t>(from_number)).i64(3, static_cast<int64_t>(limit));
     std::vector<StoredEntry> out;
-    while (s.step()) out.push_back({static_cast<uint64_t>(s.column_i64(0)), s.column_blob(1), s.column_blob(2)});
+    while (s.step()) out.push_back({static_cast<uint64_t>(s.column_i64(0)), s.column_blob(1), s.column_blob(2), s.column_i64(3) != 0});
     return out;
 }
 

@@ -4,6 +4,7 @@
 #include "crypto_engine.h"
 #include "messages.h"
 #include "platform.h"
+#include "archive.h"
 #include "protocol.h"
 #include "relay_client.h"
 #include "relay_protocol.h"
@@ -791,6 +792,111 @@ static void test_real_relay() {
         CHECK(keyring.start(), "(the relay restarts)");
         CHECK(fetch(*owner, got, exists, e) && exists && got == small, "after a restart the keyring is still there");
         keyring.stop();
+    }
+
+    std::cout << "12e. Deleting and redacting by agreement\n";
+    {
+        const int dbase = 61000 + static_cast<int>(getpid() % 2000) * 2;
+        Server del{dbase, ROOT / "relay-delete", {}};
+        if (!del.start()) { std::cout << "FAIL could not start the deletion relay\n"; failures++; return; }
+        auto dinvite = del.invite();
+        const Bytes dpin = dinvite->relay_id;
+        auto owner = make_box(del, dpin);
+        if (!owner) { std::cout << "FAIL setup\n"; failures++; return; }
+        std::string e;
+        const Bytes id = CryptoEngine::random_bytes(16);
+        const Bytes genesis = CryptoEngine::sha256(relay::archive_genesis_input(id));
+        Bytes tokens[3] = {CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)};
+        CryptoEngine::SigKeyPair keys[3] = {CryptoEngine::generate_sig_keypair(), CryptoEngine::generate_sig_keypair(), CryptoEngine::generate_sig_keypair()};
+        auto join = [&](const Bytes& archive, const Bytes& token, const CryptoEngine::SigKeyPair& key) {
+            RelayClient c; std::string err;
+            return connect_to(c, del, dpin, err) && c.join_archive(archive, token, key, err);
+        };
+        auto open_archive = [&](RelayClient& c, const Bytes& archive, const CryptoEngine::SigKeyPair& key, std::string& err) {
+            return connect_to(c, del, dpin, err) && c.authenticate_archive(archive, key, err);
+        };
+        {
+            RelayClient c;
+            CHECK(sign_in(c, del, dpin, *owner, e) && c.create_archive(id, {CryptoEngine::sha256(tokens[0]), CryptoEngine::sha256(tokens[1]), CryptoEngine::sha256(tokens[2])}, e), "(an archive for three members)");
+            CHECK(join(id, tokens[0], keys[0]) && join(id, tokens[1], keys[1]), "(two of them join)");
+        }
+        RelayClient alice, bob;
+        CHECK(open_archive(alice, id, keys[0], e) && open_archive(bob, id, keys[1], e), "(Alice and Bob sign in)");
+        Bytes head_hash = genesis;
+        std::vector<Bytes> hashes;
+        relay::ArchiveHead head;
+        for (int i = 1; i <= 5; i++) {
+            Bytes ct(200, static_cast<uint8_t>(i));
+            alice.append_entry(static_cast<uint64_t>(i - 1), head_hash, ct, head, e);
+            head_hash = head.hash;
+            hashes.push_back(head.hash);
+        }
+        const uint64_t soon = static_cast<uint64_t>(time(nullptr)) + 3600;
+        auto sign = [&](size_t who, uint32_t scope, const Bytes& op, uint64_t expires, const std::vector<Bytes>& entries) {
+            return relay::ArchiveSignature{CryptoEngine::sha256(keys[who].public_key),
+                                           CryptoEngine::sign(relay::archive_delete_signing_input(dpin, id, scope, op, expires, entries), keys[who].private_key)};
+        };
+        auto order = [&](uint32_t scope, const std::vector<Bytes>& entries, const std::vector<size_t>& signers, const Bytes& op, uint64_t expires) {
+            relay::ArchiveDelete o;
+            o.scope = scope; o.op_id = op; o.expires_at = expires; o.entry_hashes = entries;
+            for (size_t who : signers) o.signatures.push_back(sign(who, scope, op, expires, entries));
+            return o;
+        };
+        const Bytes op1 = CryptoEngine::random_bytes(16);
+        CHECK(!alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1}, op1, soon), e) && has(e, "joined"), "while a member has still to join, nothing can be deleted: " + e);
+        CHECK(join(id, tokens[2], keys[2]), "(the third joins)");
+        RelayClient carol;
+        CHECK(open_archive(carol, id, keys[2], e), "(and signs in)");
+
+        CHECK(!alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1}, op1, soon), e) && has(e, "Not every member has agreed"), "two of three members signing is not enough: " + e);
+        auto later = [&] { std::vector<relay::ArchiveEntry> got; relay::ArchiveHead h; carol.fetch_entries(1, 10, got, h, e); return got; };
+        CHECK(!later()[1].tombstone, "(and nothing was removed)");
+        auto forged = order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon);
+        forged.signatures[2].signature = forged.signatures[0].signature;  // someone else's signature in Carol's place
+        CHECK(!alice.delete_in_archive(forged, e) && has(e, "not valid"), "a signature that isn't that member's is refused: " + e);
+        auto other_entry = order(relay::DELETE_SCOPE_ENTRIES, {hashes[3]}, {0, 1, 2}, op1, soon);
+        auto reused = order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon);
+        reused.entry_hashes = {hashes[3]};  // signed for entry 2, presented for entry 4
+        CHECK(!alice.delete_in_archive(reused, e) && has(e, "not valid") && !later()[3].tombstone, "signatures made for one entry can't be used for another: " + e);
+        CHECK(!alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, static_cast<uint64_t>(time(nullptr)) - 10), e) && has(e, "expired"), "an expired order is refused: " + e);
+        auto wrong_op = order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon);
+        wrong_op.op_id = CryptoEngine::random_bytes(16);
+        auto wrong_scope = order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon);
+        wrong_scope.scope = relay::DELETE_SCOPE_CHAT;
+        wrong_scope.entry_hashes.clear();
+        CHECK(!alice.delete_in_archive(wrong_op, e) && has(e, "not valid") && !alice.delete_in_archive(wrong_scope, e) && has(e, "not valid"), "nor can they be used under another operation ID, or to delete the whole chat instead");
+        CHECK(!alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1], CryptoEngine::random_bytes(32)}, {0, 1, 2}, op1, soon), e) && has(e, "isn't in this archive") && !later()[1].tombstone,
+              "an order naming an entry that isn't there changes nothing, even if it also names real ones: " + e);
+        {
+            RelayClient nobody;
+            connect_to(nobody, del, dpin, e);
+            CHECK(!nobody.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon), e) && has(e, "Sign in"), "someone not signed in to the archive can't submit an order: " + e);
+        }
+
+        CHECK(alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon), e), "with all three signatures, the entry is redacted (" + e + ")");
+        auto after = later();
+        CHECK(after.size() == 5 && after[1].tombstone && after[1].ciphertext.empty() && after[1].hash == hashes[1] && !after[0].tombstone && !after[2].tombstone && !after[4].tombstone, "it is a tombstone with its hash kept, and the rest are intact");
+        archive::Head start{0, genesis};
+        auto chain = archive::verify_chain(id, start, after);
+        CHECK(chain && chain->number == 5 && chain->hash == head_hash, "the chain, tombstone and all, still checks out to the same head");
+        auto tampered = after;
+        tampered[1].hash = CryptoEngine::sha256(Bytes{9});
+        CHECK(!archive::verify_chain(id, start, tampered), "but a tombstone claiming a different hash breaks it at the next entry");
+        CHECK(alice.delete_in_archive(order(relay::DELETE_SCOPE_ENTRIES, {hashes[1]}, {0, 1, 2}, op1, soon), e), "repeating the same order is harmless");
+        Bytes ct6(100, 6);
+        relay::ArchiveHead h6;
+        CHECK(alice.append_entry(5, head_hash, ct6, h6, e) == RelayClient::AppendOutcome::Appended && h6.number == 6, "the archive carries on after a redaction");
+
+        // The whole chat.
+        const Bytes op2 = CryptoEngine::random_bytes(16);
+        auto chat_order = order(relay::DELETE_SCOPE_CHAT, {}, {2, 0, 1}, op2, soon);
+        CHECK(!alice.delete_in_archive(order(relay::DELETE_SCOPE_CHAT, {}, {0, 2}, op2, soon), e) && has(e, "Not every member"), "deleting the whole chat also needs everyone: " + e);
+        CHECK(alice.delete_in_archive(chat_order, e), "with everyone's signature (in any order) the whole archive is deleted (" + e + ")");
+        RelayClient gone;
+        CHECK(!open_archive(gone, id, keys[0], e) && has(e, "Authentication failed"), "afterwards nobody can sign in to it: " + e);
+        RelayClient again;
+        CHECK(sign_in(again, del, dpin, *owner, e) && again.create_archive(id, {CryptoEngine::sha256(tokens[0])}, e), "and the same ID can be used for a new archive");
+        del.stop();
     }
 
     std::cout << "12c. Chat archives\n";

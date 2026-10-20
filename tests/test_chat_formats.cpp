@@ -610,6 +610,51 @@ int main() {
         CHECK(!as_record(2, Bytes(), 0, Bytes(100, 1)), "and its payload has a small limit");
     }
 
+    std::cout << "Deletion requests and acceptances\n";
+    {
+        DeleteRequestInfo whole{1, CryptoEngine::random_bytes(16), 1700000000, {}};
+        DeleteRequestInfo some{2, CryptoEngine::random_bytes(16), 1700000000, {CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)}};
+        auto wp = delete_request_payload(whole), sp = delete_request_payload(some);
+        auto wb = parse_delete_request_payload(wp), sb = parse_delete_request_payload(sp);
+        CHECK(wb && wb->scope == 1 && wb->op_id == whole.op_id && wb->expires_at == 1700000000 && wb->entries.empty() && sb && sb->scope == 2 && sb->entries == some.entries, "a request names a whole chat, or particular entries by hash");
+        auto changed = [&](DeleteRequestInfo base, const std::function<void(DeleteRequestInfo&)>& f) { f(base); return throws([&] { delete_request_payload(base); }); };
+        CHECK(changed(whole, [](DeleteRequestInfo& x) { x.scope = 0; }) && changed(whole, [](DeleteRequestInfo& x) { x.scope = 3; }) && changed(whole, [](DeleteRequestInfo& x) { x.entries.push_back(Bytes(32, 1)); }) &&
+                  changed(some, [](DeleteRequestInfo& x) { x.entries.clear(); }) && changed(some, [](DeleteRequestInfo& x) { x.entries.assign(65, Bytes(32, 1)); }) && changed(some, [](DeleteRequestInfo& x) { x.op_id.pop_back(); }) &&
+                  changed(some, [](DeleteRequestInfo& x) { x.entries[0].pop_back(); }),
+              "an invalid request is refused when making it: a bad scope, entries for a whole chat, none or too many for a partial one, IDs and hashes of the wrong size");
+        Bytes trailing = sp; trailing.push_back(0);
+        bool prefixes = true;
+        for (size_t n = 0; n < sp.size(); n++)
+            if (parse_delete_request_payload(Bytes(sp.begin(), sp.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes lying; write_u32(lying, 2); write_blob(lying, Bytes(16, 1)); write_u64(lying, 5); write_u32(lying, 0xFFFFFFFF);
+        Bytes twice = sp;  // the same entry named twice
+        Bytes dup; write_u32(dup, 2); write_blob(dup, Bytes(16, 1)); write_u64(dup, 5); write_u32(dup, 2); write_blob(dup, Bytes(32, 7)); write_blob(dup, Bytes(32, 7));
+        CHECK(!parse_delete_request_payload(trailing) && prefixes && !parse_delete_request_payload(Bytes()) && !parse_delete_request_payload(lying) && !parse_delete_request_payload(dup) && !parse_delete_request_payload(Bytes(MAX_DELETE_REQUEST_PAYLOAD + 1, 1)),
+              "trailing bytes, every truncation, a huge declared count, an entry named twice and an oversized payload are rejected");
+
+        DeleteAcceptInfo acc{CryptoEngine::random_bytes(16), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(3309)};
+        auto ap = delete_accept_payload(acc);
+        auto ab = parse_delete_accept_payload(ap);
+        CHECK(ab && ab->op_id == acc.op_id && ab->key_hash == acc.key_hash && ab->signature == acc.signature && ap.size() <= MAX_DELETE_ACCEPT_PAYLOAD, "an acceptance carries the operation, which key signed, and the signature");
+        CHECK(throws([&] { delete_accept_payload({Bytes(15, 1), acc.key_hash, acc.signature}); }) && throws([&] { delete_accept_payload({acc.op_id, Bytes(31, 1), acc.signature}); }) && throws([&] { delete_accept_payload({acc.op_id, acc.key_hash, Bytes()}); }),
+              "an acceptance with a bad ID, key hash or no signature is refused");
+        Bytes atrail = ap; atrail.push_back(0);
+        bool aprefixes = true;
+        for (size_t n = 0; n < ap.size(); n += 13)
+            if (parse_delete_accept_payload(Bytes(ap.begin(), ap.begin() + static_cast<std::ptrdiff_t>(n)))) aprefixes = false;
+        CHECK(!parse_delete_accept_payload(atrail) && aprefixes && !parse_delete_accept_payload(Bytes()), "and the same hostile inputs are rejected");
+
+        Bytes recipients = recipients_hash_for({alice.fingerprint, bob.fingerprint});
+        auto as_record = [&](uint32_t type, uint32_t version, const Bytes& own_prev, uint32_t seen_count, const Bytes& body) {
+            return parse_record(hand_record(alice, version, type, alice.fingerprint, recipients, body, own_prev,
+                                            [&](Bytes& b) { if (version == 1) write_blob(b, Bytes()); else { write_u32(b, seen_count); for (uint32_t i = 0; i < seen_count; i++) write_blob(b, CryptoEngine::random_bytes(HASH_BYTES)); } }));
+        };
+        CHECK(as_record(8, 2, Bytes(), 0, sp).has_value() && as_record(9, 2, Bytes(), 0, ap).has_value(), "(control) both parse as version 2 records");
+        CHECK(!as_record(8, 1, Bytes(), 0, sp) && !as_record(9, 1, Bytes(), 0, ap), "...but not as version 1");
+        CHECK(!as_record(8, 2, CryptoEngine::random_bytes(HASH_BYTES), 0, sp) && !as_record(9, 2, Bytes(), 1, ap), "they are outside the transcript: no previous entry, nothing seen");
+        CHECK(!as_record(8, 2, Bytes(), 0, Bytes(MAX_DELETE_REQUEST_PAYLOAD + 1, 1)) && !as_record(9, 2, Bytes(), 0, Bytes(MAX_DELETE_ACCEPT_PAYLOAD + 1, 1)) && !as_record(10, 2, Bytes(), 0, sp), "and their payloads have limits, and there is no type 10");
+    }
+
     std::cout << "The keyring\n";
     {
         keyring::Contents c;

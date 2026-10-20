@@ -86,6 +86,9 @@ enum class MessageType : uint8_t {
     ARCHIVE_FETCH      = 0x49,  // member → relay: send entries from a number onwards
     ARCHIVE_ENTRY      = 0x4A,  // relay → member: one entry
     ARCHIVE_FETCH_END  = 0x4B,  // relay → member: that was all; here is the head
+    // --- Deleting a chat's archive, or redacting entries, by agreement of every member ---
+    ARCHIVE_DELETE     = 0x50,  // member → relay: an order signed by every registered member key
+    ARCHIVE_DELETE_OK  = 0x51,
     // --- Keyring (M4): one encrypted blob per mailbox, for restoring a device. Sent in chunks. ---
     KEYRING_PUT        = 0x4C,  // mailbox owner → relay: one chunk of the new keyring
     KEYRING_PUT_OK     = 0x4D,  // relay → owner: that chunk is accepted (after the last, the keyring is stored)

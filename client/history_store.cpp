@@ -50,7 +50,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 7;
+constexpr int64_t SCHEMA_VERSION = 8;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -123,6 +123,19 @@ const char SCHEMA_REST[] =
     "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',"
     "  checkpoint_at INTEGER NOT NULL DEFAULT 0, activity INTEGER NOT NULL DEFAULT 0,"
     "  checkpoint_seen INTEGER NOT NULL DEFAULT 0, warning TEXT NOT NULL DEFAULT '');"
+    // Added in version 8: deleting by agreement.
+    "CREATE TABLE IF NOT EXISTS deletions("
+    "  op_id BLOB PRIMARY KEY, conv_id BLOB NOT NULL, scope INTEGER NOT NULL, expires_at INTEGER NOT NULL,"
+    "  requester_fp TEXT NOT NULL, entries BLOB NOT NULL, state INTEGER NOT NULL, created_at INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS deletion_accepts("
+    "  op_id BLOB NOT NULL, key_hash BLOB NOT NULL, signature BLOB NOT NULL, member_fp TEXT NOT NULL,"
+    "  PRIMARY KEY(op_id, key_hash));"
+    "CREATE TABLE IF NOT EXISTS archive_messages("
+    "  conv_id BLOB NOT NULL, msg_id BLOB NOT NULL, number INTEGER NOT NULL,"
+    "  PRIMARY KEY(conv_id, msg_id));"
+    "CREATE TABLE IF NOT EXISTS archive_redacted("
+    "  conv_id BLOB NOT NULL, number INTEGER NOT NULL,"
+    "  PRIMARY KEY(conv_id, number));"
     // Added in version 7: the chain hashes this device has checked.
     "CREATE TABLE IF NOT EXISTS archive_chain("
     "  conv_id BLOB NOT NULL, number INTEGER NOT NULL, hash BLOB NOT NULL,"
@@ -182,13 +195,13 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
             exec(db_, "ALTER TABLE archives ADD COLUMN warning TEXT NOT NULL DEFAULT ''");
         }
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=7");
+        exec(db_, "PRAGMA user_version=8");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=7");
+        exec(db_, "PRAGMA user_version=8");
         tx.commit();
     }
     } catch (...) {
@@ -229,7 +242,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=7");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=8");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -417,7 +430,13 @@ static bool read_message(Stmt& s, HistoryStore::Message& out, const Unseal& unse
     out.status = static_cast<int>(s.column_i64(6));
     out.gap = s.column_i64(7) != 0;
     out.entry_hash = s.column_blob(8);
-    auto plain = unseal(s.column_blob(9), aad_of("pq-suite v3 history message", out.conversation_id, out.message_id));
+    Bytes sealed = s.column_blob(9);
+    if (sealed.empty()) {  // erased by agreement: only its place and hash are kept
+        out.deleted = true;
+        out.record.clear();
+        return true;
+    }
+    auto plain = unseal(sealed, aad_of("pq-suite v3 history message", out.conversation_id, out.message_id));
     if (!plain) return false;  // damaged, or sealed under a different key
     out.record = std::move(*plain);
     return true;
@@ -833,6 +852,137 @@ void HistoryStore::set_archive_head(const Bytes& conversation_id, uint64_t numbe
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt(db_, "UPDATE archives SET head_number = ?, head_hash = ? WHERE conv_id = ? AND head_number < ?")
         .i64(1, static_cast<int64_t>(number)).blob(2, hash).blob(3, conversation_id).i64(4, static_cast<int64_t>(number)).step();
+}
+
+// --- Deleting by agreement ---
+
+bool HistoryStore::add_deletion(const Deletion& d) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Bytes entries;
+    write_u32(entries, static_cast<uint32_t>(d.entries.size()));
+    for (const auto& h : d.entries) write_blob(entries, h);
+    Stmt(db_, "INSERT OR IGNORE INTO deletions(op_id, conv_id, scope, expires_at, requester_fp, entries, state, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)")
+        .blob(1, d.op_id).blob(2, d.conversation_id).i64(3, d.scope).i64(4, d.expires_at).text(5, d.requester_fp).blob(6, entries).i64(7, d.state).i64(8, d.created_at).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+static HistoryStore::Deletion read_deletion(Stmt& s) {
+    HistoryStore::Deletion d;
+    d.op_id = s.column_blob(0);
+    d.conversation_id = s.column_blob(1);
+    d.scope = static_cast<int>(s.column_i64(2));
+    d.expires_at = s.column_i64(3);
+    d.requester_fp = s.column_text(4);
+    Bytes entries = s.column_blob(5);
+    size_t off = 0;
+    if (auto n = read_u32(entries.data(), entries.size(), off))
+        for (uint32_t i = 0; i < *n; i++)
+            if (auto h = read_blob(entries.data(), entries.size(), off, 64)) d.entries.push_back(std::move(*h));
+    d.state = static_cast<int>(s.column_i64(6));
+    d.created_at = s.column_i64(7);
+    return d;
+}
+
+static const char DELETION_COLUMNS[] = "op_id, conv_id, scope, expires_at, requester_fp, entries, state, created_at";
+
+std::optional<HistoryStore::Deletion> HistoryStore::deletion(const Bytes& op_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + DELETION_COLUMNS + " FROM deletions WHERE op_id = ?").c_str());
+    s.blob(1, op_id);
+    if (!s.step()) return std::nullopt;
+    return read_deletion(s);
+}
+
+std::vector<HistoryStore::Deletion> HistoryStore::deletions() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + DELETION_COLUMNS + " FROM deletions ORDER BY created_at DESC, rowid DESC").c_str());
+    std::vector<Deletion> out;
+    while (s.step()) out.push_back(read_deletion(s));
+    return out;
+}
+
+void HistoryStore::set_deletion_state(const Bytes& op_id, int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE deletions SET state = ? WHERE op_id = ?").i64(1, state).blob(2, op_id).step();
+}
+
+void HistoryStore::add_deletion_accept(const Bytes& op_id, const Bytes& key_hash, const Bytes& signature, const std::string& member_fp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR IGNORE INTO deletion_accepts(op_id, key_hash, signature, member_fp) VALUES(?, ?, ?, ?)").blob(1, op_id).blob(2, key_hash).blob(3, signature).text(4, member_fp).step();
+}
+
+std::vector<HistoryStore::DeletionAccept> HistoryStore::deletion_accepts(const Bytes& op_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT key_hash, signature, member_fp FROM deletion_accepts WHERE op_id = ? ORDER BY rowid");
+    s.blob(1, op_id);
+    std::vector<DeletionAccept> out;
+    while (s.step()) out.push_back({s.column_blob(0), s.column_blob(1), s.column_text(2)});
+    return out;
+}
+
+void HistoryStore::save_archive_message(const Bytes& conversation_id, const Bytes& message_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR IGNORE INTO archive_messages(conv_id, msg_id, number) VALUES(?, ?, ?)").blob(1, conversation_id).blob(2, message_id).i64(3, static_cast<int64_t>(number)).step();
+}
+
+std::optional<uint64_t> HistoryStore::archive_message_number(const Bytes& conversation_id, const Bytes& message_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT number FROM archive_messages WHERE conv_id = ? AND msg_id = ?");
+    s.blob(1, conversation_id).blob(2, message_id);
+    if (!s.step()) return std::nullopt;
+    return static_cast<uint64_t>(s.column_i64(0));
+}
+
+std::vector<HistoryStore::Bytes> HistoryStore::archive_messages_at(const Bytes& conversation_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT msg_id FROM archive_messages WHERE conv_id = ? AND number = ?");
+    s.blob(1, conversation_id).i64(2, static_cast<int64_t>(number));
+    std::vector<Bytes> out;
+    while (s.step()) out.push_back(s.column_blob(0));
+    return out;
+}
+
+std::optional<uint64_t> HistoryStore::archive_number_of(const Bytes& conversation_id, const Bytes& entry_hash) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT number FROM archive_chain WHERE conv_id = ? AND hash = ?");
+    s.blob(1, conversation_id).blob(2, entry_hash);
+    if (!s.step()) return std::nullopt;
+    return static_cast<uint64_t>(s.column_i64(0));
+}
+
+void HistoryStore::mark_archive_redacted(const Bytes& conversation_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR IGNORE INTO archive_redacted(conv_id, number) VALUES(?, ?)").blob(1, conversation_id).i64(2, static_cast<int64_t>(number)).step();
+}
+
+bool HistoryStore::archive_redacted(const Bytes& conversation_id, uint64_t number) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT 1 FROM archive_redacted WHERE conv_id = ? AND number = ?");
+    s.blob(1, conversation_id).i64(2, static_cast<int64_t>(number));
+    return s.step();
+}
+
+bool HistoryStore::erase_message(const Bytes& conversation_id, const Bytes& message_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE messages SET sealed = x'' WHERE conv_id = ? AND msg_id = ? AND length(sealed) > 0").blob(1, conversation_id).blob(2, message_id).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+void HistoryStore::erase_conversation_messages(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    Stmt(db_, "DELETE FROM messages WHERE conv_id = ?").blob(1, conversation_id).step();
+    Stmt(db_, "DELETE FROM deliveries WHERE conv_id = ?").blob(1, conversation_id).step();
+    tx.commit();
+}
+
+void HistoryStore::remove_archive(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    for (const char* sql : {"DELETE FROM archives WHERE conv_id = ?", "DELETE FROM archive_chain WHERE conv_id = ?", "DELETE FROM archive_messages WHERE conv_id = ?",
+                            "DELETE FROM archive_redacted WHERE conv_id = ?"})
+        Stmt(db_, sql).blob(1, conversation_id).step();
+    tx.commit();
 }
 
 // --- Verified people ---

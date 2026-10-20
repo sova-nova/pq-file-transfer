@@ -48,6 +48,8 @@ bool well_formed(const Record& r) {
         case RecordType::Forward: return r.payload.size() <= 4 + HASH_BYTES + 4 + MAX_FORWARD_ENVELOPE_BYTES && r.own_prev.empty() && r.seen.empty();
         case RecordType::ArchiveGrant: return r.payload.size() <= MAX_ARCHIVE_GRANT_PAYLOAD && r.own_prev.empty() && r.seen.empty();
         case RecordType::Checkpoint: return r.payload.size() <= 8 + 4 + HASH_BYTES && r.own_prev.empty() && r.seen.empty();
+        case RecordType::DeleteRequest: return r.payload.size() <= MAX_DELETE_REQUEST_PAYLOAD && r.own_prev.empty() && r.seen.empty();
+        case RecordType::DeleteAccept: return r.payload.size() <= MAX_DELETE_ACCEPT_PAYLOAD && r.own_prev.empty() && r.seen.empty();
     }
     return false;
 }
@@ -182,7 +184,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
         }
     }
     if (b != bd.size()) return std::nullopt;
-    const uint32_t newest_type = *version == 1 ? 3 : 7;  // Conversation, Forward, ArchiveGrant and Checkpoint records came with version 2
+    const uint32_t newest_type = *version == 1 ? 3 : 9;  // Conversation, Forward, ArchiveGrant, Checkpoint and the delete records came with version 2
     if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
@@ -316,6 +318,65 @@ std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload
         info.join_token.size() != 32)
         return std::nullopt;
     return info;
+}
+
+Bytes delete_request_payload(const DeleteRequestInfo& info) {
+    const bool chat = info.scope == 1;
+    if ((info.scope != 1 && info.scope != 2) || info.op_id.size() != 16 || (chat ? !info.entries.empty() : (info.entries.empty() || info.entries.size() > 64)))
+        throw std::runtime_error("The deletion request is not valid");
+    Bytes p;
+    write_u32(p, info.scope);
+    write_blob(p, info.op_id);
+    write_u64(p, info.expires_at);
+    write_u32(p, static_cast<uint32_t>(info.entries.size()));
+    for (const auto& h : info.entries) {
+        if (h.size() != HASH_BYTES) throw std::runtime_error("The deletion request is not valid");
+        write_blob(p, h);
+    }
+    return p;
+}
+
+std::optional<DeleteRequestInfo> parse_delete_request_payload(const Bytes& payload) {
+    if (payload.size() > MAX_DELETE_REQUEST_PAYLOAD) return std::nullopt;
+    size_t off = 0;
+    auto scope = read_u32(payload.data(), payload.size(), off);
+    auto op = read_blob(payload.data(), payload.size(), off, 16);
+    auto expires = read_u64(payload.data(), payload.size(), off);
+    auto n = read_u32(payload.data(), payload.size(), off);
+    if (!scope || !op || op->size() != 16 || !expires || !n || (*scope != 1 && *scope != 2)) return std::nullopt;
+    if (*scope == 1 ? *n != 0 : (*n < 1 || *n > 64)) return std::nullopt;
+    DeleteRequestInfo info;
+    info.scope = *scope;
+    info.op_id = std::move(*op);
+    info.expires_at = *expires;
+    for (uint32_t i = 0; i < *n; i++) {
+        auto h = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+        if (!h || h->size() != HASH_BYTES) return std::nullopt;
+        for (const auto& other : info.entries) if (other == *h) return std::nullopt;
+        info.entries.push_back(std::move(*h));
+    }
+    if (off != payload.size()) return std::nullopt;
+    return info;
+}
+
+Bytes delete_accept_payload(const DeleteAcceptInfo& info) {
+    if (info.op_id.size() != 16 || info.key_hash.size() != HASH_BYTES || info.signature.empty() || info.signature.size() > 8192)
+        throw std::runtime_error("The deletion acceptance is not valid");
+    Bytes p;
+    write_blob(p, info.op_id);
+    write_blob(p, info.key_hash);
+    write_blob(p, info.signature);
+    return p;
+}
+
+std::optional<DeleteAcceptInfo> parse_delete_accept_payload(const Bytes& payload) {
+    if (payload.size() > MAX_DELETE_ACCEPT_PAYLOAD) return std::nullopt;
+    size_t off = 0;
+    auto op = read_blob(payload.data(), payload.size(), off, 16);
+    auto kh = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    auto sig = read_blob(payload.data(), payload.size(), off, 8192);
+    if (!op || op->size() != 16 || !kh || kh->size() != HASH_BYTES || !sig || sig->empty() || off != payload.size()) return std::nullopt;
+    return DeleteAcceptInfo{std::move(*op), std::move(*kh), std::move(*sig)};
 }
 
 Bytes checkpoint_payload(uint64_t number, const Bytes& hash) {

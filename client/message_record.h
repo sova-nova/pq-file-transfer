@@ -42,6 +42,8 @@ enum class RecordType : uint32_t {
     Forward = 5,       // payload: see forward_payload(); asks a group's creator to pass a sealed envelope to another member (version 2 only)
     ArchiveGrant = 6,  // payload: see archive_grant_payload(); gives one member what they need to use the chat's archive (version 2 only)
     Checkpoint = 7,    // payload: see checkpoint_payload(); "I have seen the archive up to this entry" (version 2 only)
+    DeleteRequest = 8, // payload: see delete_request_payload(); "let's delete this chat, or these entries" (version 2 only)
+    DeleteAccept = 9,  // payload: see delete_accept_payload(); one member's agreement, with their archive key's signature (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -172,6 +174,36 @@ struct CheckpointInfo {
 // Throws std::runtime_error if the number is 0 or the hash isn't HASH_BYTES.
 Bytes checkpoint_payload(uint64_t number, const Bytes& hash);
 std::optional<CheckpointInfo> parse_checkpoint_payload(const Bytes& payload);
+
+// --- Deleting by agreement ---
+//
+// Any member can ask to delete the whole chat, or named entries of it. Every member must accept; one who
+// doesn't, or doesn't answer, stops it. An acceptance carries that member's signature, made with their
+// archive key, over the exact order the relay will check (relay::archive_delete_signing_input), so once
+// everyone has accepted anyone holding the acceptances can submit it. Outside the transcript.
+//
+//   request payload = u32 scope (relay::DELETE_SCOPE_*) | blob op_id (16) | u64 expires_at | u32 n | n x blob entry hash (32)
+//   accept payload  = blob op_id (16) | blob key_hash (32) | blob signature
+constexpr size_t MAX_DELETE_REQUEST_PAYLOAD = 4096;
+constexpr size_t MAX_DELETE_ACCEPT_PAYLOAD = 8192 + 256;
+constexpr int64_t DELETE_REQUEST_LIFETIME_SECONDS = 7 * 24 * 3600;
+
+struct DeleteRequestInfo {
+    uint32_t scope = 1;
+    Bytes op_id;
+    uint64_t expires_at = 0;
+    std::vector<Bytes> entries;  // chain hashes; none when the scope is the whole chat
+};
+Bytes delete_request_payload(const DeleteRequestInfo& info);  // throws std::runtime_error if not valid
+std::optional<DeleteRequestInfo> parse_delete_request_payload(const Bytes& payload);
+
+struct DeleteAcceptInfo {
+    Bytes op_id;
+    Bytes key_hash;
+    Bytes signature;
+};
+Bytes delete_accept_payload(const DeleteAcceptInfo& info);
+std::optional<DeleteAcceptInfo> parse_delete_accept_payload(const Bytes& payload);
 
 // A receipt tells the sender that these messages were delivered or read.
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids);

@@ -143,7 +143,27 @@ struct ArchiveFetch {
 struct ArchiveEntry {
     uint64_t number = 0;
     std::vector<uint8_t> hash;
-    std::vector<uint8_t> ciphertext;
+    std::vector<uint8_t> ciphertext;  // empty exactly when `tombstone`
+    bool tombstone = false;           // the content was removed by agreement; the hash is kept, so the chain still holds
+};
+
+// Deleting (the whole archive) or redacting (named entries) needs the agreement of every member. Each
+// registered member key signs the same order; the relay checks one signature from each before it acts.
+// An order has an operation ID, so a signature made for one order can't be used for another, and an
+// expiry, after which the relay refuses it.
+constexpr size_t MAX_DELETE_ENTRIES = 64;
+constexpr uint32_t DELETE_SCOPE_CHAT = 1;
+constexpr uint32_t DELETE_SCOPE_ENTRIES = 2;
+struct ArchiveSignature {
+    std::vector<uint8_t> key_hash;   // HASH_BYTES: which registered key
+    std::vector<uint8_t> signature;  // over archive_delete_signing_input()
+};
+struct ArchiveDelete {
+    uint32_t scope = DELETE_SCOPE_CHAT;
+    std::vector<uint8_t> op_id;      // 16 bytes
+    uint64_t expires_at = 0;         // unix seconds
+    std::vector<std::vector<uint8_t>> entry_hashes;  // for DELETE_SCOPE_ENTRIES: 1 to MAX_DELETE_ENTRIES chain hashes; none for the whole chat
+    std::vector<ArchiveSignature> signatures;        // 1 to MAX_ARCHIVE_MEMBERS
 };
 
 // --- Keyring ---
@@ -181,6 +201,7 @@ std::vector<uint8_t> encode(const ArchiveHead&);
 std::vector<uint8_t> encode(const ArchiveFetch&);
 std::vector<uint8_t> encode(const ArchiveEntry&);
 std::vector<uint8_t> encode(const KeyringChunk&);
+std::vector<uint8_t> encode(const ArchiveDelete&);
 
 std::optional<Hello> decode_hello(const std::vector<uint8_t>&);
 std::optional<HelloReply> decode_hello_reply(const std::vector<uint8_t>&);
@@ -202,6 +223,7 @@ std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>&);
 // range, and the data is a full chunk (or the remainder, for the last). An all-zero chunk with no data
 // means "no keyring".
 std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>&);
+std::optional<ArchiveDelete> decode_archive_delete(const std::vector<uint8_t>&);
 
 // --- What gets signed. Each starts with its own label, and includes the relay ID, so a
 // signature made for one purpose or one relay can't be accepted for another. ---
@@ -225,6 +247,10 @@ std::vector<uint8_t> archive_auth_signing_input(const std::vector<uint8_t>& auth
                                                 const std::vector<uint8_t>& relay_id,
                                                 const std::vector<uint8_t>& archive_id,
                                                 const std::vector<uint8_t>& key_hash);
+
+std::vector<uint8_t> archive_delete_signing_input(const std::vector<uint8_t>& relay_id, const std::vector<uint8_t>& archive_id, uint32_t scope,
+                                                  const std::vector<uint8_t>& op_id, uint64_t expires_at,
+                                                  const std::vector<std::vector<uint8_t>>& entry_hashes);
 
 // What gets hashed (with SHA-256, by the caller) to make an archive's chain. The genesis hash is the
 // head of an empty archive; entry n's hash is over the previous head, so each entry commits to

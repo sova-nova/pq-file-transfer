@@ -44,6 +44,8 @@ private:
     void create_group_dialog();
     void make_relay_invite();
     void restore_history();
+    void review_deletions();
+    void request_delete_chat();
     void review_group_invites();
     void show_cards_issued();
     void revoke_access_for_current();
@@ -75,6 +77,8 @@ private:
     QPushButton* new_group_button_ = nullptr;
     QPushButton* relay_invite_button_ = nullptr;
     QPushButton* restore_button_ = nullptr;
+    QPushButton* deletions_button_ = nullptr;     // requests from others to delete a chat or messages
+    QPushButton* delete_chat_button_ = nullptr;   // ask everyone to delete the chat on screen
     QPushButton* invites_button_ = nullptr;
     QListWidget* contacts_ = nullptr;
     QLabel* groups_label_ = nullptr;

@@ -51,7 +51,9 @@ std::optional<Head> verify_chain(const Bytes& archive_id, const Head& from, cons
     Head head = from;
     for (const auto& e : entries) {
         if (e.number != head.number + 1) return std::nullopt;  // a gap, a repeat or an entry out of order
-        if (e.hash != entry_hash(archive_id, e.number, head.hash, e.ciphertext)) return std::nullopt;
+        // A tombstone's content is gone, so its hash can't be worked out again; it is taken as given, and the next
+        // entry (whose own hash covers it) is what holds it in place.
+        if (!e.tombstone && e.hash != entry_hash(archive_id, e.number, head.hash, e.ciphertext)) return std::nullopt;
         head.number = e.number;
         head.hash = e.hash;
     }

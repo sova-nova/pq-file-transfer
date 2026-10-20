@@ -90,6 +90,9 @@ public:
     // appended first and `head` is where the head is now; fetch what was missed and try again.
     AppendOutcome append_entry(uint64_t expected_number, const std::vector<uint8_t>& expected_hash,
                                const std::vector<uint8_t>& ciphertext, relay::ArchiveHead& head, std::string& error);
+    // Deletes the whole archive, or redacts the entries named, once every member's key has signed the same
+    // order (see relay::archive_delete_signing_input). The connection must be signed in to the archive.
+    bool delete_in_archive(const relay::ArchiveDelete& order, std::string& error);
     // Entries numbered from_number onwards (at most `limit`), in the order the relay sends them, and the head.
     bool fetch_entries(uint64_t from_number, uint32_t limit, std::vector<relay::ArchiveEntry>& entries,
                        relay::ArchiveHead& head, std::string& error);

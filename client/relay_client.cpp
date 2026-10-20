@@ -422,6 +422,10 @@ RelayClient::AppendOutcome RelayClient::append_entry(uint64_t expected_number, c
     return which == MessageType::ARCHIVE_APPEND_OK ? AppendOutcome::Appended : AppendOutcome::Stale;
 }
 
+bool RelayClient::delete_in_archive(const relay::ArchiveDelete& order, std::string& error) {
+    return send_request(MessageType::ARCHIVE_DELETE, relay::encode(order), error) && read_reply(MessageType::ARCHIVE_DELETE_OK, nullptr, error);
+}
+
 bool RelayClient::fetch_entries(uint64_t from_number, uint32_t limit, std::vector<relay::ArchiveEntry>& entries,
                                 relay::ArchiveHead& head, std::string& error) {
     entries.clear();

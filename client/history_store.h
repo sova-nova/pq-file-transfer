@@ -89,7 +89,8 @@ public:
         bool gap = false;  // the sender's record points at something we never received
         Bytes entry_hash;
         Bytes record;      // the signed record, decrypted
-    };
+        bool deleted = false;  // erased by agreement: no content is held, only its place and hash
+};
     // False if a message with that ID is already stored in the conversation (a replay or duplicate).
     bool add_message(const Message& message);
     // The newest `limit` messages of a conversation, oldest first. Rows that no longer decrypt are skipped.
@@ -199,6 +200,44 @@ public:
     std::optional<Bytes> archive_hash(const Bytes& conversation_id, uint64_t number);
     // The first message stored for a conversation (a group's creation record, for its creator), if any.
     std::optional<Message> first_message(const Bytes& conversation_id);
+
+    // --- Deleting by agreement ---
+    enum DeletionState : int { DeletionPending = 0, DeletionAccepted = 1, DeletionDeclined = 2, DeletionDone = 3, DeletionExpired = 4 };
+    struct Deletion {
+        Bytes op_id;
+        Bytes conversation_id;
+        int scope = 1;  // relay::DELETE_SCOPE_*: 1 the whole chat, 2 named entries
+        int64_t expires_at = 0;
+        std::string requester_fp;  // lowercase hex
+        std::vector<Bytes> entries;  // chain hashes, for scope 2
+        int state = DeletionPending;
+        int64_t created_at = 0;
+    };
+    struct DeletionAccept {
+        Bytes key_hash;
+        Bytes signature;
+        std::string member_fp;
+    };
+    bool add_deletion(const Deletion& d);  // false if that operation is already known
+    std::optional<Deletion> deletion(const Bytes& op_id);
+    std::vector<Deletion> deletions();                // newest first
+    void set_deletion_state(const Bytes& op_id, int state);
+    void add_deletion_accept(const Bytes& op_id, const Bytes& key_hash, const Bytes& signature, const std::string& member_fp);
+    std::vector<DeletionAccept> deletion_accepts(const Bytes& op_id);
+    // Which archive entry holds which message, so a message can be named by its entry's hash and an entry's
+    // message found again; and which entries this device has seen redacted.
+    void save_archive_message(const Bytes& conversation_id, const Bytes& message_id, uint64_t number);
+    std::optional<uint64_t> archive_message_number(const Bytes& conversation_id, const Bytes& message_id);
+    std::vector<Bytes> archive_messages_at(const Bytes& conversation_id, uint64_t number);
+    std::optional<uint64_t> archive_number_of(const Bytes& conversation_id, const Bytes& entry_hash);
+    void mark_archive_redacted(const Bytes& conversation_id, uint64_t number);
+    bool archive_redacted(const Bytes& conversation_id, uint64_t number);
+    // "Deleted by agreement": the message keeps its place and hash but its content is gone for good.
+    bool erase_message(const Bytes& conversation_id, const Bytes& message_id);
+    // Removes every message of a conversation (its delivery records too); the conversation itself stays.
+    void erase_conversation_messages(const Bytes& conversation_id);
+    // Forgets a chat's archive entirely: its keys, its checked chain, its message map.
+    void remove_archive(const Bytes& conversation_id);
 
     // --- People the user has verified ---
     // "I compared this person's fingerprint with them." It is about the person, not about how we

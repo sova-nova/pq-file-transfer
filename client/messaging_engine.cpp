@@ -396,6 +396,16 @@ std::vector<MessagingEngine::ChatMessage> MessagingEngine::messages(const std::s
     auto conv = history_->conversation_for(contact_fp);
     if (!conv) return out;
     for (auto& m : history_->messages(conv->id, limit)) {
+        if (m.deleted) {  // removed by agreement: its place stays, its content is gone
+            ChatMessage gone;
+            gone.row = m.row;
+            gone.outgoing = m.outgoing;
+            gone.sent_at = m.sent_at;
+            gone.status = m.status;
+            gone.deleted = true;
+            out.push_back(std::move(gone));
+            continue;
+        }
         auto record = chat::parse_record(m.record);
         if (!record || record->record.type != chat::RecordType::Text) continue;
         ChatMessage cm;
@@ -588,6 +598,10 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
         }
         case chat::RecordType::ArchiveGrant:
             return receive_archive_grant(peer_from_contact(contact), sr);
+        case chat::RecordType::DeleteRequest:
+            return receive_deletion_request(peer_from_contact(contact), sr);
+        case chat::RecordType::DeleteAccept:
+            return receive_deletion_accept(peer_from_contact(contact), sr);
         case chat::RecordType::Checkpoint:  // these live only in an archive, never in an envelope
         case chat::RecordType::Conversation:
         case chat::RecordType::Forward:
@@ -919,6 +933,17 @@ std::vector<MessagingEngine::GroupMessage> MessagingEngine::group_messages(const
     auto conv = history_->conversation(*id);
     if (!conv || conv->kind != HistoryStore::Group) return out;
     for (auto& m : history_->messages(conv->id, limit)) {
+        if (m.deleted) {
+            GroupMessage gone;
+            gone.row = m.row;
+            gone.message_id = bytes_to_hex(m.message_id);
+            gone.outgoing = m.outgoing;
+            gone.sent_at = m.sent_at;
+            gone.status = m.status;
+            gone.deleted = true;
+            out.push_back(std::move(gone));
+            continue;
+        }
         auto record = chat::parse_record(m.record);
         if (!record || record->record.type != chat::RecordType::Text) continue;
         GroupMessage gm;
@@ -1102,6 +1127,10 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
             }
             case chat::RecordType::ArchiveGrant:
                 return receive_archive_grant(sender, sr);
+            case chat::RecordType::DeleteRequest:
+                return receive_deletion_request(sender, sr);
+            case chat::RecordType::DeleteAccept:
+                return receive_deletion_accept(sender, sr);
             case chat::RecordType::Checkpoint:     // only ever found in an archive
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
@@ -1549,8 +1578,16 @@ bool MessagingEngine::archive_catch_up(RelayClient& client, const HistoryStore::
         for (const auto& e : entries) {
             ArchivedRecord r;
             r.number = e.number;
+            if (e.tombstone) {  // removed by agreement: nothing to read, the hash holds its place in the chain
+                history_->mark_archive_redacted(a.conversation_id, e.number);
+                hashes.emplace_back(e.number, e.hash);
+                fresh.push_back(std::move(r));
+                continue;
+            }
             if (auto record = archive::open_entry(a.archive_key, a.conversation_id, e.number, e.ciphertext)) r.record = std::move(*record);
             auto parsed = r.record.empty() ? std::nullopt : chat::parse_record(r.record);
+            if (parsed && (parsed->record.type == chat::RecordType::Text || parsed->record.type == chat::RecordType::Conversation))
+                history_->save_archive_message(a.conversation_id, parsed->record.message_id, e.number);  // so the message can be named by its entry
             if (!parsed || parsed->record.type != chat::RecordType::Checkpoint) activity++;  // checkpoints don't count towards the next one
             hashes.emplace_back(e.number, e.hash);
             fresh.push_back(std::move(r));
@@ -1610,6 +1647,8 @@ bool MessagingEngine::archive_append(const std::string& conversation_id, const s
                 }
                 number = new_head.number;
                 history_->save_archive_hashes(a->conversation_id, {{number, new_head.hash}});
+                if (auto own = chat::parse_record(record); own && (own->record.type == chat::RecordType::Text || own->record.type == chat::RecordType::Conversation))
+                    history_->save_archive_message(a->conversation_id, own->record.message_id, number);
                 history_->set_archive_head(a->conversation_id, new_head.number, new_head.hash);
                 if (auto own = chat::parse_record(record); !own || own->record.type != chat::RecordType::Checkpoint) history_->add_archive_activity(a->conversation_id, 1);
                 return true;
@@ -1682,6 +1721,10 @@ bool MessagingEngine::handle_archived_records(const Bytes& conversation_id, cons
         if (!peer || !chat::verify_record(*sr, peer->pub_dsa)) continue;
         if (sr->record.type == chat::RecordType::Checkpoint) {
             changed |= process_checkpoint(conversation_id, *sr, sender_hex);
+        } else if (sr->record.type == chat::RecordType::DeleteRequest) {
+            changed |= receive_deletion_request(*peer, *sr);
+        } else if (sr->record.type == chat::RecordType::DeleteAccept) {
+            changed |= receive_deletion_accept(*peer, *sr);
         } else if (sr->record.type == chat::RecordType::Text) {
             if (conv->kind == HistoryStore::Direct) {
                 if (auto contact = keys_.find_contact_by_fingerprint(sender_hex)) changed |= handle_record(*contact, *sr, true);
@@ -1744,6 +1787,12 @@ void MessagingEngine::ensure_archives() {
     next_archive_check_ = now + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
     for (const auto& conv : history_->conversations()) {
         if (history_->has_archive(conv.id)) continue;
+        {
+            bool deleted_by_agreement = false;
+            for (const auto& d : history_->deletions())
+                if (d.conversation_id == conv.id && d.scope == 1 && d.state == HistoryStore::DeletionDone) deleted_by_agreement = true;
+            if (deleted_by_agreement) continue;
+        }
         if (conv.kind == HistoryStore::Direct) {
             // The smaller fingerprint makes a one-to-one chat's archive, once the chat has something in it.
             if (!(my_fp_hex_ < conv.contact_fp) || !history_->first_message(conv.id)) continue;
@@ -2012,6 +2061,284 @@ bool MessagingEngine::restore_from_relay(RestoreReport& report, std::string& err
     return true;
 }
 
+// --- Deleting by agreement ---
+
+// What each member signs: the exact order the relay will check.
+MessagingEngine::Bytes MessagingEngine::sign_deletion(const HistoryStore::Archive& a, const HistoryStore::Deletion& d) {
+    return CryptoEngine::sign(relay::archive_delete_signing_input(a.relay_id, a.conversation_id, static_cast<uint32_t>(d.scope), d.op_id,
+                                                                  static_cast<uint64_t>(d.expires_at), d.entries),
+                              a.chat_private_key);
+}
+
+bool MessagingEngine::start_deletion(const Bytes& conversation_id, uint32_t scope, const std::vector<Bytes>& entries, std::string& error) {
+    auto ctx = archive_context(conversation_id);
+    auto a = history_->archive(conversation_id);
+    if (!ctx || !a) { error = "This chat has no archive, so there is nothing to ask everyone to delete"; return false; }
+    if (a->state != HistoryStore::ArchiveJoined) { error = "This device has not joined the chat's archive yet"; return false; }
+    for (const auto& d : history_->deletions())
+        if (d.conversation_id == conversation_id && scope == 1 && d.scope == 1 && (d.state == HistoryStore::DeletionPending || d.state == HistoryStore::DeletionAccepted) && d.expires_at > unix_now()) {
+            error = "There is already a request to delete this chat, waiting for answers";
+            return false;
+        }
+    const int64_t now = unix_now();
+    HistoryStore::Deletion d;
+    d.op_id = CryptoEngine::random_bytes(16);
+    d.conversation_id = conversation_id;
+    d.scope = static_cast<int>(scope);
+    d.expires_at = now + chat::DELETE_REQUEST_LIFETIME_SECONDS;
+    d.requester_fp = my_fp_hex_;
+    d.entries = entries;
+    d.state = HistoryStore::DeletionAccepted;  // whoever asks has agreed
+    d.created_at = now;
+
+    chat::DeleteRequestInfo info{scope, d.op_id, static_cast<uint64_t>(d.expires_at), entries};
+    Bytes signature, request_raw, accept_raw, request_id = CryptoEngine::random_bytes(chat::ID_BYTES), accept_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    try {
+        signature = sign_deletion(*a, d);
+        chat::Record rq;
+        rq.conversation_id = conversation_id;
+        rq.message_id = request_id;
+        rq.sender = my_fp_;
+        rq.recipients_hash = ctx->recipients_hash;
+        rq.sent_at = static_cast<uint64_t>(now);
+        rq.type = chat::RecordType::DeleteRequest;
+        rq.payload = chat::delete_request_payload(info);
+        request_raw = chat::sign_record(rq, dsa_private_);
+        chat::Record ac = rq;
+        ac.message_id = accept_id;
+        ac.type = chat::RecordType::DeleteAccept;
+        ac.payload = chat::delete_accept_payload({d.op_id, CryptoEngine::sha256(a->chat_public_key), signature});
+        accept_raw = chat::sign_record(ac, dsa_private_);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    if (!history_->add_deletion(d)) { error = "That request already exists"; return false; }
+    history_->add_deletion_accept(d.op_id, CryptoEngine::sha256(a->chat_public_key), signature, my_fp_hex_);
+    // In the archive, where every member will find it; and straight to each member, so they hear at once.
+    queue_archive_entry(conversation_id, request_raw, request_id);
+    queue_archive_entry(conversation_id, accept_raw, accept_id);
+    for (const auto& fp : ctx->others) history_->enqueue(fp, OUTBOX_KIND_MESSAGE, request_id, {request_raw}, now, now);
+    bump();
+    return true;
+}
+
+bool MessagingEngine::request_chat_deletion(const std::string& conversation_id, std::string& error) {
+    auto id = hex_to_bytes(conversation_id);
+    if (!id) { error = "That chat isn't in your list"; return false; }
+    return start_deletion(*id, relay::DELETE_SCOPE_CHAT, {}, error);
+}
+
+bool MessagingEngine::request_message_deletion(const std::string& conversation_id, const std::vector<std::string>& message_ids, std::string& error) {
+    auto id = hex_to_bytes(conversation_id);
+    if (!id) { error = "That chat isn't in your list"; return false; }
+    if (message_ids.empty() || message_ids.size() > relay::MAX_DELETE_ENTRIES) { error = "Choose between 1 and 64 messages"; return false; }
+    std::vector<Bytes> entries;
+    for (const auto& hex : message_ids) {
+        auto mid = hex_to_bytes(hex);
+        auto number = mid ? history_->archive_message_number(*id, *mid) : std::nullopt;
+        auto hash = number ? history_->archive_hash(*id, *number) : std::nullopt;
+        if (!hash) { error = "A message you chose isn't in the chat's archive (it was sent before the archive was made), so it can't be deleted for everyone"; return false; }
+        if (std::find(entries.begin(), entries.end(), *hash) == entries.end()) entries.push_back(*hash);
+    }
+    return start_deletion(*id, relay::DELETE_SCOPE_ENTRIES, entries, error);
+}
+
+std::vector<MessagingEngine::DeletionInfo> MessagingEngine::deletions() {
+    std::vector<DeletionInfo> out;
+    for (const auto& d : history_->deletions()) {
+        DeletionInfo info;
+        info.op_id = bytes_to_hex(d.op_id);
+        info.conversation_id = bytes_to_hex(d.conversation_id);
+        info.whole_chat = d.scope == 1;
+        info.entries = d.entries.size();
+        info.requester_fp = d.requester_fp;
+        info.requester_name = d.requester_fp == my_fp_hex_ ? std::string("You") : person_name(d.requester_fp);
+        info.mine = d.requester_fp == my_fp_hex_;
+        info.expires_at = d.expires_at;
+        info.state = d.state;
+        info.accepted = history_->deletion_accepts(d.op_id).size();
+        if (auto ctx = archive_context(d.conversation_id)) info.members = ctx->others.size() + 1;
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+// Someone in the chat asks to delete it, or some messages of it. Nothing happens unless this user, and
+// everyone else, accepts.
+bool MessagingEngine::receive_deletion_request(const Peer& sender, const chat::SignedRecord& sr) {
+    const Bytes& id = sr.record.conversation_id;
+    auto ctx = archive_context(id);
+    if (!ctx || std::find(ctx->others.begin(), ctx->others.end(), sender.fp) == ctx->others.end() || sr.record.recipients_hash != ctx->recipients_hash) return false;
+    auto info = chat::parse_delete_request_payload(sr.record.payload);
+    const int64_t now = unix_now();
+    // It must still be live, and not claim to last longer than a request may.
+    if (!info || static_cast<int64_t>(info->expires_at) <= now || static_cast<int64_t>(info->expires_at) > now + chat::DELETE_REQUEST_LIFETIME_SECONDS + 3600) return false;
+    if (!history_->has_archive(id)) return false;  // without the chat's archive there is nothing to delete
+    HistoryStore::Deletion d;
+    d.op_id = info->op_id;
+    d.conversation_id = id;
+    d.scope = static_cast<int>(info->scope);
+    d.expires_at = static_cast<int64_t>(info->expires_at);
+    d.requester_fp = sender.fp;
+    d.entries = info->entries;
+    d.state = HistoryStore::DeletionPending;
+    d.created_at = now;
+    if (!history_->add_deletion(d)) return false;  // already known
+    notify(sender.name + " asked to delete " + (info->scope == 1 ? std::string("a whole chat") : std::to_string(info->entries.size()) + " message(s)") +
+           " for everyone. It only happens if you all agree.");
+    return true;
+}
+
+// One member's agreement, with the signature that lets the relay check it.
+bool MessagingEngine::receive_deletion_accept(const Peer& sender, const chat::SignedRecord& sr) {
+    const Bytes& id = sr.record.conversation_id;
+    auto ctx = archive_context(id);
+    if (!ctx || std::find(ctx->others.begin(), ctx->others.end(), sender.fp) == ctx->others.end() || sr.record.recipients_hash != ctx->recipients_hash) return false;
+    auto info = chat::parse_delete_accept_payload(sr.record.payload);
+    auto d = info ? history_->deletion(info->op_id) : std::nullopt;
+    if (!d || d->conversation_id != id || d->state == HistoryStore::DeletionDone || d->state == HistoryStore::DeletionExpired) return false;
+    history_->add_deletion_accept(d->op_id, info->key_hash, info->signature, sender.fp);
+    try_submit_deletion(d->op_id);
+    return true;
+}
+
+bool MessagingEngine::accept_deletion(const std::string& op_id, std::string& error) {
+    auto op = hex_to_bytes(op_id);
+    auto d = op ? history_->deletion(*op) : std::nullopt;
+    if (!d) { error = "That request isn't known"; return false; }
+    if (d->state != HistoryStore::DeletionPending) { error = "That request is no longer waiting for your answer"; return false; }
+    if (d->expires_at <= unix_now()) { error = "That request has expired"; return false; }
+    auto a = history_->archive(d->conversation_id);
+    auto ctx = archive_context(d->conversation_id);
+    if (!a || !ctx || a->state != HistoryStore::ArchiveJoined) { error = "This device has not joined the chat's archive, so it can't sign"; return false; }
+    const int64_t now = unix_now();
+    Bytes accept_id = CryptoEngine::random_bytes(chat::ID_BYTES), accept_raw;
+    const Bytes key_hash = CryptoEngine::sha256(a->chat_public_key);
+    Bytes signature;
+    try {
+        signature = sign_deletion(*a, *d);
+        chat::Record ac;
+        ac.conversation_id = d->conversation_id;
+        ac.message_id = accept_id;
+        ac.sender = my_fp_;
+        ac.recipients_hash = ctx->recipients_hash;
+        ac.sent_at = static_cast<uint64_t>(now);
+        ac.type = chat::RecordType::DeleteAccept;
+        ac.payload = chat::delete_accept_payload({d->op_id, key_hash, signature});
+        accept_raw = chat::sign_record(ac, dsa_private_);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    history_->add_deletion_accept(d->op_id, key_hash, signature, my_fp_hex_);
+    history_->set_deletion_state(d->op_id, HistoryStore::DeletionAccepted);
+    queue_archive_entry(d->conversation_id, accept_raw, accept_id);
+    history_->enqueue(d->requester_fp, OUTBOX_KIND_MESSAGE, accept_id, {accept_raw}, now, now);  // the one who asked is the one to submit
+    bump();
+    try_submit_deletion(d->op_id);
+    return true;
+}
+
+bool MessagingEngine::decline_deletion(const std::string& op_id) {
+    auto op = hex_to_bytes(op_id);
+    auto d = op ? history_->deletion(*op) : std::nullopt;
+    if (!d || d->state != HistoryStore::DeletionPending) return false;
+    history_->set_deletion_state(d->op_id, HistoryStore::DeletionDeclined);  // nothing is sent: not answering means no
+    bump();
+    return true;
+}
+
+// The message's content (or the whole chat) is erased here, for good.
+void MessagingEngine::apply_deletion_locally(const HistoryStore::Deletion& d) {
+    if (d.scope == 1) {
+        history_->erase_conversation_messages(d.conversation_id);
+        history_->remove_archive(d.conversation_id);
+    } else {
+        for (const auto& hash : d.entries) {
+            auto number = history_->archive_number_of(d.conversation_id, hash);
+            if (!number) continue;
+            for (const auto& mid : history_->archive_messages_at(d.conversation_id, *number)) history_->erase_message(d.conversation_id, mid);
+            history_->mark_archive_redacted(d.conversation_id, *number);
+        }
+    }
+    history_->set_deletion_state(d.op_id, HistoryStore::DeletionDone);
+    notify(d.scope == 1 ? "A chat was deleted, by agreement of everyone in it." : "Messages were deleted, by agreement of everyone in the chat.");
+    bump();
+}
+
+// Once the acceptances are all in, send the order to the relay. The relay checks that every member signed;
+// if some haven't, it says so, and this is tried again when another acceptance arrives.
+void MessagingEngine::try_submit_deletion(const Bytes& op_id) {
+    auto d = history_->deletion(op_id);
+    if (!d || d->state != HistoryStore::DeletionAccepted) return;
+    auto accepts = history_->deletion_accepts(op_id);
+    const std::string key = bytes_to_hex(op_id);
+    auto last = deletion_submit_attempts_.find(key);
+    if (accepts.size() < 2 || (last != deletion_submit_attempts_.end() && last->second >= accepts.size())) return;
+    deletion_submit_attempts_[key] = accepts.size();
+    auto a = history_->archive(d->conversation_id);
+    if (!a) return;
+    relay::ArchiveDelete order;
+    order.scope = static_cast<uint32_t>(d->scope);
+    order.op_id = d->op_id;
+    order.expires_at = static_cast<uint64_t>(d->expires_at);
+    order.entry_hashes = d->entries;
+    for (const auto& acc : accepts) order.signatures.push_back({acc.key_hash, acc.signature});
+    RelayClient client;
+    std::string err;
+    if (!open_archive_session(*a, client, err)) return;
+    if (client.delete_in_archive(order, err)) {
+        apply_deletion_locally(*d);
+    } else if (err.find("not valid") != std::string::npos) {
+        notify("A signature on a deletion request didn't check out, so nothing was deleted.");
+    } else if (err.find("expired") != std::string::npos) {
+        history_->set_deletion_state(op_id, HistoryStore::DeletionExpired);
+    }
+    // "Not every member has agreed" is expected until the last acceptance arrives.
+}
+
+// Housekeeping: requests lapse; and one this user accepted may have been carried out by someone else.
+void MessagingEngine::check_deletions() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_deletion_check_) return;
+    next_deletion_check_ = now + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+    const int64_t wall = unix_now();
+    for (const auto& d : history_->deletions()) {
+        if (d.state != HistoryStore::DeletionPending && d.state != HistoryStore::DeletionAccepted) continue;
+        if (d.expires_at <= wall) {
+            history_->set_deletion_state(d.op_id, HistoryStore::DeletionExpired);
+            continue;
+        }
+        if (d.state != HistoryStore::DeletionAccepted) continue;
+        auto a = history_->archive(d.conversation_id);
+        if (!a) continue;
+        RelayClient client;
+        std::string err;
+        if (!open_archive_session(*a, client, err)) {
+            // The archive is gone and our key with it: the order was carried out.
+            if (d.scope == 1 && err.find("Authentication failed") != std::string::npos) apply_deletion_locally(d);
+            continue;
+        }
+        if (d.scope == 2) {
+            bool all = true;
+            for (const auto& hash : d.entries) {
+                auto number = history_->archive_number_of(d.conversation_id, hash);
+                if (!number) { all = false; continue; }
+                if (history_->archive_redacted(d.conversation_id, *number)) continue;
+                std::vector<relay::ArchiveEntry> got;
+                relay::ArchiveHead head;
+                if (client.fetch_entries(*number, 1, got, head, err) && !got.empty() && got[0].number == *number && got[0].tombstone && got[0].hash == hash)
+                    history_->mark_archive_redacted(d.conversation_id, *number);
+                else
+                    all = false;
+            }
+            if (all) apply_deletion_locally(d);
+        }
+        try_submit_deletion(d.op_id);
+    }
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
@@ -2221,6 +2548,7 @@ void MessagingEngine::pump(int wait_ms) {
         join_pending_archives();
         ensure_archives();
         sync_archives();
+        check_deletions();
         maintain_keyring();
     }
 }

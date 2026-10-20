@@ -209,7 +209,7 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 5, "the schema version is now 5");
+        CHECK(version == 6, "the schema version is now 6");
         auto ms = migrated.members();
         CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
         CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
@@ -281,6 +281,58 @@ int main() {
 
     }
 
+
+    std::cout << "Redacting and deleting archives\n";
+    {
+        RelayStore s(dir / "redact.db");
+        using A = RelayStore::AppendResult;
+        const Bytes arch = id(0x41), genesis = id(0x47, 32);
+        s.create_archive(arch, {id(0xA1, 32), id(0xA2, 32)}, genesis, 1000, 5000, 10);
+        s.join_archive(arch, id(0xA1, 32), id(0xB1, 32), id(1, 50), 1001);
+        s.join_archive(arch, id(0xA2, 32), id(0xB2, 32), id(2, 50), 1002);
+        RelayStore::ArchiveState head;
+        Bytes prev = genesis;
+        std::vector<Bytes> hashes;
+        for (int i = 1; i <= 4; i++) {
+            Bytes h = id(static_cast<uint8_t>(0xC0 + i), 32);
+            s.append_entry(arch, static_cast<uint64_t>(i - 1), prev, h, envelope(100, static_cast<uint8_t>(i)), 1100 + i, 1 << 20, &head);
+            hashes.push_back(h);
+            prev = h;
+        }
+        auto keys = s.archive_member_keys(arch);
+        CHECK(keys.size() == 2 && keys[0].key_hash == id(0xB1, 32) && keys[0].public_key == id(1, 50) && keys[1].key_hash == id(0xB2, 32) && s.archive_member_keys(id(0x99)).empty(), "every registered key can be listed");
+        CHECK(s.archive_info(arch, 1200)->bytes == 400, "(four entries of 100 bytes)");
+        CHECK(s.redact_entries(arch, {hashes[1]}) == RelayStore::RedactResult::Ok, "an entry is redacted");
+        auto all = s.fetch_entries(arch, 1, 10);
+        CHECK(all.size() == 4 && all[1].redacted && all[1].ciphertext.empty() && all[1].hash == hashes[1] && all[1].number == 2 && !all[0].redacted && all[0].ciphertext == envelope(100, 1) && all[2].ciphertext == envelope(100, 3),
+              "it becomes a tombstone that keeps its number and hash, and the others are untouched");
+        CHECK(s.archive_info(arch, 1200)->bytes == 300 && s.archive_info(arch, 1200)->head.number == 4 && s.archive_info(arch, 1200)->head.hash == hashes[3], "the archive's size goes down, its head does not move");
+        CHECK(s.redact_entries(arch, {hashes[1]}) == RelayStore::RedactResult::Ok && s.archive_info(arch, 1200)->bytes == 300, "redacting it again is harmless");
+        CHECK(s.redact_entries(arch, {hashes[0], id(0xEE, 32)}) == RelayStore::RedactResult::UnknownEntry && !s.fetch_entries(arch, 1, 1)[0].redacted && s.archive_info(arch, 1200)->bytes == 300,
+              "a list with one unknown entry changes nothing at all, not even the known ones");
+        CHECK(s.redact_entries(id(0x99), {hashes[0]}) == RelayStore::RedactResult::NoSuchArchive, "an unknown archive is refused");
+        Bytes h5 = id(0xC5, 32);
+        CHECK(s.append_entry(arch, 4, hashes[3], h5, envelope(10, 9), 1200, 1 << 20, &head) == A::Ok && head.number == 5, "appending carries on after a redaction");
+        CHECK(!s.delete_archive(id(0x99)) && s.delete_archive(arch) && !s.archive_info(arch, 1200) && s.fetch_entries(arch, 1, 10).empty() && s.archive_member_keys(arch).empty(), "deleting an archive removes it, its entries and its keys");
+        CHECK(s.create_archive(arch, {id(0xA1, 32)}, genesis, 2000, 6000, 10) == RelayStore::CreateArchiveResult::Ok, "and the same ID can be used again afterwards");
+
+        // A database from before the redacted flag existed.
+        fs::path old = dir / "v5archives.db";
+        {
+            RelayStore f(old);
+            f.create_archive(arch, {id(0xA1, 32)}, genesis, 1000, 5000, 10);
+            f.append_entry(arch, 0, genesis, hashes[0], envelope(50, 1), 1100, 1 << 20, &head);
+        }
+        sqlite3* raw = nullptr;
+        sqlite3_open_v2(old.string().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+        sqlite3_exec(raw, "CREATE TABLE archive_entries_old AS SELECT archive_id, number, hash, ciphertext, appended_at FROM archive_entries;"
+                          "DROP TABLE archive_entries; ALTER TABLE archive_entries_old RENAME TO archive_entries; PRAGMA user_version=5;", nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+        RelayStore migrated(old);
+        auto kept = migrated.fetch_entries(arch, 1, 10);
+        CHECK(kept.size() == 1 && !kept[0].redacted && kept[0].ciphertext == envelope(50, 1), "a version 5 database keeps its entries, none of them redacted");
+        CHECK(migrated.redact_entries(arch, {hashes[0]}) == RelayStore::RedactResult::Ok && migrated.fetch_entries(arch, 1, 1)[0].redacted, "and can redact straight away");
+    }
 
     std::cout << "Keyrings\n";
     {

@@ -22,6 +22,7 @@ const char ARCHIVE_JOIN_LABEL[] = "pq-suite v3 archive join";
 const char ARCHIVE_AUTH_LABEL[] = "pq-suite v3 archive auth";
 const char ARCHIVE_GENESIS_LABEL[] = "pq-suite v3 archive genesis";
 const char ARCHIVE_ENTRY_LABEL[] = "pq-suite v3 archive entry";
+const char ARCHIVE_DELETE_LABEL[] = "pq-suite v3 archive delete";
 
 }  // namespace
 
@@ -147,6 +148,22 @@ std::vector<uint8_t> encode(const ArchiveEntry& m) {
     write_u64(b, m.number);
     write_blob(b, m.hash);
     write_blob(b, m.ciphertext);
+    write_u32(b, m.tombstone ? 1 : 0);
+    return b;
+}
+
+std::vector<uint8_t> encode(const ArchiveDelete& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.scope);
+    write_blob(b, m.op_id);
+    write_u64(b, m.expires_at);
+    write_u32(b, static_cast<uint32_t>(m.entry_hashes.size()));
+    for (const auto& h : m.entry_hashes) write_blob(b, h);
+    write_u32(b, static_cast<uint32_t>(m.signatures.size()));
+    for (const auto& s : m.signatures) {
+        write_blob(b, s.key_hash);
+        write_blob(b, s.signature);
+    }
     return b;
 }
 
@@ -349,8 +366,41 @@ std::optional<ArchiveEntry> decode_archive_entry(const std::vector<uint8_t>& in)
     auto number = read_u64(in.data(), in.size(), off);
     auto hash = fixed_blob(in, off, HASH_BYTES);
     auto ct = read_blob(in.data(), in.size(), off, MAX_ARCHIVE_ENTRY_BYTES);
-    if (!number || !hash || !ct || ct->empty() || !at_end(in, off)) return std::nullopt;
-    return ArchiveEntry{*number, std::move(*hash), std::move(*ct)};
+    auto tombstone = read_u32(in.data(), in.size(), off);
+    // An entry has content, or it is a tombstone and has none: never both, never neither.
+    if (!number || !hash || !ct || !tombstone || *tombstone > 1 || ct->empty() != (*tombstone == 1) || !at_end(in, off)) return std::nullopt;
+    return ArchiveEntry{*number, std::move(*hash), std::move(*ct), *tombstone == 1};
+}
+
+std::optional<ArchiveDelete> decode_archive_delete(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto scope = read_u32(in.data(), in.size(), off);
+    auto op = fixed_blob(in, off, 16);
+    auto expires = read_u64(in.data(), in.size(), off);
+    auto hashes = read_u32(in.data(), in.size(), off);
+    if (!scope || !op || !expires || !hashes || (*scope != DELETE_SCOPE_CHAT && *scope != DELETE_SCOPE_ENTRIES)) return std::nullopt;
+    if (*scope == DELETE_SCOPE_CHAT ? *hashes != 0 : (*hashes < 1 || *hashes > MAX_DELETE_ENTRIES)) return std::nullopt;
+    ArchiveDelete m;
+    m.scope = *scope;
+    m.op_id = std::move(*op);
+    m.expires_at = *expires;
+    for (uint32_t i = 0; i < *hashes; i++) {
+        auto h = fixed_blob(in, off, HASH_BYTES);
+        if (!h) return std::nullopt;
+        for (const auto& other : m.entry_hashes) if (other == *h) return std::nullopt;  // each entry once
+        m.entry_hashes.push_back(std::move(*h));
+    }
+    auto sigs = read_u32(in.data(), in.size(), off);
+    if (!sigs || *sigs < 1 || *sigs > MAX_ARCHIVE_MEMBERS) return std::nullopt;
+    for (uint32_t i = 0; i < *sigs; i++) {
+        auto kh = fixed_blob(in, off, HASH_BYTES);
+        auto sg = read_blob(in.data(), in.size(), off, MAX_KEY_BLOB);
+        if (!kh || !sg || sg->empty()) return std::nullopt;
+        for (const auto& other : m.signatures) if (other.key_hash == *kh) return std::nullopt;  // one signature per key
+        m.signatures.push_back({std::move(*kh), std::move(*sg)});
+    }
+    if (!at_end(in, off)) return std::nullopt;
+    return m;
 }
 
 std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>& in) {
@@ -423,6 +473,20 @@ std::vector<uint8_t> archive_auth_signing_input(const std::vector<uint8_t>& auth
     write_blob(b, archive_id);
     write_blob(b, key_hash);
     write_blob(b, auth_challenge);
+    return b;
+}
+std::vector<uint8_t> archive_delete_signing_input(const std::vector<uint8_t>& relay_id, const std::vector<uint8_t>& archive_id, uint32_t scope,
+                                                  const std::vector<uint8_t>& op_id, uint64_t expires_at,
+                                                  const std::vector<std::vector<uint8_t>>& entry_hashes) {
+    std::vector<uint8_t> b;
+    write_string(b, ARCHIVE_DELETE_LABEL);
+    write_blob(b, relay_id);
+    write_blob(b, archive_id);
+    write_u32(b, scope);
+    write_blob(b, op_id);
+    write_u64(b, expires_at);
+    write_u32(b, static_cast<uint32_t>(entry_hashes.size()));
+    for (const auto& h : entry_hashes) write_blob(b, h);
     return b;
 }
 std::vector<uint8_t> archive_genesis_input(const std::vector<uint8_t>& archive_id) {

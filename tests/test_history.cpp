@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 7, "opening it upgrades it to the current version (7)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 7, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 8, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 7 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 8 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; DROP TABLE deletions; DROP TABLE deletion_accepts; DROP TABLE archive_messages; DROP TABLE archive_redacted; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 7, "opening it upgrades it to the current version (7)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -719,6 +719,66 @@ int main() {
         CHECK(wrong.all_member_tokens().empty(), "with a different key none can be opened, and nothing crashes");
     }
 
+    std::cout << "Deleting by agreement\n";
+    {
+        HistoryStore h(dir / "deleting.db", key);
+        const Bytes conv = id(0x61), op = id(0x71, 16), op2 = id(0x72, 16);
+        h.ensure_conversation(conv_a, fp_a, 1000);
+        HistoryStore::Deletion d;
+        d.op_id = op; d.conversation_id = conv; d.scope = 2; d.expires_at = 9000; d.requester_fp = fp_a; d.entries = {id(0xA1, 32), id(0xA2, 32)}; d.state = HistoryStore::DeletionPending; d.created_at = 1000;
+        CHECK(!h.deletion(op) && h.deletions().empty(), "there are no deletions to begin with");
+        CHECK(h.add_deletion(d), "a deletion request is stored");
+        auto got = h.deletion(op);
+        CHECK(got && got->conversation_id == conv && got->scope == 2 && got->expires_at == 9000 && got->requester_fp == fp_a && got->entries == d.entries && got->state == HistoryStore::DeletionPending && got->created_at == 1000, "with its scope, expiry, requester and entries, exactly");
+        HistoryStore::Deletion other = d;
+        other.scope = 1; other.entries.clear(); other.expires_at = 1;
+        CHECK(!h.add_deletion(other) && h.deletion(op)->scope == 2 && h.deletion(op)->expires_at == 9000, "the same operation again (a replay) is refused and changes nothing");
+        d.op_id = op2; d.scope = 1; d.entries.clear(); d.created_at = 2000;
+        h.add_deletion(d);
+        auto all = h.deletions();
+        CHECK(all.size() == 2 && all[0].op_id == op2 && all[0].entries.empty() && all[1].op_id == op, "they are listed newest first");
+        h.set_deletion_state(op, HistoryStore::DeletionAccepted);
+        CHECK(h.deletion(op)->state == HistoryStore::DeletionAccepted && h.deletion(op2)->state == HistoryStore::DeletionPending, "a request's state changes on its own");
+        CHECK(h.deletion_accepts(op).empty(), "no acceptances yet");
+        h.add_deletion_accept(op, id(0xB1, 32), id(0x11, 100), fp_a);
+        h.add_deletion_accept(op, id(0xB2, 32), id(0x22, 100), fp_b);
+        h.add_deletion_accept(op, id(0xB1, 32), id(0x99, 100), fp_a);
+        auto accepts = h.deletion_accepts(op);
+        CHECK(accepts.size() == 2 && accepts[0].key_hash == id(0xB1, 32) && accepts[0].signature == id(0x11, 100) && accepts[1].member_fp == fp_b && h.deletion_accepts(op2).empty(),
+              "acceptances are kept per request, one per key, and a second from the same key changes nothing");
+        { HistoryStore again(dir / "deleting.db", key); CHECK(again.deletion(op) && again.deletion_accepts(op).size() == 2, "all of it survives a restart"); }
+
+        h.add_message(msg(conv_a, 1, true, 3000, "keep me"));
+        h.add_message(msg(conv_a, 2, false, 3001, "remove me"));
+        h.add_message(msg(conv_a, 3, false, 3002, "and me"));
+        auto before = h.messages(conv_a, 10);
+        CHECK(before.size() == 3 && !before[1].deleted && before[1].record == text("remove me"), "(three messages)");
+        CHECK(h.erase_message(conv_a, id(2)) && !h.erase_message(conv_a, id(2)) && !h.erase_message(conv_a, id(99)), "a message can be erased once; erasing it again, or one that isn't there, reports that");
+        auto after = h.messages(conv_a, 10);
+        CHECK(after.size() == 3 && after[1].deleted && after[1].record.empty() && after[1].message_id == id(2) && after[1].sent_at == 3001 && !after[0].deleted && after[0].record == text("keep me") && !after[2].deleted,
+              "it keeps its place, its time and its ID, but its content is gone; the others are untouched");
+        CHECK(!file_contains(dir / "deleting.db", "remove me") && !file_contains(fs::path((dir / "deleting.db").string() + "-wal"), "remove me"), "and its text is not recoverable from the file");
+        CHECK(h.has_entry(conv_a, before[1].entry_hash), "its hash is still known, so chain checks and gap detection carry on");
+        h.erase_conversation_messages(conv_a);
+        CHECK(h.messages(conv_a, 10).empty() && h.conversation(conv_a), "erasing a whole conversation removes its messages but not the conversation");
+
+        const Bytes archive = id(0x81);
+        CHECK(!h.archive_message_number(archive, id(5)) && h.archive_messages_at(archive, 7).empty() && !h.archive_redacted(archive, 7), "nothing is mapped to begin with");
+        h.save_archive_message(archive, id(5), 7);
+        h.save_archive_message(archive, id(6), 7);
+        h.save_archive_message(archive, id(5), 99);
+        CHECK(h.archive_message_number(archive, id(5)) == 7u && h.archive_messages_at(archive, 7).size() == 2 && h.archive_messages_at(archive, 8).empty(), "a message is mapped to its entry, and an entry to its messages, and a repeat changes nothing");
+        h.save_archive_hashes(archive, {{7, id(0xA7, 32)}});
+        CHECK(h.archive_number_of(archive, id(0xA7, 32)) == 7u && !h.archive_number_of(archive, id(0xEE, 32)), "an entry can be found again from its hash");
+        h.mark_archive_redacted(archive, 7);
+        CHECK(h.archive_redacted(archive, 7) && !h.archive_redacted(archive, 8), "entries seen redacted are remembered");
+        HistoryStore::Archive ar;
+        ar.conversation_id = archive; ar.relay_address = "10.0.0.248:9000"; ar.relay_id = id(0x71, 32); ar.archive_key = id(0x11, 32); ar.chat_public_key = id(0x33, 50); ar.chat_private_key = id(0x44, 80); ar.created_at = 1;
+        h.add_archive(ar);
+        h.remove_archive(archive);
+        CHECK(!h.has_archive(archive) && !h.archive_message_number(archive, id(5)) && !h.archive_hash(archive, 7) && !h.archive_redacted(archive, 7), "forgetting a chat's archive removes its keys, its checked chain and its message map");
+    }
+
     std::cout << "Upgrading a version 6 history\n";
     {
         fs::path v6 = dir / "v6.db";
@@ -744,7 +804,7 @@ int main() {
         CHECK(raw_int(v6, "PRAGMA user_version") == 6 && raw_int(v6, "SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name = 'warning'") == 0, "(setup) the fixture really is a version 6 database");
         {
             HistoryStore h(v6, key);
-            CHECK(raw_int(v6, "PRAGMA user_version") == 7, "opening it upgrades it to version 7");
+            CHECK(raw_int(v6, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
             auto a = h.archive(conv);
             CHECK(a && a->relay_address == "10.0.0.248:9000" && a->role == HistoryStore::ArchiveCreator && a->state == HistoryStore::ArchiveJoined && a->archive_key == id(0x11, 32) &&
                       a->head_number == 9 && a->head_hash == id(0x99, 32) && a->created_at == 1234,

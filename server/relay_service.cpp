@@ -471,6 +471,42 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     break;
                 }
 
+                case MessageType::ARCHIVE_DELETE: {
+                    // Deleting a chat, or redacting entries, takes the signed agreement of every member.
+                    if (!archive_session) { send_error(sock, "Sign in to an archive first"); break; }
+                    auto m = decode_archive_delete(msg->payload);
+                    if (!m) { send_error(sock, "Malformed archive request"); return; }
+                    const Bytes& archive_id = archive_session->first;
+                    if (!rate_.allow("archive:" + hex_of(archive_id), limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many requests, slow down"); break; }
+                    if (m->expires_at < static_cast<uint64_t>(now)) { send_error(sock, "That deletion order has expired"); break; }
+                    auto info = store_->archive_info(archive_id, now);
+                    if (!info) { send_error(sock, "Unknown archive"); break; }
+                    // Anyone who joins later would not have had a say, so wait until the members are all in.
+                    if (info->registration_open) { send_error(sock, "Not everyone has joined this chat's archive yet, so it can't be deleted"); break; }
+                    const Bytes signed_input = archive_delete_signing_input(relay_id_, archive_id, m->scope, m->op_id, m->expires_at, m->entry_hashes);
+                    bool agreed = true, valid = true;
+                    for (const auto& key : store_->archive_member_keys(archive_id)) {
+                        const ArchiveSignature* mine = nullptr;
+                        for (const auto& sig : m->signatures) if (sig.key_hash == key.key_hash) mine = &sig;
+                        if (!mine) { agreed = false; break; }
+                        if (!CryptoEngine::verify(signed_input, mine->signature, key.public_key)) { valid = false; break; }
+                    }
+                    if (!agreed) { send_error(sock, "Not every member has agreed to this deletion"); break; }
+                    if (!valid) { send_error(sock, "A member's signature on this deletion is not valid"); break; }
+                    if (m->scope == DELETE_SCOPE_CHAT) {
+                        store_->delete_archive(archive_id);
+                        log("Archive deleted by agreement: " + short_id(archive_id));
+                    } else {
+                        switch (store_->redact_entries(archive_id, m->entry_hashes)) {
+                            case RelayStore::RedactResult::Ok: log("Archive entries redacted by agreement: " + short_id(archive_id)); break;
+                            case RelayStore::RedactResult::UnknownEntry: send_error(sock, "One of those entries isn't in this archive"); continue;
+                            case RelayStore::RedactResult::NoSuchArchive: send_error(sock, "Unknown archive"); continue;
+                        }
+                    }
+                    if (!send_message(sock, MessageType::ARCHIVE_DELETE_OK, {})) return;
+                    break;
+                }
+
                 case MessageType::ARCHIVE_FETCH: {
                     if (!archive_session) { send_error(sock, "Sign in to an archive first"); break; }
                     auto m = decode_archive_fetch(msg->payload);
@@ -478,7 +514,7 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     const Bytes& archive_id = archive_session->first;
                     if (!rate_.allow("archive:" + hex_of(archive_id), limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many requests, slow down"); break; }
                     for (auto& e : store_->fetch_entries(archive_id, m->from_number, m->limit))
-                        if (!send_message(sock, MessageType::ARCHIVE_ENTRY, encode(ArchiveEntry{e.number, std::move(e.hash), std::move(e.ciphertext)}))) return;
+                        if (!send_message(sock, MessageType::ARCHIVE_ENTRY, encode(ArchiveEntry{e.number, std::move(e.hash), std::move(e.ciphertext), e.redacted}))) return;
                     auto info = store_->archive_info(archive_id, now);
                     if (!info) { send_error(sock, "Unknown archive"); break; }
                     if (!send_message(sock, MessageType::ARCHIVE_FETCH_END, encode(ArchiveHead{info->head.number, info->head.hash}))) return;

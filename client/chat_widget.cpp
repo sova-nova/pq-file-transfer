@@ -106,12 +106,15 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     cards_button_ = new QPushButton("Cards issued…", this);
     new_group_button_ = new QPushButton("New group…", this);
     invites_button_ = new QPushButton("Group invitations", this);
+    deletions_button_ = new QPushButton("Deletion requests", this);
+    deletions_button_->setToolTip("Other people asking to delete a chat, or messages in it, for everyone. It only happens if everyone agrees.");
     relay_invite_button_ = new QPushButton("Relay invites…", this);
     relay_invite_button_->setToolTip("Make a one-time invite so a friend can use this relay (you are vouching for them), and manage the ones you made.");
     top->addWidget(status_label_, 1);
     top->addWidget(setup_button_);
     top->addWidget(requests_button_);
     top->addWidget(invites_button_);
+    top->addWidget(deletions_button_);
     top->addWidget(new_group_button_);
     top->addWidget(relay_invite_button_);
     restore_button_ = new QPushButton("Restore history…", this);
@@ -149,12 +152,15 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     read_box_->setToolTip("Tell them when you have read their messages");
     revoke_button_ = new QPushButton("Revoke access…", this);
     revoke_button_->setToolTip("Stop this person from sending you anything with the cards and tokens you gave them");
+    delete_chat_button_ = new QPushButton("Delete chat…", this);
+    delete_chat_button_->setToolTip("Ask everyone in this chat to delete it, from the relay and from every device. It only happens if everyone agrees.");
     people_button_ = new QPushButton("Verify…", this);
     people_button_->setToolTip("See a fingerprint to compare with the person, and mark them as verified");
     header_row->addWidget(header_label_, 1);
     header_row->addWidget(delivery_box_);
     header_row->addWidget(read_box_);
     header_row->addWidget(people_button_);
+    header_row->addWidget(delete_chat_button_);
     header_row->addWidget(revoke_button_);
     right->addLayout(header_row);
 
@@ -193,6 +199,8 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         new_group_button_->setEnabled(false);
         relay_invite_button_->setEnabled(false);
         restore_button_->setEnabled(false);
+        deletions_button_->setEnabled(false);
+        delete_chat_button_->setEnabled(false);
         invites_button_->setEnabled(false);
         input_->setEnabled(false);
         send_button_->setEnabled(false);
@@ -209,6 +217,8 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(new_group_button_, &QPushButton::clicked, this, [this] { create_group_dialog(); });
     connect(relay_invite_button_, &QPushButton::clicked, this, [this] { make_relay_invite(); });
     connect(restore_button_, &QPushButton::clicked, this, [this] { restore_history(); });
+    connect(deletions_button_, &QPushButton::clicked, this, [this] { review_deletions(); });
+    connect(delete_chat_button_, &QPushButton::clicked, this, [this] { request_delete_chat(); });
     connect(invites_button_, &QPushButton::clicked, this, [this] { review_group_invites(); });
     connect(revoke_button_, &QPushButton::clicked, this, [this] { revoke_access_for_current(); });
     connect(people_button_, &QPushButton::clicked, this, [this] { people_clicked(); });
@@ -271,6 +281,11 @@ void ChatWidget::refresh_if_changed() {
     requests_button_->setText(pending ? QString("Message requests (%1)").arg(static_cast<qulonglong>(pending)) : QString("Message requests"));
     const size_t invitations = engine_->group_invites().size();
     invites_button_->setText(invitations ? QString("Group invitations (%1)").arg(static_cast<qulonglong>(invitations)) : QString("Group invitations"));
+    size_t deletion_asks = 0;
+    for (const auto& d : engine_->deletions())
+        if (d.state == HistoryStore::DeletionPending && !d.mine) deletion_asks++;
+    deletions_button_->setText(deletion_asks ? QString("Deletion requests (%1)").arg(static_cast<qulonglong>(deletion_asks)) : QString("Deletion requests"));
+    deletions_button_->setEnabled(engine_->is_set_up());
 
     for (const auto& line : engine_->take_notices()) {
         notice_label_->setText(qstr(line));
@@ -356,6 +371,12 @@ void ChatWidget::render_messages(bool force_scroll) {
     for (const auto& m : messages) {
         QString when = QDateTime::fromSecsSinceEpoch(m.sent_at).toString("d MMM HH:mm");
         QString who = m.outgoing ? QString("You") : header_label_->property("contact_name").toString();
+        if (m.deleted) {  // removed by agreement of everyone in the chat: only its place is left
+            auto* gone = new QListWidgetItem("[" + when + "] (deleted by agreement)");
+            gone->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
+            messages_->addItem(gone);
+            continue;
+        }
         QString text = "[" + when + "] " + who + ": " + qstr(m.text) + status_word(m.status, m.outgoing);
         if (m.gap) text += "\n    (a message before this one is missing)";
         auto* item = new QListWidgetItem(text);
@@ -379,6 +400,12 @@ void ChatWidget::render_group_messages(bool force_scroll) {
         const auto& m = messages[i];
         QString when = QDateTime::fromSecsSinceEpoch(m.sent_at).toString("d MMM HH:mm");
         QString who = m.outgoing ? QString("You") : qstr(m.sender_name);
+        if (m.deleted) {  // removed by agreement of everyone in the chat: only its place is left
+            auto* gone = new QListWidgetItem("[" + when + "] (deleted by agreement)");
+            gone->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
+            messages_->addItem(gone);
+            continue;
+        }
         QString status = status_word(m.status, m.outgoing);
         if (detailed[i]) status = group_status_word(engine_->group_delivery(group, m.message_id));
         QString text = "[" + when + "] " + who + ": " + qstr(m.text) + status;
@@ -419,6 +446,7 @@ void ChatWidget::update_header() {
         revoke_button_->setEnabled(false);
         people_button_->setText("Members…");
         people_button_->setEnabled(true);
+        delete_chat_button_->setEnabled(true);
         input_->setEnabled(true);
         input_->setPlaceholderText("Write a message to the group…");
         send_button_->setEnabled(true);
@@ -437,6 +465,7 @@ void ChatWidget::update_header() {
     revoke_button_->setEnabled(have);
     people_button_->setText("Verify…");
     people_button_->setEnabled(have);
+    delete_chat_button_->setEnabled(have);
     input_->setEnabled(have);
     send_button_->setEnabled(have);
     if (!have) {
@@ -934,6 +963,73 @@ void ChatWidget::restore_history() {
     plain_box(done);
     done.exec();
     refresh();
+}
+
+// What a chat is called, for telling someone which one a request is about.
+static QString chat_label(MessagingEngine& engine, const std::string& conversation_id) {
+    for (const auto& g : engine.groups())
+        if (g.id == conversation_id) return group_title(g.title);
+    for (const auto& c : engine.chats())
+        if (engine.direct_conversation_id(c.contact_fp) == std::optional<std::string>(conversation_id)) return qstr(c.contact_name);
+    return QString("a chat");
+}
+
+// Other people asking to delete a chat, or messages in it, for everyone. Deleting needs every member to agree:
+// answering "don't delete", or not answering, means nothing is deleted.
+void ChatWidget::review_deletions() {
+    for (const auto& d : engine_->deletions()) {
+        if (d.state != HistoryStore::DeletionPending || d.mine) continue;
+        auto number = [](size_t n) { return QString::number(static_cast<qulonglong>(n)); };
+        QString what = d.whole_chat ? QString("the whole chat") : number(d.entries) + (d.entries == 1 ? " message" : " messages");
+        QString text = qstr(d.requester_name) + " wants to delete " + what + " in " + chat_label(*engine_, d.conversation_id) + ", for everyone.\n\n"
+                       "It would be removed from the relay and from every member's device, and can't be brought back. It only happens if every member agrees: "
+                       "if you say no, or don't answer, nothing is deleted.\n\n" +
+                       number(d.accepted) + " of " + number(d.members) + " have agreed so far. The request lapses on " +
+                       QDateTime::fromSecsSinceEpoch(d.expires_at).toString("d MMM yyyy") + ".";
+        QMessageBox box(QMessageBox::Question, "Deletion request", text, QMessageBox::NoButton, this);
+        plain_box(box);
+        QAbstractButton* agree = box.addButton("Delete for everyone", QMessageBox::AcceptRole);
+        QAbstractButton* refuse = box.addButton("Don't delete", QMessageBox::DestructiveRole);
+        box.addButton("Decide later", QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == refuse) {
+            engine_->decline_deletion(d.op_id);
+        } else if (box.clickedButton() == agree) {
+            std::string error;
+            if (!engine_->accept_deletion(d.op_id, error)) QMessageBox::warning(this, "Deletion request", qstr(error));
+        }
+    }
+    refresh();
+}
+
+// Ask everyone in the chat on screen to delete it.
+void ChatWidget::request_delete_chat() {
+    std::string id;
+    if (!current_group_.isEmpty()) {
+        id = current_group_.toStdString();
+    } else if (!current_fp_.isEmpty()) {
+        auto direct = engine_->direct_conversation_id(current_fp_.toStdString());
+        if (!direct) return;
+        id = *direct;
+    } else {
+        return;
+    }
+    QMessageBox ask(QMessageBox::Question, "Delete chat",
+                    "Ask everyone in this chat to delete it?\n\n"
+                    "If EVERY member agrees, the chat is removed from the relay and from everyone's device, and can't be brought back. "
+                    "If anyone says no, or doesn't answer within 7 days, nothing is deleted.\n\n"
+                    "Only what is in the chat's archive (made after archives were introduced) is removed from the relay.",
+                    QMessageBox::Yes | QMessageBox::No, this);
+    plain_box(ask);
+    if (ask.exec() != QMessageBox::Yes) return;
+    std::string error;
+    if (!engine_->request_chat_deletion(id, error)) {
+        QMessageBox::warning(this, "Delete chat", qstr(error));
+        return;
+    }
+    QMessageBox done(QMessageBox::Information, "Delete chat", "Everyone in the chat has been asked. You will be told when it is done.", QMessageBox::Ok, this);
+    plain_box(done);
+    done.exec();
 }
 
 void ChatWidget::review_group_invites() {

@@ -136,8 +136,21 @@ public:
     struct StoredEntry {
         uint64_t number = 0;
         Bytes hash;
-        Bytes ciphertext;
+        Bytes ciphertext;  // empty for a tombstone
+        bool redacted = false;
     };
+    struct MemberKey {
+        Bytes key_hash;
+        Bytes public_key;
+    };
+    std::vector<MemberKey> archive_member_keys(const Bytes& archive_id);  // every registered key
+    // Removes the whole archive: entries, keys and unspent tokens. False if there was none.
+    bool delete_archive(const Bytes& archive_id);
+    enum class RedactResult { Ok, NoSuchArchive, UnknownEntry };
+    // Replaces the content of the named entries (by chain hash) with a tombstone that keeps the hash, so the chain
+    // still holds. All or nothing: if any hash isn't an entry of this archive, nothing changes. Redacting an
+    // entry that is already a tombstone is harmless.
+    RedactResult redact_entries(const Bytes& archive_id, const std::vector<Bytes>& entry_hashes);
     // Up to `limit` entries numbered from_number onwards, in order.
     std::vector<StoredEntry> fetch_entries(const Bytes& archive_id, uint64_t from_number, size_t limit);
 
