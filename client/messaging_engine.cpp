@@ -422,7 +422,7 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             if (!info) return false;
             const int status = info->kind == chat::ReceiptKind::Read ? HistoryStore::Read : HistoryStore::Delivered;
             bool changed = false;
-            for (const auto& id : info->message_ids) changed |= history_->raise_status(conv_id, id, status);
+            for (const auto& id : info->message_ids) changed |= history_->raise_delivery(conv_id, id, contact.fingerprint, status);
             return changed;
         }
         case chat::RecordType::TokenGrant: {
@@ -626,7 +626,7 @@ void MessagingEngine::flush_outbox() {
         if (first_message) history_->set_bundle_sent(item.contact_fp);
         if (item.kind == OUTBOX_KIND_MESSAGE) {
             auto their_fp = hex_to_bytes(item.contact_fp);
-            history_->raise_status(chat::conversation_id_for(my_fp_, *their_fp), item.message_id, HistoryStore::Sent);
+            history_->raise_delivery(chat::conversation_id_for(my_fp_, *their_fp), item.message_id, item.contact_fp, HistoryStore::Sent);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 told_about_.erase("dead-token:" + item.contact_fp);

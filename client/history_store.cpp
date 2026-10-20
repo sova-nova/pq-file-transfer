@@ -46,6 +46,72 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 }  // namespace
 
+namespace {
+
+constexpr int64_t SCHEMA_VERSION = 2;
+
+// The conversations table at version 2. The unique index lets each contact have one direct
+// conversation, while any number of groups can share members.
+#define PQ_CONVERSATIONS_COLUMNS                                                          \
+    "(id BLOB PRIMARY KEY, kind INTEGER NOT NULL DEFAULT 1, contact_fp TEXT NOT NULL DEFAULT '',"  \
+    " title TEXT NOT NULL DEFAULT '', creator_fp TEXT NOT NULL DEFAULT '', mode INTEGER NOT NULL DEFAULT 1,"  \
+    " timer_seconds INTEGER NOT NULL DEFAULT 0, previous_id BLOB NOT NULL DEFAULT x'',"    \
+    " state INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL,"  \
+    " send_delivery INTEGER NOT NULL DEFAULT 1, send_read INTEGER NOT NULL DEFAULT 1)"
+const char CONVERSATIONS_V2_TEMPLATE_PREFIX[] = "CREATE TABLE ";
+const char CONVERSATIONS_V2_TEMPLATE_BODY[] = PQ_CONVERSATIONS_COLUMNS;
+const char CONVERSATIONS_V2[] =
+    "CREATE TABLE conversations" PQ_CONVERSATIONS_COLUMNS ";"
+    "CREATE UNIQUE INDEX conversations_direct ON conversations(contact_fp) WHERE kind = 1;";
+const char CONVERSATIONS_INDEXES[] =
+    "CREATE UNIQUE INDEX IF NOT EXISTS conversations_direct ON conversations(contact_fp) WHERE kind = 1;";
+
+// Everything except the conversations table. All idempotent, so a brand-new database and a
+// migrated one end up the same.
+const char SCHEMA_REST[] =
+    "CREATE TABLE IF NOT EXISTS conversation_members("
+    "  conv_id BLOB NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,"
+    "  member_fp TEXT NOT NULL, idx INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY(conv_id, member_fp));"
+    "CREATE TABLE IF NOT EXISTS messages("
+    "  row INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  conv_id BLOB NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,"
+    "  msg_id BLOB NOT NULL, outgoing INTEGER NOT NULL,"
+    "  sent_at INTEGER NOT NULL, received_at INTEGER NOT NULL,"
+    "  status INTEGER NOT NULL, gap INTEGER NOT NULL DEFAULT 0,"
+    "  entry_hash BLOB NOT NULL, sealed BLOB NOT NULL,"
+    "  UNIQUE(conv_id, msg_id));"
+    "CREATE INDEX IF NOT EXISTS messages_by_hash ON messages(conv_id, entry_hash);"
+    "CREATE TABLE IF NOT EXISTS deliveries("
+    "  conv_id BLOB NOT NULL, msg_id BLOB NOT NULL, member_fp TEXT NOT NULL,"
+    "  status INTEGER NOT NULL,"
+    "  PRIMARY KEY(conv_id, msg_id, member_fp),"
+    "  FOREIGN KEY(conv_id, msg_id) REFERENCES messages(conv_id, msg_id) ON DELETE CASCADE);"
+    "CREATE TABLE IF NOT EXISTS outbox("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT, contact_fp TEXT NOT NULL, kind INTEGER NOT NULL,"
+    "  msg_id BLOB NOT NULL, sealed BLOB NOT NULL, due_at INTEGER NOT NULL,"
+    "  attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS requests("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT, sender_fp TEXT NOT NULL,"
+    "  bundle BLOB NOT NULL, received_at INTEGER NOT NULL, sealed BLOB NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS issued_tokens("
+    "  token_hash BLOB PRIMARY KEY, label TEXT NOT NULL, created_at INTEGER NOT NULL,"
+    "  bound_fp TEXT NOT NULL DEFAULT '', revoked INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE IF NOT EXISTS contact_state("
+    "  contact_fp TEXT PRIMARY KEY, bundle_sent INTEGER NOT NULL DEFAULT 0);";
+
+const char CONVERSATION_COLUMNS[] =
+    "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
+
+bool is_member_fp(const std::string& fp) {
+    if (fp.size() != 64) return false;
+    for (char c : fp)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    return true;
+}
+
+}  // namespace
+
 HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& history_key) : key_(history_key) {
     if (key_.size() != 32) throw std::runtime_error("The history key must be 32 bytes");
     std::string path = db_path.u8string();
@@ -59,33 +125,78 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
     exec(db_, "PRAGMA journal_mode=WAL");
     exec(db_, "PRAGMA synchronous=FULL");
     exec(db_, "PRAGMA foreign_keys=ON");
-    exec(db_,
-         "CREATE TABLE IF NOT EXISTS conversations("
-         "  id BLOB PRIMARY KEY, contact_fp TEXT NOT NULL UNIQUE,"
-         "  created_at INTEGER NOT NULL, last_activity INTEGER NOT NULL,"
-         "  send_delivery INTEGER NOT NULL DEFAULT 1, send_read INTEGER NOT NULL DEFAULT 1);"
-         "CREATE TABLE IF NOT EXISTS messages("
-         "  row INTEGER PRIMARY KEY AUTOINCREMENT,"
-         "  conv_id BLOB NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,"
-         "  msg_id BLOB NOT NULL, outgoing INTEGER NOT NULL,"
-         "  sent_at INTEGER NOT NULL, received_at INTEGER NOT NULL,"
-         "  status INTEGER NOT NULL, gap INTEGER NOT NULL DEFAULT 0,"
-         "  entry_hash BLOB NOT NULL, sealed BLOB NOT NULL,"
-         "  UNIQUE(conv_id, msg_id));"
-         "CREATE INDEX IF NOT EXISTS messages_by_hash ON messages(conv_id, entry_hash);"
-         "CREATE TABLE IF NOT EXISTS outbox("
-         "  id INTEGER PRIMARY KEY AUTOINCREMENT, contact_fp TEXT NOT NULL, kind INTEGER NOT NULL,"
-         "  msg_id BLOB NOT NULL, sealed BLOB NOT NULL, due_at INTEGER NOT NULL,"
-         "  attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);"
-         "CREATE TABLE IF NOT EXISTS requests("
-         "  id INTEGER PRIMARY KEY AUTOINCREMENT, sender_fp TEXT NOT NULL,"
-         "  bundle BLOB NOT NULL, received_at INTEGER NOT NULL, sealed BLOB NOT NULL);"
-         "CREATE TABLE IF NOT EXISTS issued_tokens("
-         "  token_hash BLOB PRIMARY KEY, label TEXT NOT NULL, created_at INTEGER NOT NULL,"
-         "  bound_fp TEXT NOT NULL DEFAULT '', revoked INTEGER NOT NULL DEFAULT 0);"
-         "CREATE TABLE IF NOT EXISTS contact_state("
-         "  contact_fp TEXT PRIMARY KEY, bundle_sent INTEGER NOT NULL DEFAULT 0);"
-         "PRAGMA user_version=1");
+    try {
+    int64_t version = 0;
+    {
+        Stmt v(db_, "PRAGMA user_version");
+        if (v.step()) version = v.column_i64(0);
+    }
+    bool has_conversations = false;
+    {
+        Stmt t(db_, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversations'");
+        has_conversations = t.step();
+    }
+
+    if (version > SCHEMA_VERSION)
+        throw std::runtime_error("This message history was made by a newer version of the app (" + path +
+                                 "). Update the app; it can't be opened by this one.");
+    if (has_conversations && version < SCHEMA_VERSION) {
+        migrate_v1_to_v2(db_path);
+    } else if (!has_conversations) {
+        Transaction tx(db_);
+        exec(db_, CONVERSATIONS_V2);
+        exec(db_, SCHEMA_REST);
+        exec(db_, "PRAGMA user_version=2");
+        tx.commit();
+    }
+    } catch (...) {
+        // A constructor that throws never runs the destructor, so don't leak the connection.
+        sqlite3_close(db_);
+        db_ = nullptr;
+        throw;
+    }
+}
+
+// Version 1 had one conversation per contact. Version 2 adds groups: a conversation gets a
+// kind, state, title, creator, mode, timer and link to a previous conversation; members move to
+// their own table; and delivery is tracked per member. Everything that was there is kept.
+void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
+    // The whole history lives in this one file, so keep the old one until the new shape has
+    // proven itself. (Not overwritten if an earlier, interrupted attempt already made one.)
+    exec(db_, "PRAGMA wal_checkpoint(TRUNCATE)");
+    std::filesystem::path backup = db_path;
+    backup += ".before-v2";
+    std::error_code ec;
+    if (!std::filesystem::exists(backup, ec)) {
+        std::filesystem::copy_file(db_path, backup, ec);
+        if (ec) throw std::runtime_error("Cannot back up the message history before upgrading it (" + ec.message() + ")");
+    }
+
+    // Rebuilding a table that others refer to must happen with foreign keys off (SQLite's documented procedure).
+    exec(db_, "PRAGMA foreign_keys=OFF");
+    try {
+        {
+            Transaction tx(db_);
+            exec(db_, (std::string(CONVERSATIONS_V2_TEMPLATE_PREFIX) + "conversations_new" + CONVERSATIONS_V2_TEMPLATE_BODY).c_str());
+            exec(db_,
+                 "INSERT INTO conversations_new(id, kind, contact_fp, created_at, last_activity, send_delivery, send_read) "
+                 "SELECT id, 1, contact_fp, created_at, last_activity, send_delivery, send_read FROM conversations");
+            exec(db_, "DROP TABLE conversations");
+            exec(db_, "ALTER TABLE conversations_new RENAME TO conversations");
+            exec(db_, CONVERSATIONS_INDEXES);
+            exec(db_, SCHEMA_REST);
+            // Every existing conversation is a direct one: its member is the contact.
+            exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
+            exec(db_, "PRAGMA user_version=2");
+            tx.commit();
+        }
+        Stmt check(db_, "PRAGMA foreign_key_check");
+        if (check.step()) throw std::runtime_error("The message history failed its integrity check after upgrading; the old copy is " + backup.u8string());
+    } catch (...) {
+        sqlite3_exec(db_, "PRAGMA foreign_keys=ON", nullptr, nullptr, nullptr);
+        throw;
+    }
+    exec(db_, "PRAGMA foreign_keys=ON");
 }
 
 HistoryStore::~HistoryStore() {
@@ -113,7 +224,15 @@ std::optional<HistoryStore::Bytes> HistoryStore::unseal(const Bytes& sealed, con
 
 // --- Conversations ---
 
-static HistoryStore::Conversation read_conversation(Stmt& s) {
+static std::vector<std::string> load_members(sqlite3* db, const std::vector<uint8_t>& conversation_id) {
+    Stmt s(db, "SELECT member_fp FROM conversation_members WHERE conv_id = ? ORDER BY idx, member_fp");
+    s.blob(1, conversation_id);
+    std::vector<std::string> out;
+    while (s.step()) out.push_back(s.column_text(0));
+    return out;
+}
+
+static HistoryStore::Conversation read_conversation(sqlite3* db, Stmt& s) {
     HistoryStore::Conversation c;
     c.id = s.column_blob(0);
     c.contact_fp = s.column_text(1);
@@ -121,32 +240,101 @@ static HistoryStore::Conversation read_conversation(Stmt& s) {
     c.last_activity = s.column_i64(3);
     c.send_delivery_receipts = s.column_i64(4) != 0;
     c.send_read_receipts = s.column_i64(5) != 0;
+    c.kind = static_cast<int>(s.column_i64(6));
+    c.state = static_cast<int>(s.column_i64(7));
+    c.title = s.column_text(8);
+    c.creator_fp = s.column_text(9);
+    c.mode = static_cast<int>(s.column_i64(10));
+    c.timer_seconds = s.column_i64(11);
+    c.previous_id = s.column_blob(12);
+    c.members = load_members(db, c.id);
     return c;
 }
 
 HistoryStore::Conversation HistoryStore::ensure_conversation(const Bytes& id, const std::string& contact_fp, int64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);
-    Stmt(db_, "INSERT OR IGNORE INTO conversations(id, contact_fp, created_at, last_activity) VALUES(?, ?, ?, ?)")
+    Transaction tx(db_);
+    Stmt(db_, "INSERT OR IGNORE INTO conversations(id, kind, contact_fp, created_at, last_activity) VALUES(?, 1, ?, ?, ?)")
         .blob(1, id).text(2, contact_fp).i64(3, now).i64(4, now).step();
-    Stmt s(db_, "SELECT id, contact_fp, created_at, last_activity, send_delivery, send_read FROM conversations WHERE contact_fp = ?");
-    s.text(1, contact_fp);
+    Bytes found_id;
+    {
+        Stmt s(db_, "SELECT id FROM conversations WHERE kind = 1 AND contact_fp = ?");
+        s.text(1, contact_fp);
+        if (!s.step()) throw std::runtime_error("database: conversation missing after insert");
+        found_id = s.column_blob(0);
+    }
+    Stmt(db_, "INSERT OR IGNORE INTO conversation_members(conv_id, member_fp, idx) VALUES(?, ?, 0)")
+        .blob(1, found_id).text(2, contact_fp).step();
+    tx.commit();
+    Stmt s(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations WHERE id = ?").c_str());
+    s.blob(1, found_id);
     if (!s.step()) throw std::runtime_error("database: conversation missing after insert");
-    return read_conversation(s);
+    return read_conversation(db_, s);
 }
 
 std::optional<HistoryStore::Conversation> HistoryStore::conversation_for(const std::string& contact_fp) {
     std::lock_guard<std::mutex> lock(mutex_);
-    Stmt s(db_, "SELECT id, contact_fp, created_at, last_activity, send_delivery, send_read FROM conversations WHERE contact_fp = ?");
+    Stmt s(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations WHERE kind = 1 AND contact_fp = ?").c_str());
     s.text(1, contact_fp);
     if (!s.step()) return std::nullopt;
-    return read_conversation(s);
+    return read_conversation(db_, s);
+}
+
+std::optional<HistoryStore::Conversation> HistoryStore::conversation(const Bytes& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations WHERE id = ?").c_str());
+    s.blob(1, id);
+    if (!s.step()) return std::nullopt;
+    return read_conversation(db_, s);
+}
+
+HistoryStore::Conversation HistoryStore::create_group(const Bytes& id, const std::string& title, const std::string& creator_fp,
+                                                      int mode, int64_t timer_seconds, const Bytes& previous_id,
+                                                      const std::vector<std::string>& members, int state, int64_t now) {
+    if (id.empty()) throw std::runtime_error("A group needs a conversation ID");
+    if (mode != Saved) throw std::runtime_error("Only Saved chats are supported so far");
+    if (state != Active && state != SettingUp) throw std::runtime_error("Unknown conversation state");
+    if (title.size() > MAX_TITLE_BYTES) throw std::runtime_error("The group name is too long");
+    if (!creator_fp.empty() && !is_member_fp(creator_fp)) throw std::runtime_error("The group creator is not a valid fingerprint");
+    if (members.empty() || members.size() > MAX_OTHER_MEMBERS) throw std::runtime_error("A group needs between 2 and 16 people");
+    for (size_t i = 0; i < members.size(); i++) {
+        if (!is_member_fp(members[i])) throw std::runtime_error("A group member is not a valid fingerprint");
+        for (size_t j = 0; j < i; j++)
+            if (members[i] == members[j]) throw std::runtime_error("A group member is listed twice");
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    {
+        Stmt existing(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations WHERE id = ?").c_str());
+        existing.blob(1, id);
+        if (existing.step()) return read_conversation(db_, existing);  // a replay: nothing changes
+    }
+    Transaction tx(db_);
+    Stmt(db_, "INSERT INTO conversations(id, kind, contact_fp, title, creator_fp, mode, timer_seconds, previous_id, state, created_at, last_activity) "
+              "VALUES(?, 2, '', ?, ?, ?, ?, ?, ?, ?, ?)")
+        .blob(1, id).text(2, title).text(3, creator_fp).i64(4, mode).i64(5, timer_seconds).blob(6, previous_id)
+        .i64(7, state).i64(8, now).i64(9, now).step();
+    for (size_t i = 0; i < members.size(); i++)
+        Stmt(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) VALUES(?, ?, ?)")
+            .blob(1, id).text(2, members[i]).i64(3, static_cast<int64_t>(i)).step();
+    tx.commit();
+    Stmt s(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations WHERE id = ?").c_str());
+    s.blob(1, id);
+    if (!s.step()) throw std::runtime_error("database: group missing after insert");
+    return read_conversation(db_, s);
+}
+
+void HistoryStore::set_conversation_state(const Bytes& id, int state) {
+    if (state != Active && state != SettingUp) throw std::runtime_error("Unknown conversation state");
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE conversations SET state = ? WHERE id = ?").i64(1, state).blob(2, id).step();
 }
 
 std::vector<HistoryStore::Conversation> HistoryStore::conversations() {
     std::lock_guard<std::mutex> lock(mutex_);
-    Stmt s(db_, "SELECT id, contact_fp, created_at, last_activity, send_delivery, send_read FROM conversations ORDER BY last_activity DESC");
+    Stmt s(db_, (std::string("SELECT ") + CONVERSATION_COLUMNS + " FROM conversations ORDER BY last_activity DESC").c_str());
     std::vector<Conversation> out;
-    while (s.step()) out.push_back(read_conversation(s));
+    while (s.step()) out.push_back(read_conversation(db_, s));
     return out;
 }
 
@@ -262,6 +450,55 @@ std::vector<HistoryStore::Bytes> HistoryStore::mark_all_read(const Bytes& conver
     Stmt(db_, "UPDATE messages SET status = 1 WHERE conv_id = ? AND outgoing = 0 AND status = 0").blob(1, conversation_id).step();
     tx.commit();
     return ids;
+}
+
+bool HistoryStore::raise_delivery(const Bytes& conversation_id, const Bytes& message_id, const std::string& member_fp, int status) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    {
+        Stmt ours(db_, "SELECT 1 FROM messages WHERE conv_id = ? AND msg_id = ? AND outgoing = 1");
+        ours.blob(1, conversation_id).blob(2, message_id);
+        if (!ours.step()) return false;
+    }
+    {
+        Stmt member(db_, "SELECT 1 FROM conversation_members WHERE conv_id = ? AND member_fp = ?");
+        member.blob(1, conversation_id).text(2, member_fp);
+        if (!member.step()) return false;
+    }
+    Stmt(db_, "INSERT INTO deliveries(conv_id, msg_id, member_fp, status) VALUES(?, ?, ?, ?) "
+              "ON CONFLICT(conv_id, msg_id, member_fp) DO UPDATE SET status = excluded.status WHERE excluded.status > deliveries.status")
+        .blob(1, conversation_id).blob(2, message_id).text(3, member_fp).i64(4, status).step();
+    bool changed = sqlite3_changes(db_) > 0;
+
+    int64_t lowest = 0;
+    {
+        Stmt agg(db_, "SELECT MIN(COALESCE(d.status, 0)) FROM conversation_members m "
+                      "LEFT JOIN deliveries d ON d.conv_id = m.conv_id AND d.msg_id = ? AND d.member_fp = m.member_fp "
+                      "WHERE m.conv_id = ?");
+        agg.blob(1, message_id).blob(2, conversation_id);
+        if (agg.step()) lowest = agg.column_i64(0);
+    }
+    Stmt(db_, "UPDATE messages SET status = ? WHERE conv_id = ? AND msg_id = ? AND outgoing = 1 AND status < ?")
+        .i64(1, lowest).blob(2, conversation_id).blob(3, message_id).i64(4, lowest).step();
+    changed |= sqlite3_changes(db_) > 0;
+    tx.commit();
+    return changed;
+}
+
+std::vector<HistoryStore::Delivery> HistoryStore::deliveries(const Bytes& conversation_id, const Bytes& message_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT m.member_fp, COALESCE(d.status, 0) FROM conversation_members m "
+                "LEFT JOIN deliveries d ON d.conv_id = m.conv_id AND d.msg_id = ? AND d.member_fp = m.member_fp "
+                "WHERE m.conv_id = ? ORDER BY m.idx, m.member_fp");
+    s.blob(1, message_id).blob(2, conversation_id);
+    std::vector<Delivery> out;
+    while (s.step()) {
+        Delivery d;
+        d.member_fp = s.column_text(0);
+        d.status = static_cast<int>(s.column_i64(1));
+        out.push_back(std::move(d));
+    }
+    return out;
 }
 
 // --- Outbox ---

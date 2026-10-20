@@ -31,18 +31,46 @@ public:
     HistoryStore(const HistoryStore&) = delete;
     HistoryStore& operator=(const HistoryStore&) = delete;
 
-    // --- Conversations (one per contact for now) ---
+    // --- Conversations ---
+    // One per contact (Direct) or per group. A direct conversation is a group of two: the other
+    // person is its one member, so delivery tracking and membership work the same for both.
+    enum Kind : int { Direct = 1, Group = 2 };
+    // SettingUp: a group this user has joined but whose members' send tokens haven't all arrived.
+    enum State : int { Active = 0, SettingUp = 1 };
+    enum Mode : int { Saved = 1 };  // Private chats (timers) arrive with a later milestone
+    static constexpr size_t MAX_OTHER_MEMBERS = 15;  // a group is at most 16 people including this user
+    static constexpr size_t MAX_TITLE_BYTES = 64;
+
     struct Conversation {
         Bytes id;
-        std::string contact_fp;  // lowercase hex
+        std::string contact_fp;  // Direct: the other person (lowercase hex). Group: empty.
         int64_t created_at = 0;
         int64_t last_activity = 0;
         bool send_delivery_receipts = true;
         bool send_read_receipts = true;
+        int kind = Direct;
+        int state = Active;
+        std::string title;       // groups: the creator's suggestion; untrusted text
+        std::string creator_fp;  // groups: who made it (lowercase hex); empty for direct
+        int mode = Saved;
+        int64_t timer_seconds = 0;
+        Bytes previous_id;       // the conversation this one replaces (a changed group), or empty
+        std::vector<std::string> members;  // everyone except this user, lowercase hex, in stored order
     };
+    // Direct conversations. `ensure_conversation` returns the existing one for that contact if
+    // there is one (whatever ID it has).
     Conversation ensure_conversation(const Bytes& id, const std::string& contact_fp, int64_t now);
-    std::optional<Conversation> conversation_for(const std::string& contact_fp);
-    std::vector<Conversation> conversations();
+    std::optional<Conversation> conversation_for(const std::string& contact_fp);  // the direct one only
+    // Groups. Creates the conversation and its member list together. If a conversation with that
+    // ID already exists it is returned unchanged, so a replayed creation record changes nothing.
+    // `members` are everyone except this user (1 to MAX_OTHER_MEMBERS, each 64 lowercase hex
+    // characters, no duplicates). Throws std::runtime_error for anything invalid.
+    Conversation create_group(const Bytes& id, const std::string& title, const std::string& creator_fp, int mode,
+                              int64_t timer_seconds, const Bytes& previous_id, const std::vector<std::string>& members,
+                              int state, int64_t now);
+    std::optional<Conversation> conversation(const Bytes& id);
+    void set_conversation_state(const Bytes& id, int state);
+    std::vector<Conversation> conversations();  // direct and group, most recent activity first
     void set_receipt_settings(const Bytes& conversation_id, bool delivery, bool read);
 
     // --- Messages ---
@@ -67,6 +95,21 @@ public:
     std::vector<Message> messages(const Bytes& conversation_id, size_t limit);
     std::optional<Message> find_message(const Bytes& conversation_id, const Bytes& message_id);
     bool raise_status(const Bytes& conversation_id, const Bytes& message_id, int status);
+
+    // Delivery of one of our outgoing messages, per recipient. Each member has their own state
+    // (Queued, Sent, Delivered, Read); a member without a row is Queued. The message's overall
+    // status is the lowest across all members of the conversation, so it never claims more than
+    // is true for everyone, and it only ever goes up.
+    struct Delivery {
+        std::string member_fp;  // lowercase hex
+        int status = 0;
+    };
+    // Raises one member's state (never lowers it) and then the message's overall status.
+    // False if nothing changed, or if the message isn't one of our outgoing ones, or the
+    // fingerprint isn't a member of its conversation (so a stranger's receipt counts for nothing).
+    bool raise_delivery(const Bytes& conversation_id, const Bytes& message_id, const std::string& member_fp, int status);
+    // Every member's state for a message, in member order.
+    std::vector<Delivery> deliveries(const Bytes& conversation_id, const Bytes& message_id);
     bool has_entry(const Bytes& conversation_id, const Bytes& entry_hash);
     std::optional<Bytes> last_entry_hash(const Bytes& conversation_id, bool outgoing);
     size_t unread_count(const Bytes& conversation_id);
@@ -122,6 +165,7 @@ public:
     void set_bundle_sent(const std::string& contact_fp);
 
 private:
+    void migrate_v1_to_v2(const std::filesystem::path& db_path);
     Bytes seal(const Bytes& plaintext, const Bytes& aad) const;
     std::optional<Bytes> unseal(const Bytes& sealed, const Bytes& aad) const;
 
