@@ -43,6 +43,19 @@ public:
     const Bytes& relay_id() const { return relay_id_; }  // SHA-256 of the relay's public key
     std::string relay_id_hex() const;
 
+    // True if this run generated a new signing key because the storage had none. A wrong
+    // storage folder looks exactly like a first start, so callers should say so out loud.
+    bool identity_created() const { return identity_created_; }
+
+    // Whether data_dir already holds a relay identity (both key files).
+    static bool identity_exists(const std::filesystem::path& data_dir);
+
+    // POSIX: throws a plain-language error if `path` exists and is owned by a user other than
+    // `expected_uid`. Does nothing if it doesn't exist yet, and always on Windows.
+    static void check_owner(const std::filesystem::path& path, const std::string& what, unsigned long expected_uid);
+    // The user ID the relay runs as (0 on Windows, where nothing is checked).
+    static unsigned long current_uid();
+
     void set_logger(std::function<void(const std::string&)> logger) { log_ = std::move(logger); }
 
     // Makes a single-use invite and returns it as 32 lowercase hex characters.
@@ -82,6 +95,7 @@ private:
     Bytes public_key_;
     Bytes private_key_;
     Bytes relay_id_;
+    bool identity_created_ = false;
     RateLimiter rate_;
     std::function<void(const std::string&)> log_;
 

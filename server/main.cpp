@@ -482,11 +482,14 @@ static void print_usage(const char* prog) {
               << "  --port N       TCP port to listen on (default " << DEFAULT_PORT << ")\n"
               << "  --bind ADDR    IPv4 address to listen on (default 0.0.0.0, all interfaces).\n"
               << "                 Use your WireGuard address, e.g. 10.8.0.1, to accept tunnel traffic only\n"
-              << "  --storage DIR  where encrypted transfers are kept (default: temp dir, or $PQ_STORAGE_DIR)\n"
+              << "  --storage DIR  where everything is kept, including the relay's signing key in DIR/v3.\n"
+              << "                 Always pass the same absolute path (default: temp dir, or $PQ_STORAGE_DIR)\n"
               << "  --quota-gb N   max total storage in GiB (default " << DEFAULT_QUOTA_GB << ")\n"
               << "\nMailbox relay (protocol v3). Its state lives in <storage>/v3, including the relay's\n"
               << "signing key: back that folder up.\n"
               << "  --create-invite             make a single-use invite, print it and exit\n"
+              << "  --allow-new-identity        with --create-invite: allow creating the relay's identity if\n"
+              << "                              this storage has none (normally a sign of the wrong --storage)\n"
               << "  --public-address HOST:PORT  put this address in the printed invite string\n"
               << "  --mailbox-quota-kib N       queued bytes allowed per mailbox (default 65536)\n"
               << "  --rate-limit N              deposits per minute per send token and per address (default 120)\n"
@@ -503,6 +506,8 @@ int main(int argc, char* argv[]) {
     bind_addr.s_addr = htonl(INADDR_ANY);
     const char* env_dir = std::getenv("PQ_STORAGE_DIR");
     g_storage_dir = (env_dir && *env_dir) ? fs::path(env_dir) : default_storage_dir();
+    bool storage_explicit = env_dir && *env_dir;
+    bool allow_new_identity = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -518,6 +523,8 @@ int main(int argc, char* argv[]) {
                     throw std::invalid_argument("bind");
             } else if (arg == "--create-invite") {
                 create_invite = true;
+            } else if (arg == "--allow-new-identity") {
+                allow_new_identity = true;
             } else if (arg == "--public-address" && has_value) {
                 public_address = argv[++i];
             } else if (arg == "--mailbox-quota-kib" && has_value) {
@@ -529,6 +536,7 @@ int main(int argc, char* argv[]) {
                 if (limits.sweep_seconds < 1) throw std::out_of_range("sweep");
             } else if (arg == "--storage" && has_value) {
                 g_storage_dir = fs::path(argv[++i]);
+                storage_explicit = true;
             } else if (arg == "--quota-gb" && has_value) {
                 g_storage_quota = std::stoull(argv[++i]) * 1024ull * 1024 * 1024;
             } else {
@@ -546,22 +554,50 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    {   // Use (and show) an absolute path, so a relative --storage can't mean two different folders.
+        std::error_code abs_ec;
+        fs::path absolute = fs::absolute(g_storage_dir, abs_ec);
+        if (!abs_ec) g_storage_dir = absolute;
+    }
+
     if (!prepare_storage_dir(g_storage_dir)) return 1;
 
+    const fs::path relay_dir = g_storage_dir / "v3";
+    if (!storage_explicit) {
+        std::cerr << "Warning: no --storage was given, so the temporary default is used:\n"
+                  << "  " << g_storage_dir.string() << "\n"
+                  << "The relay's signing key lives in " << relay_dir.string() << ". Every pq-server run that uses a\n"
+                  << "different storage folder has a different relay identity, and an invite made by one is useless\n"
+                  << "to another. Pass the same absolute --storage every time, and keep it out of /tmp.\n";
+    }
+    if (create_invite && !allow_new_identity && !relay::RelayService::identity_exists(relay_dir)) {
+        std::cerr << "No relay identity found in " << relay_dir.string() << ".\n"
+                  << "This usually means --storage is not the folder your running relay uses. An invite made here\n"
+                  << "would carry a brand-new relay identity that the running relay doesn't have, and clients would\n"
+                  << "report that the relay's identity does not match the one you pinned.\n"
+                  << "Use the same --storage (as the same user) as the running relay. If this relay has never been\n"
+                  << "started, start it once, or add --allow-new-identity to create its identity now.\n";
+        return 1;
+    }
+
     try {
-        g_relay = std::make_unique<relay::RelayService>(g_storage_dir / "v3", limits);
+        g_relay = std::make_unique<relay::RelayService>(relay_dir, limits);
     } catch (const std::exception& e) {
         std::cerr << "Cannot start the mailbox relay: " << e.what() << std::endl;
         return 1;
     }
     g_relay->set_logger(log_line);
+    if (g_relay->identity_created())
+        std::cerr << "Created a new relay identity in " << relay_dir.string() << ".\n"
+                  << "Back that folder up: if relay_private.key is lost, every client reports that the relay changed.\n";
 
     if (create_invite) {
         std::string code = g_relay->create_invite();
         std::string grouped;
         for (size_t i = 0; i < code.size(); i += 4) grouped += (i ? "-" : "") + code.substr(i, 4);
         std::cout << "Invite code:  " << grouped << "\n"
-                  << "Relay ID:     " << g_relay->relay_id_hex() << "\n";
+                  << "Relay ID:     " << g_relay->relay_id_hex() << "\n"
+                  << "Relay state:  " << relay_dir.string() << "\n";
         if (!public_address.empty())
             std::cout << "Invite string (give this to the person; it works once and expires in 14 days):\n"
                       << "  pqft-relay://" << public_address << "/" << g_relay->relay_id_hex() << "/" << code << "\n";

@@ -151,13 +151,15 @@ To reach the server over the internet, forward its port, or run it on a small VP
 
 **Identity.** On first start the relay generates a signing key and prints its **Relay ID**, the SHA-256 of the public key. Clients pin that ID, and the relay proves it holds the matching key every time a client connects, so a fake relay, a hijacked address or a replayed answer is detected even outside WireGuard. That is why the key matters: if you rebuild the machine without `<storage>/v3/relay_private.key`, every client sees "relay changed" and refuses to talk to the new one. The private key is stored with owner-only permissions and is not passphrase-protected, because the relay has to start unattended.
 
-**Invites.** Nobody can create a mailbox without an invite, so strangers can't fill your disk. Make one on the relay machine:
+**Invites.** Nobody can create a mailbox without an invite, so strangers can't fill your disk. Make one on the relay machine. Use **the same `--storage` folder, as the same user,** that the running relay uses: that folder holds the relay's identity, and an invite carries that identity. Always give the server and `--create-invite` the same absolute `--storage` (the default is a temporary folder, which is a poor place for a signing key):
 
 ```bash
 ./pq-server --storage /var/lib/pq-relay --create-invite --public-address 10.8.0.1:9000
 ```
 
 It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8.0.1:9000/<relay id>/<code>`. That single string carries where the relay is, which key to trust, and the code, so the first connection is already verified. An invite works once and expires after 14 days.
+
+It also prints `Relay state:`, the folder it used, and the Relay ID, which must equal the one the running relay printed at startup. If the storage has no relay identity yet, `--create-invite` refuses instead of silently creating a second identity (a different `--storage` is the usual cause; clients would report "does not match the one you pinned"). Add `--allow-new-identity` only for a brand-new relay that has never been started.
 
 **Checking it from the outside.** `pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
 
@@ -176,6 +178,7 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--mailbox-quota-kib N` | 65536 | Queued bytes allowed per mailbox |
 | `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
 | `--sweep-seconds N` | 60 | How often expired envelopes are removed |
+| `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
 
 A systemd unit for the relay (the `ExecStart` line is the important part):
 

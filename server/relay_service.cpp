@@ -10,6 +10,11 @@
 #include <fstream>
 #include <stdexcept>
 
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace relay {
@@ -72,7 +77,39 @@ void RelayService::RateLimiter::prune(int64_t now) {
 
 // --- Construction and identity ---
 
+unsigned long RelayService::current_uid() {
+#ifdef _WIN32
+    return 0;
+#else
+    return static_cast<unsigned long>(geteuid());
+#endif
+}
+
+void RelayService::check_owner(const fs::path& path, const std::string& what, unsigned long expected_uid) {
+#ifdef _WIN32
+    (void)path; (void)what; (void)expected_uid;
+#else
+    struct stat st {};
+    if (lstat(path.c_str(), &st) != 0) return;  // not there yet: we will create it
+    if (static_cast<unsigned long>(st.st_uid) == expected_uid) return;
+    throw std::runtime_error(what + " " + path.string() + " belongs to user id " + std::to_string(st.st_uid) +
+                             ", but this program is running as user id " + std::to_string(expected_uid) +
+                             ". Run it as the user that owns it (for example: sudo -u <that user> ...), or hand the"
+                             " folder over with: sudo chown -R <user> " + path.string());
+#endif
+}
+
+bool RelayService::identity_exists(const fs::path& data_dir) {
+    std::error_code ec;
+    return fs::exists(data_dir / "relay_public.key", ec) && fs::exists(data_dir / "relay_private.key", ec);
+}
+
 RelayService::RelayService(const fs::path& data_dir, const RelayLimits& limits) : limits_(limits) {
+    const unsigned long me = current_uid();
+    check_owner(data_dir, "The relay's state folder", me);
+    for (const char* name : {"relay_private.key", "relay_public.key", "relay.db"})
+        check_owner(data_dir / name, "The relay's file", me);
+
     std::error_code ec;
     fs::create_directories(data_dir, ec);
     if (ec) throw std::runtime_error("Cannot create " + data_dir.string() + ": " + ec.message());
@@ -111,6 +148,7 @@ void RelayService::load_or_create_identity(const fs::path& data_dir) {
         write_file_private(pub_path, kp.public_key, false);
         public_key_ = kp.public_key;
         private_key_ = kp.private_key;
+        identity_created_ = true;
         CryptoEngine::secure_wipe(kp.private_key);
     }
     relay_id_ = CryptoEngine::sha256(public_key_);
