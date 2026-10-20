@@ -667,6 +667,8 @@ void MainWindow::finish_add_contact(const QString& name,
         return;
     }
 
+    // The user confirmed the fingerprint above, so they count as verified in the chats too.
+    if (chat_widget_) chat_widget_->mark_verified(fp);
     refresh_contacts();
     int idx = recipient_combo_->findData(name);
     if (idx >= 0) recipient_combo_->setCurrentIndex(idx);
