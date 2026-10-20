@@ -274,6 +274,24 @@ static bool send_envelope(User& target, const Bytes& token, const chat::Inner& i
     return deposit_to(target, token, chat::seal_envelope(inner, target.keys->load_public_kem()));
 }
 
+// What is waiting in someone's mailbox, read as its owner and left there. Their engine must not be running.
+static std::vector<Bytes> mailbox_envelopes(User& u) {
+    std::vector<Bytes> out;
+    auto cfg = u.keys->load_mailbox_config();
+    Bytes access = u.keys->load_access_private();
+    RelayClient c;
+    std::string err;
+    if (!cfg || access.empty() || !c.connect("127.0.0.1", static_cast<uint16_t>(PORT), RELAY_ID, 3, err) ||
+        !c.authenticate(cfg->mailbox_id, access, err) || !c.collect(err))
+        return out;
+    for (int i = 0; i < 60; i++) {
+        auto e = c.next_event(250);
+        if (e.kind == RelayClient::Event::Kind::Envelope) out.push_back(e.envelope.envelope);
+        else if (e.kind == RelayClient::Event::Kind::CollectEnd || e.kind == RelayClient::Event::Kind::Closed) break;
+    }
+    return out;
+}
+
 static Bytes bundle_of(User& u) {
     as(u);
     auto cfg = u.keys->load_mailbox_config();
@@ -701,6 +719,103 @@ int main(int argc, char** argv) {
         }), "it arrives in their one-to-one chat");
         CHECK(!got(alice, hiking, "a private word") && !got(carol, hiking, "a private word"), "and in no group");
         CHECK(alice.engine->chats().size() >= 3, "the contact list of chats is unaffected by groups");
+    }
+
+
+    std::cout << "13. Passing things on through the creator: what it can see, and who may ask\n";
+    {
+        // Three strangers to each other, all Alice's contacts: e1 joins, e2 is offline, e3 is not in the group.
+        User& frank = *users["e1"];
+        User& gina = *users["e2"];
+        User& outsider = *users["e3"];
+        gina.engine.reset();
+        outsider.engine.reset();
+        std::string err, gid;
+        CHECK(alice.engine->create_group("Forwarding", {frank.fp, gina.fp}, gid, err), "Alice makes a group with e1 and e2, who don't know each other (e2's app is closed)");
+        const Bytes group_id = *hex_to_bytes(gid);
+        const Bytes f = fp_raw(frank), g = fp_raw(gina);
+        CHECK(wait_for([&] { return find_invite(frank, gid).has_value(); }, 30000) && frank.engine->accept_group_invite(gid, err), "e1 joins");
+
+        // e1 now makes a token for e2 and sends it, sealed, to Alice. Alice deposits it in e2's mailbox.
+        auto sealed_for_gina = [&] {
+            std::vector<Bytes> found;
+            for (auto& env : mailbox_envelopes(gina)) found.push_back(env);
+            return found;
+        };
+        bool arrived = wait_for([&] { return sealed_for_gina().size() >= 2; }, 60000);
+        CHECK(arrived, "e2's mailbox ends up holding Alice's invitation and the token e1 made for her");
+        auto envelopes = sealed_for_gina();
+        as(alice);
+        const Bytes alice_kem = alice.keys->load_private_kem(), gina_kem = gina.keys->load_private_kem();
+        int alice_can_open = 0, gina_can_open = 0, grants_from_frank = 0;
+        for (auto& env : envelopes) {
+            if (chat::open_envelope(env, alice_kem)) alice_can_open++;
+            if (auto inner = chat::open_envelope(env, gina_kem)) {
+                gina_can_open++;
+                for (auto& raw : inner->records)
+                    if (auto sr = chat::parse_record(raw))
+                        if (sr->record.type == chat::RecordType::TokenGrant && sr->record.sender == f && sr->record.payload.size() == 32 && sr->record.conversation_id == group_id) grants_from_frank++;
+            }
+        }
+        CHECK(alice_can_open == 0, "Alice, who passed it on, cannot open any of what is in e2's mailbox: everything is sealed to e2 alone");
+        CHECK(gina_can_open == static_cast<int>(envelopes.size()) && grants_from_frank == 1, "e2 can open all of it, and one is a 32-byte send token signed by e1 for this group");
+
+        // Who may ask Alice to deposit something? Only a member, for another member, in a group Alice made.
+        auto forward = [&](User& signer, const Bytes& target, const Bytes& group, const std::vector<Bytes>& members, const Bytes& sealed) {
+            chat::Record r = base_record(group, chat::recipients_hash_for(members), chat::RecordType::Forward);
+            r.payload = chat::forward_payload(target, sealed);
+            chat::Inner in;
+            in.records = {sign_as(signer, r)};
+            return in;
+        };
+        as(gina);
+        chat::Inner junk;
+        junk.records = {Bytes(10, 1)};
+        const Bytes sealed = chat::seal_envelope(junk, gina.keys->load_public_kem());  // content doesn't matter: Alice deposits it unread
+        const std::vector<Bytes> trio = {a, f, g};
+
+        const size_t gina_before = mailbox_envelopes(gina).size();
+        const size_t outsider_before = mailbox_envelopes(outsider).size();
+        CHECK(send_envelope(alice, token_for(frank, alice), forward(frank, g, group_id, trio, sealed)), "(setup) e1 asks Alice to pass an envelope to e2");
+        CHECK(wait_for([&] { return mailbox_envelopes(gina).size() == gina_before + 1; }, 30000), "a member asking for another member: Alice deposits it in e2's mailbox");
+        const size_t gina_after = mailbox_envelopes(gina).size();
+
+        send_envelope(alice, token_for(frank, alice), forward(frank, fp_raw(outsider), group_id, trio, sealed));
+        run_for(2500);
+        CHECK(mailbox_envelopes(outsider).size() == outsider_before, "asking for someone who is not in the group: nothing is deposited for them");
+
+        // Only the group's creator passes things on. Bob can write to Carol (they are contacts), so if he
+        // obeyed a Forward from Alice, an envelope would show up in Carol's mailbox.
+        carol.engine.reset();
+        as(carol);
+        chat::Inner for_carol;
+        for_carol.records = {Bytes(10, 1)};
+        const Bytes sealed_for_carol = chat::seal_envelope(for_carol, carol.keys->load_public_kem());
+        const size_t carol_before = mailbox_envelopes(carol).size();
+        send_envelope(bob, token_for(alice, bob), forward(alice, c, *hex_to_bytes(hiking), {a, b, c}, sealed_for_carol));
+        run_for(2500);
+        CHECK(mailbox_envelopes(carol).size() == carol_before, "asking a member who did not make the group to pass something on does nothing, even though he could reach the target");
+        restart_engine(carol);
+
+        send_envelope(alice, token_for(frank, alice), forward(frank, f, group_id, trio, sealed));
+        run_for(2500);
+        CHECK(mailbox_envelopes(gina).size() == gina_after && mailbox_envelopes(outsider).size() == outsider_before, "a member asking Alice to deposit something for themselves does nothing either");
+    }
+
+    std::cout << "14. A flood of invitations is bounded\n";
+    {
+        for (auto& inv : bob.engine->group_invites()) bob.engine->decline_group_invite(inv.id);
+        const Bytes ids_for_bob_hash = chat::recipients_hash_for({a, b, c});
+        for (int i = 0; i < 55; i++) {
+            chat::Inner in;
+            in.records = {creation_record(alice, CryptoEngine::random_bytes(16), "Flood " + std::to_string(i), {a, b, c}, ids_for_bob_hash)};
+            send_envelope(bob, token_for(alice, bob), in);
+        }
+        CHECK(wait_for([&] { return bob.engine->group_invites().size() == 50; }, 60000), "55 invitations from one contact: Bob keeps 50");
+        run_for(2000);
+        CHECK(bob.engine->group_invites().size() == 50, "and the rest are dropped, not queued up behind them");
+        for (auto& inv : bob.engine->group_invites()) bob.engine->decline_group_invite(inv.id);
+        CHECK(bob.engine->group_invites().empty(), "(cleaned up)");
     }
 
     srv.stop();
