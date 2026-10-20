@@ -106,11 +106,14 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     cards_button_ = new QPushButton("Cards issued…", this);
     new_group_button_ = new QPushButton("New group…", this);
     invites_button_ = new QPushButton("Group invitations", this);
+    relay_invite_button_ = new QPushButton("Relay invite…", this);
+    relay_invite_button_->setToolTip("Make a one-time invite so a friend can use this relay. You are vouching for them.");
     top->addWidget(status_label_, 1);
     top->addWidget(setup_button_);
     top->addWidget(requests_button_);
     top->addWidget(invites_button_);
     top->addWidget(new_group_button_);
+    top->addWidget(relay_invite_button_);
     top->addWidget(cards_button_);
     root->addLayout(top);
 
@@ -185,6 +188,7 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         requests_button_->setEnabled(false);
         cards_button_->setEnabled(false);
         new_group_button_->setEnabled(false);
+        relay_invite_button_->setEnabled(false);
         invites_button_->setEnabled(false);
         input_->setEnabled(false);
         send_button_->setEnabled(false);
@@ -199,6 +203,7 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(requests_button_, &QPushButton::clicked, this, [this] { review_requests(); });
     connect(cards_button_, &QPushButton::clicked, this, [this] { show_cards_issued(); });
     connect(new_group_button_, &QPushButton::clicked, this, [this] { create_group_dialog(); });
+    connect(relay_invite_button_, &QPushButton::clicked, this, [this] { make_relay_invite(); });
     connect(invites_button_, &QPushButton::clicked, this, [this] { review_group_invites(); });
     connect(revoke_button_, &QPushButton::clicked, this, [this] { revoke_access_for_current(); });
     connect(people_button_, &QPushButton::clicked, this, [this] { people_clicked(); });
@@ -255,6 +260,7 @@ void ChatWidget::refresh_if_changed() {
     setup_button_->setVisible(!engine_->is_set_up());
     cards_button_->setEnabled(engine_->is_set_up());
     new_group_button_->setEnabled(engine_->is_set_up());
+    relay_invite_button_->setEnabled(engine_->is_set_up());
     const size_t pending = engine_->requests().size();
     requests_button_->setText(pending ? QString("Message requests (%1)").arg(static_cast<qulonglong>(pending)) : QString("Message requests"));
     const size_t invitations = engine_->group_invites().size();
@@ -787,6 +793,29 @@ void ChatWidget::create_group_dialog() {
         select_group(created_id);
         refresh();
     }
+}
+
+// A one-time invite for a friend to create their own mailbox on this relay. Making it vouches for them.
+void ChatWidget::make_relay_invite() {
+    std::string invite, error;
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool ok = engine_->create_relay_invite(invite, error);
+    QGuiApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::warning(this, "Relay invite", qstr(error));
+        return;
+    }
+    QString text = "Give this to one friend. They paste it into \"Set up messaging\". It works once and expires after 14 days.\n\n" +
+                   qstr(invite) +
+                   "\n\nYou are vouching for whoever uses it: the relay's operator can see that you invited them.\n\n"
+                   "The invite names the relay by the address you use. If your friend reaches the relay a different way, "
+                   "change the address part (after pqft-relay://) before sending it.";
+    QMessageBox box(QMessageBox::Information, "Relay invite", text, QMessageBox::NoButton, this);
+    plain_box(box);
+    QAbstractButton* copy = box.addButton("Copy invite", QMessageBox::AcceptRole);
+    box.addButton("Close", QMessageBox::RejectRole);
+    box.exec();
+    if (box.clickedButton() == copy) QGuiApplication::clipboard()->setText(qstr(invite));
 }
 
 void ChatWidget::review_group_invites() {

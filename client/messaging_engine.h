@@ -56,6 +56,12 @@ public:
     bool is_set_up() const;
     // Registers a mailbox with the relay named in the invite (whose ID is pinned from then on).
     bool setup(const RelayInvite& invite, std::string& error);
+
+    // Asks the relay for one single-use invite to give a friend, as a ready-to-paste string. The relay
+    // limits how many a member may make, and remembers that this mailbox vouched for whoever uses it.
+    // The string names the relay by the address this app uses; a friend who reaches the relay another
+    // way needs that part changed. Talks to the relay, so call it from the UI thread only when that's fine.
+    bool create_relay_invite(std::string& invite, std::string& error);
     // Shown in the identity bundles this user hands out. Optional.
     void set_display_name(const std::string& name);
 

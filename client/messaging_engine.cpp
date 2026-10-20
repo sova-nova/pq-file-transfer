@@ -260,6 +260,23 @@ bool MessagingEngine::setup(const RelayInvite& invite, std::string& error) {
     return true;
 }
 
+bool MessagingEngine::create_relay_invite(std::string& invite, std::string& error) {
+    auto config = keys_.load_mailbox_config();
+    if (!config) {
+        error = "Set up messaging first";
+        return false;
+    }
+    RelayClient client;
+    Bytes code;
+    if (!connect_authenticated(client, error) || !client.create_invite(code, error)) return false;
+    RelayInvite result;
+    result.server = ServerAddress{config->host, config->port};
+    result.relay_id = config->relay_id;
+    result.invite = std::move(code);
+    invite = build_relay_invite(result);
+    return true;
+}
+
 bool MessagingEngine::make_card(const std::string& label, std::string& card, std::string& error) {
     auto config = keys_.load_mailbox_config();
     if (!config) {

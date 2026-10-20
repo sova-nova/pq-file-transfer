@@ -24,6 +24,10 @@ struct RelayLimits {
     int rate_limit_per_minute = 120;                   // deposits per send token, and per client address
     int sweep_seconds = 60;                            // how often expired envelopes are removed
     int64_t invite_lifetime_seconds = 14ll * 24 * 3600;
+    // Members vouching for friends: how many unused invites one mailbox may have at once (0 turns
+    // this off, leaving only the operator's invites), and how many people it may ever invite.
+    size_t member_invites_outstanding = 3;
+    size_t member_invites_total = 10;
     int idle_timeout_seconds = 180;                    // clients ping every minute or so
     int poll_millis = 250;                             // how often a connected owner is checked for news
 };
@@ -60,6 +64,12 @@ public:
 
     // Makes a single-use invite and returns it as 32 lowercase hex characters.
     std::string create_invite();
+
+    // Who is on this relay and who vouched for them (operator tools).
+    std::vector<RelayStore::Member> members() { return store_->members(); }
+    // Removes a mailbox (and, if `with_invitees`, everyone it invited, and theirs in turn) together
+    // with their unused invites. Returns how many mailboxes were removed.
+    size_t remove_mailbox(const Bytes& mailbox_id, bool with_invitees);
 
     // Runs one client session to completion. `hello_payload` is the already-received first
     // message. Returns when the client disconnects or breaks the protocol.

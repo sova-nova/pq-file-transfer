@@ -161,6 +161,18 @@ It prints a one-time code and a ready-to-paste invite string, `pqft-relay://10.8
 
 It also prints `Relay state:`, the folder it used, and the Relay ID, which must equal the one the running relay printed at startup. If the storage has no relay identity yet, `--create-invite` refuses instead of silently creating a second identity (a different `--storage` is the usual cause; clients would report "does not match the one you pinned"). Add `--allow-new-identity` only for a brand-new relay that has never been started.
 
+**Members vouching for friends.** You don't have to make every invite yourself. Anyone with a mailbox on your relay can press **Relay invite…** in the app to make a one-time invite for a friend. The relay records who vouched for each person, so there is always someone accountable, and a stranger who merely knows your relay's address can't get an invite. By default one member may have 3 unused invites at once and may invite 10 people in all (`--member-invites` and `--member-invites-total`; `--member-invites 0` turns this off, leaving only your own). An invite is a secret, and like a send token it crosses the network unencrypted between the app and the relay, so keep the relay on a network you trust, such as the WireGuard tunnel.
+
+To see who is on the relay and who vouched for whom, or to undo it:
+
+```bash
+./pq-server --storage /var/lib/pq-relay --list-mailboxes
+./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6            # just that mailbox
+./pq-server --storage /var/lib/pq-relay --remove-mailbox a1b2c3d4e5f6 --with-invitees   # and everyone it invited
+```
+
+The first columns of `--list-mailboxes` are the IDs to use (at least 8 characters). Removing a mailbox deletes its queued messages and its owner can no longer sign in. A relay with existing mailboxes upgrades its database automatically the first time the new version starts.
+
 **Checking it from the outside.** `pq-relay-check` confirms a relay is reachable and genuine from wherever you run it, through the tunnel and the firewall:
 
 ```bash
@@ -179,6 +191,11 @@ pq-relay-check 'pqft-relay://...'            # full round trip using one invite 
 | `--rate-limit N` | 120 | Deposits per minute, per send token and per client address |
 | `--sweep-seconds N` | 60 | How often expired envelopes are removed |
 | `--allow-new-identity` | off | With `--create-invite`: create the relay's identity if the storage has none |
+| `--member-invites N` | 3 | Unused invites one member may have at once; 0 turns member invites off |
+| `--member-invites-total N` | 10 | Most people one member may ever invite |
+| `--list-mailboxes` | | Show every mailbox, who vouched for it and what is queued, then exit |
+| `--remove-mailbox ID` | | Remove a mailbox (ID prefix of 8+ characters), then exit |
+| `--with-invitees` | | With `--remove-mailbox`: also everyone it invited, and theirs |
 
 A systemd unit for the relay (the `ExecStart` line is the important part):
 

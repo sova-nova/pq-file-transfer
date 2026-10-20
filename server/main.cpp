@@ -493,7 +493,40 @@ static void print_usage(const char* prog) {
               << "  --public-address HOST:PORT  put this address in the printed invite string\n"
               << "  --mailbox-quota-kib N       queued bytes allowed per mailbox (default 65536)\n"
               << "  --rate-limit N              deposits per minute per send token and per address (default 120)\n"
-              << "  --sweep-seconds N           how often expired envelopes are removed (default 60)\n";
+              << "  --sweep-seconds N           how often expired envelopes are removed (default 60)\n"
+              << "\nMembers vouching for friends: anyone on the relay can make single-use invites from the app.\n"
+              << "The relay records who vouched for whom.\n"
+              << "  --member-invites N          unused invites one member may have at once (default 3; 0 turns\n"
+              << "                              this off so only your own --create-invite invites exist)\n"
+              << "  --member-invites-total N    most people one member may ever invite (default 10)\n"
+              << "  --list-mailboxes            show every mailbox, who vouched for it and what is queued, and exit\n"
+              << "  --remove-mailbox ID         remove a mailbox (an ID prefix of at least 8 characters from\n"
+              << "                              --list-mailboxes) and exit; its owner can no longer sign in\n"
+              << "  --with-invitees             with --remove-mailbox: also everyone it invited, and theirs\n";
+}
+
+// A unix time as "YYYY-MM-DD HH:MM" (UTC), without the platform's time functions.
+static std::string format_time(int64_t t) {
+    int64_t days = t / 86400, secs = t % 86400;
+    if (secs < 0) { secs += 86400; days--; }
+    // Civil date from a day count (Howard Hinnant's algorithm).
+    days += 719468;
+    const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const int64_t doe = days - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp = (5 * doy + 2) / 153;
+    const int64_t day = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t month = mp < 10 ? mp + 3 : mp - 9;
+    const int64_t year = yoe + era * 400 + (month <= 2 ? 1 : 0);
+    char buf[96];  // roomy enough that the compiler can see no field can overflow it
+    std::snprintf(buf, sizeof(buf), "%04lld-%02lld-%02lld %02lld:%02lld", static_cast<long long>(year), static_cast<long long>(month),
+                  static_cast<long long>(day), static_cast<long long>(secs / 3600), static_cast<long long>(secs % 3600 / 60));
+    return buf;
+}
+
+static std::string short_mailbox(const std::vector<uint8_t>& id) {
+    return bytes_to_hex(id.data(), id.size()).substr(0, 12);
 }
 
 int main(int argc, char* argv[]) {
@@ -508,6 +541,8 @@ int main(int argc, char* argv[]) {
     g_storage_dir = (env_dir && *env_dir) ? fs::path(env_dir) : default_storage_dir();
     bool storage_explicit = env_dir && *env_dir;
     bool allow_new_identity = false;
+    bool list_mailboxes = false, with_invitees = false;
+    std::string remove_prefix;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -525,6 +560,16 @@ int main(int argc, char* argv[]) {
                 create_invite = true;
             } else if (arg == "--allow-new-identity") {
                 allow_new_identity = true;
+            } else if (arg == "--list-mailboxes") {
+                list_mailboxes = true;
+            } else if (arg == "--remove-mailbox" && has_value) {
+                remove_prefix = argv[++i];
+            } else if (arg == "--with-invitees") {
+                with_invitees = true;
+            } else if (arg == "--member-invites" && has_value) {
+                limits.member_invites_outstanding = std::stoull(argv[++i]);
+            } else if (arg == "--member-invites-total" && has_value) {
+                limits.member_invites_total = std::stoull(argv[++i]);
             } else if (arg == "--public-address" && has_value) {
                 public_address = argv[++i];
             } else if (arg == "--mailbox-quota-kib" && has_value) {
@@ -570,6 +615,11 @@ int main(int argc, char* argv[]) {
                   << "different storage folder has a different relay identity, and an invite made by one is useless\n"
                   << "to another. Pass the same absolute --storage every time, and keep it out of /tmp.\n";
     }
+    if ((list_mailboxes || !remove_prefix.empty()) && !relay::RelayService::identity_exists(relay_dir)) {
+        std::cerr << "No relay has run in " << relay_dir.string() << ", so there is nothing to " << (list_mailboxes ? "list" : "remove")
+                  << ". This is probably not the --storage your relay uses.\n";
+        return 1;
+    }
     if (create_invite && !allow_new_identity && !relay::RelayService::identity_exists(relay_dir)) {
         std::cerr << "No relay identity found in " << relay_dir.string() << ".\n"
                   << "This usually means --storage is not the folder your running relay uses. An invite made here\n"
@@ -591,6 +641,45 @@ int main(int argc, char* argv[]) {
         std::cerr << "Created a new relay identity in " << relay_dir.string() << ".\n"
                   << "Back that folder up: if relay_private.key is lost, every client reports that the relay changed.\n";
 
+    if (list_mailboxes) {
+        auto members = g_relay->members();
+        std::cout << "Mailboxes on this relay: " << members.size() << "\n";
+        if (members.empty()) return 0;
+        std::cout << "  ID            Created           Invited by    Queued\n";
+        for (const auto& m : members) {
+            std::string by = "operator";
+            if (!m.invited_by.empty()) {
+                by = short_mailbox(m.invited_by);
+                bool known = false;
+                for (const auto& other : members) known |= other.id == m.invited_by;
+                if (!known) by += "*";
+            }
+            std::string by_padded = by + std::string(by.size() < 12 ? 12 - by.size() : 0, ' ');
+            std::cout << "  " << short_mailbox(m.id) << "  " << format_time(m.created_at) << "  " << by_padded << "  " << m.envelopes << "\n";
+        }
+        std::cout << "(* = the mailbox that vouched for this one has been removed)\n";
+        return 0;
+    }
+    if (!remove_prefix.empty()) {
+        std::string prefix;
+        for (char c : remove_prefix) prefix += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (prefix.size() < 8) { std::cerr << "Give at least 8 characters of the mailbox ID (see --list-mailboxes).\n"; return 1; }
+        std::vector<uint8_t> found;
+        size_t matches = 0;
+        for (const auto& m : g_relay->members())
+            if (bytes_to_hex(m.id.data(), m.id.size()).rfind(prefix, 0) == 0) { found = m.id; matches++; }
+        if (matches != 1) {
+            std::cerr << (matches ? "That prefix matches several mailboxes; give more characters.\n" : "No mailbox starts with that.\n");
+            return 1;
+        }
+        size_t invited = 0;
+        for (const auto& m : g_relay->members()) invited += m.invited_by == found ? 1 : 0;
+        size_t removed = g_relay->remove_mailbox(found, with_invitees);
+        std::cout << "Removed " << removed << " mailbox(es). Their owners can no longer sign in, and anything queued for them is gone.\n";
+        if (!with_invitees && invited)
+            std::cout << invited << " mailbox(es) it invited were left alone; add --with-invitees to remove those too.\n";
+        return 0;
+    }
     if (create_invite) {
         std::string code = g_relay->create_invite();
         std::string grouped;

@@ -25,7 +25,26 @@ public:
     RelayStore& operator=(const RelayStore&) = delete;
 
     // --- Invites: single-use permission to create a mailbox (only the hash is stored) ---
-    void add_invite(const Bytes& invite_hash, int64_t expires_at);
+    void add_invite(const Bytes& invite_hash, int64_t expires_at);  // made by the operator
+
+    // An invite a member vouches for. The relay remembers who made it, and so who each new
+    // mailbox was invited by.
+    enum class IssueResult { Ok, NoSuchMailbox, TooManyOutstanding, TooManyIssued };
+    // `max_outstanding`: unused, unexpired invites this member may have at once. `max_total`: all the
+    // people they may ever invite (used plus outstanding).
+    IssueResult add_member_invite(const Bytes& issuer_mailbox, const Bytes& invite_hash, int64_t now, int64_t expires_at,
+                                  size_t max_outstanding, size_t max_total);
+
+    struct Member {
+        Bytes id;
+        int64_t created_at = 0;
+        Bytes invited_by;      // the mailbox that vouched for them; empty for an operator invite
+        size_t envelopes = 0;  // queued now
+    };
+    std::vector<Member> members();  // oldest first
+    // Removes a mailbox with its tokens, its queued envelopes and the unused invites it made.
+    // True if it existed. (Mailboxes it invited stay; see RelayService::remove_mailbox.)
+    bool delete_mailbox(const Bytes& mailbox_id);
 
     // --- Mailboxes ---
     enum class RegisterResult { Ok, BadInvite, MailboxExists, LimitReached };

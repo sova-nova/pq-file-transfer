@@ -209,7 +209,57 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 2, "the schema version is now 2");
+        CHECK(version == 3, "the schema version is now 3");
+        auto ms = migrated.members();
+        CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
+        CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
+    }
+
+    std::cout << "Members vouching for friends\n";
+    {
+        // The current release's database: token hashes, but nobody has been recorded as vouching yet.
+        fs::path v2_db = dir / "v2.db";
+        sqlite3* raw = nullptr;
+        sqlite3_open_v2(v2_db.string().c_str(), &raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+        using R = RelayStore::RegisterResult;
+        const std::string v2_schema =
+            "CREATE TABLE invites(hash BLOB PRIMARY KEY, expires_at INTEGER NOT NULL);"
+            "CREATE TABLE mailboxes(id BLOB PRIMARY KEY, access_public_key BLOB NOT NULL, created_at INTEGER NOT NULL);"
+            "CREATE TABLE tokens(mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE, hash BLOB NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(mailbox_id, hash));"
+            "CREATE TABLE envelopes(seq INTEGER PRIMARY KEY AUTOINCREMENT, id BLOB NOT NULL UNIQUE, mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE, size INTEGER NOT NULL, envelope BLOB NOT NULL, deposited_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, token_hash BLOB);"
+            "CREATE INDEX envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
+            "CREATE INDEX envelopes_by_expiry ON envelopes(expires_at);"
+            "INSERT INTO mailboxes VALUES(x'01010101010101010101010101010101', x'AA', 100);"
+            "INSERT INTO invites VALUES(x'" + std::string(64, 'E') + "', 99999999);"
+            "PRAGMA user_version=2;";
+        sqlite3_exec(raw, v2_schema.c_str(), nullptr, nullptr, nullptr);
+        sqlite3_close(raw);
+
+        RelayStore s(v2_db);
+        auto old_members = s.members();
+        CHECK(old_members.size() == 1 && old_members[0].invited_by.empty(), "a version 2 database opens, its mailbox shown as an operator invite");
+        CHECK(s.register_mailbox(Bytes(32, 0xEE), id(2), id(0x55, 64), id(0xAA, 32), 1000, 10) == R::Ok, "an invite the operator made before the upgrade still works");
+
+        Bytes box1(16, 1), box2 = id(2);
+        CHECK(s.add_member_invite(id(99), id(0x81, 32), 1000, 5000, 2, 3) == RelayStore::IssueResult::NoSuchMailbox, "only an existing mailbox can make invites");
+        CHECK(s.add_member_invite(box1, id(0x81, 32), 1000, 5000, 2, 3) == RelayStore::IssueResult::Ok, "a mailbox makes an invite");
+        CHECK(s.add_member_invite(box1, id(0x82, 32), 1000, 5000, 2, 3) == RelayStore::IssueResult::Ok, "and a second");
+        CHECK(s.add_member_invite(box1, id(0x83, 32), 1000, 5000, 2, 3) == RelayStore::IssueResult::TooManyOutstanding, "but not a third unused one");
+        CHECK(s.add_member_invite(box1, id(0x83, 32), 5001, 9000, 2, 3) == RelayStore::IssueResult::Ok, "unused invites that have expired stop counting");
+        CHECK(s.register_mailbox(id(0x83, 32), id(3), id(0x55, 64), id(0xAA, 32), 5002, 10) == R::Ok, "the friend registers with the third");
+        auto after = s.members();
+        Bytes invited;
+        for (auto& m : after) if (m.id == id(3)) invited = m.invited_by;
+        CHECK(invited == box1, "the new mailbox is recorded as invited by the one who made the invite");
+        CHECK(s.add_member_invite(box1, id(0x84, 32), 5003, 9000, 5, 1) == RelayStore::IssueResult::TooManyIssued, "the lifetime limit counts people already invited");
+        CHECK(s.add_member_invite(box2, id(0x85, 32), 5003, 9000, 5, 1) == RelayStore::IssueResult::Ok, "(each mailbox has its own allowance)");
+
+        s.deposit(id(3), id(0x61), envelope(5), id(0x7C, 32), 5100, 1000, 1 << 20);
+        CHECK(s.delete_mailbox(id(3)) && !s.access_key(id(3)) && s.envelope_count(id(3)) == 0 && !s.token_valid(id(3), id(0xAA, 32)),
+              "removing a mailbox takes its keys, tokens and queued envelopes with it");
+        CHECK(s.delete_mailbox(box1) && s.add_member_invite(box2, id(0x86, 32), 5200, 9000, 5, 5) == RelayStore::IssueResult::Ok, "removing a mailbox also removes the unused invites it made (and others are unaffected)");
+        CHECK(s.register_mailbox(id(0x82, 32), id(4), id(0x55, 64), id(0xAA, 32), 5300, 10) == R::BadInvite, "...so an invitation it left behind no longer works");
+        CHECK(!s.delete_mailbox(id(77)), "removing a mailbox that doesn't exist reports that");
     }
 
     fs::remove_all(dir);

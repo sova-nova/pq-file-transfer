@@ -818,6 +818,35 @@ int main(int argc, char** argv) {
         CHECK(bob.engine->group_invites().empty(), "(cleaned up)");
     }
 
+
+    std::cout << "15. A member vouches for a friend from the app\n";
+    {
+        std::string text, err;
+        CHECK(alice.engine->create_relay_invite(text, err), "Alice makes an invite for a friend (" + err + ")");
+        auto invite = parse_relay_invite(text);
+        CHECK(invite && invite->relay_id == RELAY_ID && invite->server.port == PORT && invite->invite.size() == 16, "it names this relay: its pinned identity and address");
+        User& newbie = make_user("newbie");
+        bool joined = false;
+        for (int attempt = 0; attempt < 40 && invite && !joined; attempt++) {
+            joined = newbie.engine->setup(*invite, err);
+            if (!joined) run_for(2000);  // the relay limits registrations per minute; a refused try doesn't burn the invite
+        }
+        CHECK(joined && newbie.engine->is_set_up(), "the friend sets up messaging with it");
+        User& late = make_user("late");
+        std::string reuse_err;
+        CHECK(!late.engine->setup(*invite, reuse_err) && has(reuse_err, "used"), "and nobody else can use the same invite: " + reuse_err);
+        int made = 0;
+        std::string last_err;
+        for (int i = 0; i < 5; i++) {
+            std::string t;
+            if (alice.engine->create_relay_invite(t, last_err)) made++;
+            else break;
+        }
+        CHECK(made == 3 && has(last_err, "3 unused"), "by default a member may have 3 unused invites at once (made " + std::to_string(made) + "): " + last_err);
+        users.erase("newbie");
+        users.erase("late");
+    }
+
     srv.stop();
     std::error_code ec;
     fs::remove_all(ROOT, ec);

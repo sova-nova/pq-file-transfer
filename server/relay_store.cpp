@@ -27,11 +27,13 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
     exec(db_,
          "CREATE TABLE IF NOT EXISTS invites("
          "  hash BLOB PRIMARY KEY,"
-         "  expires_at INTEGER NOT NULL);"
+         "  expires_at INTEGER NOT NULL,"
+         "  issued_by BLOB);"
          "CREATE TABLE IF NOT EXISTS mailboxes("
          "  id BLOB PRIMARY KEY,"
          "  access_public_key BLOB NOT NULL,"
-         "  created_at INTEGER NOT NULL);"
+         "  created_at INTEGER NOT NULL,"
+         "  invited_by BLOB);"
          "CREATE TABLE IF NOT EXISTS tokens("
          "  mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,"
          "  hash BLOB NOT NULL,"
@@ -49,15 +51,20 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "CREATE INDEX IF NOT EXISTS envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at)");
 
-    // Schema versions: 1 = the first release (envelopes without token_hash), 2 = current.
-    // A brand-new database is created at the current shape and starts at 0.
+    // Schema versions: 1 = the first release (envelopes without token_hash), 2 = token hashes,
+    // 3 = current (invites and mailboxes remember who vouched). A brand-new database is created at
+    // the current shape and starts at 0.
     int64_t version = 0;
     {
         Stmt v(db_, "PRAGMA user_version");
         if (v.step()) version = v.column_i64(0);
     }
     if (version == 1) exec(db_, "ALTER TABLE envelopes ADD COLUMN token_hash BLOB");
-    if (version < 2) exec(db_, "PRAGMA user_version=2");
+    if (version == 1 || version == 2) {
+        exec(db_, "ALTER TABLE invites ADD COLUMN issued_by BLOB");
+        exec(db_, "ALTER TABLE mailboxes ADD COLUMN invited_by BLOB");
+    }
+    if (version < 3) exec(db_, "PRAGMA user_version=3");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -73,10 +80,12 @@ RelayStore::RegisterResult RelayStore::register_mailbox(const Bytes& invite_hash
     std::lock_guard<std::mutex> lock(mutex_);
     Transaction tx(db_);
 
+    Bytes issued_by;  // who vouched for this invite; empty if the operator made it
     {
-        Stmt invite(db_, "SELECT expires_at FROM invites WHERE hash = ?");
+        Stmt invite(db_, "SELECT expires_at, issued_by FROM invites WHERE hash = ?");
         invite.blob(1, invite_hash);
         if (!invite.step() || invite.column_i64(0) <= now) return RegisterResult::BadInvite;
+        issued_by = invite.column_blob(1);
     }
     {
         Stmt count(db_, "SELECT COUNT(*) FROM mailboxes");
@@ -88,13 +97,71 @@ RelayStore::RegisterResult RelayStore::register_mailbox(const Bytes& invite_hash
         if (exists.step()) return RegisterResult::MailboxExists;
     }
 
-    Stmt(db_, "INSERT INTO mailboxes(id, access_public_key, created_at) VALUES(?, ?, ?)")
-        .blob(1, mailbox_id).blob(2, access_public_key).i64(3, now).step();
+    if (issued_by.empty())
+        Stmt(db_, "INSERT INTO mailboxes(id, access_public_key, created_at) VALUES(?, ?, ?)")
+            .blob(1, mailbox_id).blob(2, access_public_key).i64(3, now).step();
+    else
+        Stmt(db_, "INSERT INTO mailboxes(id, access_public_key, created_at, invited_by) VALUES(?, ?, ?, ?)")
+            .blob(1, mailbox_id).blob(2, access_public_key).i64(3, now).blob(4, issued_by).step();
     Stmt(db_, "INSERT INTO tokens(mailbox_id, hash, created_at) VALUES(?, ?, ?)")
         .blob(1, mailbox_id).blob(2, token_hash).i64(3, now).step();
     Stmt(db_, "DELETE FROM invites WHERE hash = ?").blob(1, invite_hash).step();
     tx.commit();
     return RegisterResult::Ok;
+}
+
+RelayStore::IssueResult RelayStore::add_member_invite(const Bytes& issuer_mailbox, const Bytes& invite_hash, int64_t now,
+                                                      int64_t expires_at, size_t max_outstanding, size_t max_total) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    {
+        Stmt exists(db_, "SELECT 1 FROM mailboxes WHERE id = ?");
+        exists.blob(1, issuer_mailbox);
+        if (!exists.step()) return IssueResult::NoSuchMailbox;
+    }
+    size_t outstanding = 0, used = 0;
+    {
+        Stmt s(db_, "SELECT COUNT(*) FROM invites WHERE issued_by = ? AND expires_at > ?");
+        s.blob(1, issuer_mailbox).i64(2, now);
+        if (s.step()) outstanding = static_cast<size_t>(s.column_i64(0));
+    }
+    {
+        Stmt s(db_, "SELECT COUNT(*) FROM mailboxes WHERE invited_by = ?");
+        s.blob(1, issuer_mailbox);
+        if (s.step()) used = static_cast<size_t>(s.column_i64(0));
+    }
+    if (outstanding >= max_outstanding) return IssueResult::TooManyOutstanding;
+    if (outstanding + used >= max_total) return IssueResult::TooManyIssued;
+    Stmt(db_, "INSERT INTO invites(hash, expires_at, issued_by) VALUES(?, ?, ?)")
+        .blob(1, invite_hash).i64(2, expires_at).blob(3, issuer_mailbox).step();
+    tx.commit();
+    return IssueResult::Ok;
+}
+
+std::vector<RelayStore::Member> RelayStore::members() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT m.id, m.created_at, m.invited_by, (SELECT COUNT(*) FROM envelopes e WHERE e.mailbox_id = m.id) "
+                "FROM mailboxes m ORDER BY m.created_at, m.id");
+    std::vector<Member> out;
+    while (s.step()) {
+        Member m;
+        m.id = s.column_blob(0);
+        m.created_at = s.column_i64(1);
+        m.invited_by = s.column_blob(2);
+        m.envelopes = static_cast<size_t>(s.column_i64(3));
+        out.push_back(std::move(m));
+    }
+    return out;
+}
+
+bool RelayStore::delete_mailbox(const Bytes& mailbox_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    Stmt(db_, "DELETE FROM invites WHERE issued_by = ?").blob(1, mailbox_id).step();
+    Stmt(db_, "DELETE FROM mailboxes WHERE id = ?").blob(1, mailbox_id).step();  // tokens and envelopes go with it
+    const bool existed = sqlite3_changes(db_) > 0;
+    tx.commit();
+    return existed;
 }
 
 std::optional<Bytes> RelayStore::access_key(const Bytes& mailbox_id) {

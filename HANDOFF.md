@@ -49,7 +49,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - Code is compiled with `-Wall -Wextra -Wpedantic -Werror` against a fake liboqs and a small SQLite header shim, and the full suites run against those.
 - The Qt code (`chat_widget`, `main_window`) is only type-checked against a hand-written stub of the Qt classes. That catches typos and API mismatches in our own code, not Qt misuse.
 - **The first CI run is the real test** for the GUI, CMake, Windows and the real liboqs. If it fails, paste the compiler error.
-- Test totals at last run: **1,040 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 141, history 156, relay_protocol 61, relay_store 60, e2e 48, relay 77, chat 88, relay_setup 30, group 135). The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
+- Test totals at last run: **1,081 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 141, history 156, relay_protocol 61, relay_store 77, e2e 48, relay 96, chat 88, relay_setup 30, group 140). The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
 
 ## Operational facts and gotchas
 
@@ -70,11 +70,22 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 
 - Confirm M2 on real hardware: set up two clients against the relay, exchange cards, send, check message requests, receipts, revoking, and relay restart.
 - Fix any GUI compile errors from the first CI run.
-- An in-app way to create invites (today only the operator can, from the command line).
+- ~~An in-app way to create invites.~~ Done as a vouching system (see "Member-issued relay invites" below). Windows code signing is deliberately not done (friends-only distribution; a SmartScreen warning is accepted); macOS is deferred (nobody uses it).
 - Storage layout for file transfers: one file per transfer vs per 64 KB chunk (noted earlier).
 - macOS build in CI; Windows code signing (SmartScreen warning).
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
+
+## Member-issued relay invites
+
+Anyone with a mailbox on a relay can make single-use invites for friends; the relay records who vouched for whom. Chosen over open registration (an invite handed to anyone who asks is no invite; per-address rate limits are easy to dodge and punish shared addresses) and over operator approval (needs the operator online).
+
+- **Protocol:** `RELAY_INVITE_CREATE` (0x32, owner-only, empty payload) and `RELAY_INVITE_OK` (0x33, the 16-byte invite). Additive: an older relay answers "Unexpected message" and closes, so the app shows an error until the relay is updated.
+- **Relay database, schema version 3:** `invites.issued_by` and `mailboxes.invited_by` (NULL for operator invites). A version 1 or 2 database upgrades in place on first start (`ALTER TABLE`; tested against fixtures built exactly as the old versions made them).
+- **Limits** (`RelayLimits`, flags `--member-invites`, `--member-invites-total`): unused invites at once per member (default 3; 0 turns the feature off) and people ever invited per member (default 10), counted from the database, so a restart doesn't reset them. A member also has a rate limit of 10 requests a minute. The relay-wide caps (1,000 mailboxes, registration rate per address) still apply.
+- **Operator tools:** `--list-mailboxes`, `--remove-mailbox ID [--with-invitees]` (see README). Removing a mailbox deletes its tokens, queued envelopes and the unused invites it made; mailboxes it invited stay unless `--with-invitees` (a `*` in the listing marks one whose voucher is gone).
+- **Client:** `RelayClient::create_invite`, `MessagingEngine::create_relay_invite` (builds a `pqft-relay://` string from the member's own relay address, pinned relay ID and the new code), and a "Relay invite…" button in `ChatWidget` with a Copy button and a reminder that the member is vouching and that the address may need changing for a friend who reaches the relay another way.
+- **Not done:** no way for a member to see or cancel their unused invites; no notification to the operator or the voucher when an invite is used; an invite crosses the network unencrypted like a send token (the relay is assumed to be on a trusted network).
 
 ## M3: decisions and build order
 

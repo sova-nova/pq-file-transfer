@@ -6,6 +6,7 @@
 #include "relay_protocol.h"
 #include "scope_exit.h"
 
+#include <algorithm>
 #include <ctime>
 #include <fstream>
 #include <stdexcept>
@@ -152,6 +153,21 @@ void RelayService::load_or_create_identity(const fs::path& data_dir) {
         CryptoEngine::secure_wipe(kp.private_key);
     }
     relay_id_ = CryptoEngine::sha256(public_key_);
+}
+
+size_t RelayService::remove_mailbox(const Bytes& mailbox_id, bool with_invitees) {
+    std::vector<Bytes> doomed = {mailbox_id};
+    if (with_invitees) {
+        auto all = store_->members();
+        // Everyone reachable by following "invited by" downwards.
+        for (size_t i = 0; i < doomed.size(); i++)
+            for (const auto& m : all)
+                if (m.invited_by == doomed[i] && std::find(doomed.begin(), doomed.end(), m.id) == doomed.end()) doomed.push_back(m.id);
+    }
+    size_t removed = 0;
+    for (const auto& id : doomed)
+        if (store_->delete_mailbox(id)) removed++;
+    return removed;
 }
 
 std::string RelayService::create_invite() {
@@ -337,6 +353,30 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     std::vector<uint8_t> count;
                     write_u32(count, static_cast<uint32_t>(store_->ack(*mailbox, m->ids)));  // only this mailbox's envelopes
                     if (!send_message(sock, MessageType::RELAY_ACK_OK, count)) return;
+                    break;
+                }
+
+                case MessageType::RELAY_INVITE_CREATE: {
+                    // A member vouches for a friend: one single-use invite, recorded against this mailbox.
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    if (limits_.member_invites_outstanding == 0) { send_error(sock, "This relay doesn't let members make invites"); break; }
+                    if (!rate_.allow("invite:" + hex_of(*mailbox), 10, now)) { send_error(sock, "Too many requests, try again later"); break; }
+                    Bytes invite = CryptoEngine::random_bytes(INVITE_BYTES);
+                    switch (store_->add_member_invite(*mailbox, CryptoEngine::sha256(invite), now, now + limits_.invite_lifetime_seconds,
+                                                      limits_.member_invites_outstanding, limits_.member_invites_total)) {
+                        case RelayStore::IssueResult::Ok:
+                            log("Member invite made by " + short_id(*mailbox));
+                            if (!send_message(sock, MessageType::RELAY_INVITE_OK, invite)) return;
+                            break;
+                        case RelayStore::IssueResult::TooManyOutstanding:
+                            send_error(sock, "You already have " + std::to_string(limits_.member_invites_outstanding) +
+                                                 " unused invites. Wait until a friend uses one or it expires.");
+                            break;
+                        case RelayStore::IssueResult::TooManyIssued:
+                            send_error(sock, "You have reached the limit of people you can invite to this relay");
+                            break;
+                        case RelayStore::IssueResult::NoSuchMailbox: send_error(sock, "Unknown mailbox"); break;
+                    }
                     break;
                 }
 

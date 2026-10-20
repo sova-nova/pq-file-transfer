@@ -576,6 +576,102 @@ static void test_real_relay() {
     }
     main_srv.stop();
 
+    std::cout << "12b. Members vouching for friends\n";
+    {
+        const int base = 30000 + static_cast<int>(getpid() % 5000) * 2;
+        Server vouch{base, ROOT / "relay-vouch", {"--member-invites", "2", "--member-invites-total", "3"}};
+        if (!vouch.start()) { std::cout << "FAIL could not start the vouching relay\n"; failures++; return; }
+        auto op_invite = vouch.invite();
+        const Bytes vpin = op_invite->relay_id;
+        auto alice_box = make_box(vouch, vpin);
+        if (!alice_box) { std::cout << "FAIL setup\n"; failures++; return; }
+        auto cli = [&](const std::string& args) {
+            std::string cmd = "\"" + SERVER_BIN + "\" --storage \"" + vouch.storage.string() + "\" " + args + " 2>&1";
+            FILE* p = popen(cmd.c_str(), "r");
+            std::string out;
+            char buf[512];
+            while (p && fgets(buf, sizeof(buf), p)) out += buf;
+            if (p) pclose(p);
+            return out;
+        };
+        auto invitee = [&](const Bytes& code) -> std::optional<Box> {
+            Box b{CryptoEngine::random_bytes(16), CryptoEngine::random_bytes(32), CryptoEngine::generate_sig_keypair()};
+            RelayClient c;
+            std::string e;
+            if (!connect_to(c, vouch, vpin, e) || !c.register_mailbox(code, b.id, b.access, b.token, e)) return std::nullopt;
+            return b;
+        };
+        auto make_invite = [&](const Box& who, std::string& why) -> std::optional<Bytes> {
+            RelayClient c;
+            Bytes code;
+            if (!sign_in(c, vouch, vpin, who, why) || !c.create_invite(code, why)) return std::nullopt;
+            return code;
+        };
+        std::string why;
+
+        RelayClient anon;
+        std::string anon_err;
+        connect_to(anon, vouch, vpin, anon_err);
+        Bytes ignored;
+        CHECK(!anon.create_invite(ignored, anon_err) && has(anon_err, "Sign in"), "someone who hasn't signed in to a mailbox can't make invites: " + anon_err);
+
+        auto c1 = make_invite(*alice_box, why);
+        CHECK(c1 && c1->size() == 16, "a member can make an invite");
+        auto bob = c1 ? invitee(*c1) : std::nullopt;
+        CHECK(bob.has_value(), "a friend registers a mailbox with it");
+        CHECK(!(c1 && invitee(*c1)), "and it works only once");
+
+        auto c2 = make_invite(*alice_box, why);
+        auto c3 = make_invite(*alice_box, why);
+        CHECK(c2 && c3, "she can have 2 unused invites at once");
+        auto c4 = make_invite(*alice_box, why);
+        CHECK(!c4 && has(why, "2 unused"), "a third unused one is refused: " + why);
+        auto carol = c2 ? invitee(*c2) : std::nullopt;
+        auto dave = c3 ? invitee(*c3) : std::nullopt;
+        CHECK(carol && dave, "two more friends join");
+        auto c5 = make_invite(*alice_box, why);
+        CHECK(!c5 && has(why, "limit of people"), "after inviting 3 people in all, she can invite no more: " + why);
+
+        auto chain = bob ? make_invite(*bob, why) : std::nullopt;
+        auto erin = chain ? invitee(*chain) : std::nullopt;
+        CHECK(chain && erin, "a member who was invited can vouch for someone too (Bob invites Erin)");
+
+        std::string alice_id = bytes_to_hex(alice_box->id).substr(0, 12), bob_id = bytes_to_hex(bob->id).substr(0, 12);
+        std::string listing = cli("--list-mailboxes");
+        CHECK(has(listing, "Mailboxes on this relay: 5") && has(listing, alice_id + "  ") && has(listing, "operator"), "the operator sees all five mailboxes, and which one came from an operator invite");
+        size_t by_alice = 0, at = 0;
+        while ((at = listing.find(alice_id, at)) != std::string::npos) { by_alice++; at += 12; }
+        size_t by_bob = 0;
+        at = 0;
+        while ((at = listing.find(bob_id, at)) != std::string::npos) { by_bob++; at += 12; }
+        CHECK(by_alice == 4 && by_bob == 2, "...with Alice named as the one who vouched for Bob, Carol and Dave, and Bob for Erin");
+
+        CHECK(has(cli("--remove-mailbox abc"), "at least 8") && has(cli("--remove-mailbox ffffffffffffffff"), "No mailbox"), "removal needs a clear ID, and says when nothing matches");
+        std::string removed = cli("--remove-mailbox " + alice_id);
+        CHECK(has(removed, "Removed 1 mailbox") && has(removed, "3 mailbox(es) it invited were left alone"), "removing Alice alone leaves the three she invited, and says so");
+        RelayClient gone;
+        std::string gone_err;
+        CHECK(!sign_in(gone, vouch, vpin, *alice_box, gone_err) && has(gone_err, "Authentication"), "Alice can no longer sign in");
+        RelayClient still;
+        CHECK(sign_in(still, vouch, vpin, *bob, why), "Bob, whom she invited, still can");
+        CHECK(has(cli("--list-mailboxes"), "*"), "the listing marks mailboxes whose voucher is gone");
+        std::string cascade = cli("--remove-mailbox " + bob_id + " --with-invitees");
+        CHECK(has(cascade, "Removed 2 mailbox"), "removing Bob with --with-invitees takes Erin too");
+        CHECK(has(cli("--list-mailboxes"), "Mailboxes on this relay: 2"), "Carol and Dave remain");
+        vouch.stop();
+
+        Server closed{base + 1, ROOT / "relay-closed", {"--member-invites", "0"}};
+        if (!closed.start()) { std::cout << "FAIL could not start the closed relay\n"; failures++; return; }
+        auto closed_invite = closed.invite();
+        auto member = make_box(closed, closed_invite->relay_id);
+        RelayClient cc;
+        std::string closed_err;
+        Bytes none;
+        CHECK(member && sign_in(cc, closed, closed_invite->relay_id, *member, closed_err) && !cc.create_invite(none, closed_err) && has(closed_err, "doesn't let members"),
+              "with --member-invites 0 members can't make invites: " + closed_err);
+        closed.stop();
+    }
+
     std::cout << "12. Rate limiting\n";
     {
         Server limited{20101 + static_cast<int>(getpid() % 5000) * 2, ROOT / "relay-limited", {"--rate-limit", "5"}};

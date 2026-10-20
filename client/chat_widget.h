@@ -42,6 +42,7 @@ private:
     void setup_messaging();
     void review_requests();
     void create_group_dialog();
+    void make_relay_invite();
     void review_group_invites();
     void show_cards_issued();
     void revoke_access_for_current();
@@ -71,6 +72,7 @@ private:
     QPushButton* requests_button_ = nullptr;
     QPushButton* cards_button_ = nullptr;
     QPushButton* new_group_button_ = nullptr;
+    QPushButton* relay_invite_button_ = nullptr;
     QPushButton* invites_button_ = nullptr;
     QListWidget* contacts_ = nullptr;
     QLabel* groups_label_ = nullptr;

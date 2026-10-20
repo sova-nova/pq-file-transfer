@@ -287,6 +287,17 @@ bool RelayClient::acknowledge(const std::vector<std::vector<uint8_t>>& envelope_
     return true;
 }
 
+bool RelayClient::create_invite(std::vector<uint8_t>& invite, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::RELAY_INVITE_CREATE, {}, error) || !read_reply(MessageType::RELAY_INVITE_OK, &payload, error)) return false;
+    if (payload.size() != relay::INVITE_BYTES) {
+        error = "The relay sent an invalid invite";
+        return false;
+    }
+    invite = std::move(payload);
+    return true;
+}
+
 bool RelayClient::add_token(const std::vector<uint8_t>& token_hash, std::string& error) {
     return send_request(MessageType::RELAY_TOKEN_ADD, relay::encode(relay::HashOp{token_hash}), error) &&
            read_reply(MessageType::RELAY_TOKEN_OK, nullptr, error);

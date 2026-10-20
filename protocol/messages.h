@@ -67,6 +67,8 @@ enum class MessageType : uint8_t {
     RELAY_TOKEN_ADD    = 0x2D,  // owner → relay: accept this send token (hash)
     RELAY_TOKEN_REVOKE = 0x2E,  // owner → relay: stop accepting this send token (hash)
     RELAY_TOKEN_OK     = 0x2F,
+    RELAY_INVITE_CREATE = 0x32,  // mailbox owner → relay: make me one single-use invite for a friend
+    RELAY_INVITE_OK     = 0x33,  // relay → owner: the invite (INVITE_BYTES)
     RELAY_PING         = 0x30,
     RELAY_PONG         = 0x31,
     ERROR_MSG        = 0xFE,  // either direction: UTF-8 error text

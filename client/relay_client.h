@@ -64,6 +64,10 @@ public:
     // given, is set to how many the relay actually deleted (it only deletes this mailbox's own).
     bool acknowledge(const std::vector<std::vector<uint8_t>>& envelope_ids, size_t* deleted, std::string& error);
 
+    // Needs sign-in. Asks the relay for one single-use invite to give a friend. The relay limits how
+    // many a member may make and records that this mailbox vouched for whoever uses it.
+    bool create_invite(std::vector<uint8_t>& invite, std::string& error);
+
     bool add_token(const std::vector<uint8_t>& token_hash, std::string& error);
     bool revoke_token(const std::vector<uint8_t>& token_hash, std::string& error);
     bool ping(std::string& error);
