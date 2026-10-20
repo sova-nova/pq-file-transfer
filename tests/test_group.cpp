@@ -1236,6 +1236,80 @@ int main(int argc, char** argv) {
             CHECK(group_still, "the group itself remains: people can go on talking in it");
         }
 
+        // --- Many writing at once, and a reinstall after deletions ---
+        std::cout << "17d. Many members writing at once, then a reinstall\n";
+        {
+            std::string err;
+            auto make_group = [&](const std::string& title) -> std::string {
+                std::string id, e;
+                if (!alice.engine->create_group(title, {bob.fp, carol.fp}, id, e)) return std::string();
+                wait_for([&] { return find_invite(bob, id) && find_invite(carol, id); }, 30000);
+                bob.engine->accept_group_invite(id, e);
+                carol.engine->accept_group_invite(id, e);
+                wait_for([&] {
+                    for (User* u : {&alice, &bob, &carol}) {
+                        auto st = u->engine->archive_status(id);
+                        if (!st.joined || st.entries < 1) return false;
+                    }
+                    return true;
+                }, 60000);
+                return id;
+            };
+            const std::string busy_group = make_group("Busy");
+            CHECK(!busy_group.empty() && alice.engine->archive_status(busy_group).joined && bob.engine->archive_status(busy_group).joined && carol.engine->archive_status(busy_group).joined, "(a new group, with its archive working for all three)");
+            for (int i = 1; i <= 8; i++) {
+                alice.engine->send_group_text(busy_group, "A " + std::to_string(i), err);
+                bob.engine->send_group_text(busy_group, "B " + std::to_string(i), err);
+                carol.engine->send_group_text(busy_group, "C " + std::to_string(i), err);
+            }
+            auto count_texts = [&](User& u) {
+                size_t n = 0;
+                for (auto& m : u.engine->group_messages(busy_group)) n += m.text.size() >= 3 && (m.text[0] == 'A' || m.text[0] == 'B' || m.text[0] == 'C') && m.text[1] == ' ';
+                return n;
+            };
+            CHECK(wait_for([&] { return count_texts(alice) == 24 && count_texts(bob) == 24 && count_texts(carol) == 24; }, 90000), "all three write 8 messages in a burst, and every one of them reaches everyone");
+            auto level = [&] {
+                const uint64_t x = alice.engine->archive_status(busy_group).entries;
+                return x >= 25 && bob.engine->archive_status(busy_group).entries == x && carol.engine->archive_status(busy_group).entries == x;
+            };
+            CHECK(wait_for(level, 90000), "their three archives settle on the same chain");
+            run_for(4000);
+            CHECK(level() && alice.engine->archive_status(busy_group).warning.empty() && bob.engine->archive_status(busy_group).warning.empty() && carol.engine->archive_status(busy_group).warning.empty(),
+                  "which stays the same, and no one is warned: simultaneous appends were sorted into one order");
+
+            // Carol's device is wiped. The archive alone must bring back every message, and what was deleted must stay deleted.
+            CHECK(carol.engine->save_keyring(err), "(Carol's keyring is stored)");
+            carol.engine.reset();
+            fs::remove(carol.history());
+            fs::remove(fs::path(carol.history().string() + "-wal"));
+            fs::remove(fs::path(carol.history().string() + "-shm"));
+            restart_engine(carol);
+            MessagingEngine::RestoreReport report;
+            CHECK(carol.engine->restore_from_relay(report, err), "Carol restores from the relay (" + err + ")");
+            CHECK(count_texts(carol) == 24, "all 24 messages of the busy group come back from the archive alone, including her own 8");
+            CHECK(got(carol, hiking, "filler 2") && got(carol, hiking, "filler 4") && !got(carol, hiking, "filler 3"), "the message everyone agreed to delete does not come back; its neighbours do");
+            CHECK(!carol.engine->archive_status(archive_test_group).exists && carol.engine->group_messages(archive_test_group).empty(), "the chat that was deleted by agreement does not come back either");
+            std::string noted;
+            for (auto& n : report.notes) noted += " [" + n + "]";
+            CHECK(carol.engine->archive_status(hiking).warning.empty() && carol.engine->archive_status(busy_group).warning.empty(), "and the restored chains raise no warnings" + noted);
+        }
+
+        // A non-member tries to start a deletion in a chat they are not in.
+        {
+            std::string err;
+            const size_t before = bob.engine->deletions().size();
+            chat::DeleteRequestInfo info{2, CryptoEngine::random_bytes(16), static_cast<uint64_t>(time(nullptr)) + 3600, {CryptoEngine::random_bytes(32)}};
+            chat::Record r = base_record(*hex_to_bytes(hiking), chat::recipients_hash_for({a, b, c}), chat::RecordType::DeleteRequest);
+            r.sender = m;
+            r.payload = chat::delete_request_payload(info);
+            as(mallory);
+            chat::Inner in;
+            in.records = {chat::sign_record(r, mallory.keys->load_private_dsa())};
+            CHECK(send_envelope(bob, token_for(mallory, bob), in), "(Mallory, who is not in the group, sends Bob a deletion request for it)");
+            run_for(3000);
+            CHECK(bob.engine->deletions().size() == before, "Bob ignores it: only members can ask to delete a chat");
+        }
+
         // The relay drops the end of the log.
         wait_for([&] { return alice.engine->archive_status(hiking).entries == bob.engine->archive_status(hiking).entries && bob.engine->archive_status(hiking).entries == carol.engine->archive_status(hiking).entries; }, 30000);
         const uint64_t head = bob.engine->archive_status(hiking).entries;
@@ -1252,6 +1326,142 @@ int main(int argc, char** argv) {
         std::string e2;
         CHECK(bob.engine->send_group_text(hiking, "chatting still works", e2) && wait_for([&] { return got(alice, hiking, "chatting still works") && got(carol, hiking, "chatting still works"); }, 30000),
               "and messages still flow by envelope: a damaged archive never stops the chat");
+    }
+
+
+    std::cout << "18. A hostile member, and a relay that alters or forks the log\n";
+    {
+        std::string err;
+        const fs::path relay_db = ROOT / "relay-data/s/v3/relay.db";
+        auto make_group = [&](const std::string& title) -> std::string {
+            std::string id, e;
+            if (!alice.engine->create_group(title, {bob.fp, carol.fp}, id, e)) return std::string();
+            wait_for([&] { return find_invite(bob, id) && find_invite(carol, id); }, 30000);
+            bob.engine->accept_group_invite(id, e);
+            carol.engine->accept_group_invite(id, e);
+            wait_for([&] {
+                for (User* u : {&alice, &bob, &carol}) {
+                    auto st = u->engine->archive_status(id);
+                    if (!st.joined || st.entries < 1) return false;
+                }
+                return true;
+            }, 60000);
+            return id;
+        };
+        // Acting as a member whose app is off: their own archive key and chat key, read from their own history file.
+        struct Member {
+            RelayClient client;
+            HistoryStore::Archive archive;
+            relay::ArchiveHead head;
+            bool ok = false;
+        };
+        auto act_as = [&](User& who, const std::string& group, Member& mem) {
+            who.engine.reset();
+            as(who);
+            Bytes key = who.keys->derive_local_key("history key");
+            HistoryStore h(who.history(), key);
+            auto archive = h.archive(*hex_to_bytes(group));
+            if (!archive) return;
+            mem.archive = *archive;
+            CryptoEngine::SigKeyPair chat{archive->chat_public_key, archive->chat_private_key};
+            std::string e;
+            std::vector<relay::ArchiveEntry> ignore;
+            mem.ok = mem.client.connect("127.0.0.1", static_cast<uint16_t>(PORT), RELAY_ID, 3, e) && mem.client.authenticate_archive(mem.archive.conversation_id, chat, e) &&
+                     mem.client.fetch_entries(1, 1, ignore, mem.head, e);
+        };
+        auto add_entry = [&](Member& mem, const Bytes& sealed_blob) {
+            relay::ArchiveHead next;
+            std::string e;
+            if (mem.client.append_entry(mem.head.number, mem.head.hash, sealed_blob, next, e) != RelayClient::AppendOutcome::Appended) return false;
+            mem.head = next;
+            return true;
+        };
+        auto add_record = [&](Member& mem, const Bytes& record) {
+            return add_entry(mem, archive::seal_entry(mem.archive.archive_key, mem.archive.conversation_id, mem.head.number + 1, record));
+        };
+
+        // --- A member who holds the archive key writes things they shouldn't ---
+        const std::string hostile = make_group("Hostile");
+        CHECK(!hostile.empty(), "(a new group)");
+        const Bytes hid = *hex_to_bytes(hostile);
+        const std::vector<Bytes> trio = {a, b, c};
+        CHECK(alice.engine->send_group_text(hostile, "an honest first message", err) && wait_for([&] { return got(bob, hostile, "an honest first message") && bob.engine->archive_status(hostile).entries >= 2; }, 60000), "(Alice writes, and everyone has it)");
+        Member carol_in;
+        act_as(carol, hostile, carol_in);
+        CHECK(carol_in.ok, "(Carol's app is closed; the test acts as her, with her own archive key)");
+        as(carol);
+        const Bytes carol_dsa = carol.keys->load_private_dsa();
+        {   // 1. a message that says it is from Alice but is signed by Carol
+            chat::Record r = base_record(hid, chat::recipients_hash_for(trio), chat::RecordType::Text);
+            r.sender = a;
+            const std::string t = "forged as Alice";
+            r.payload.assign(t.begin(), t.end());
+            CHECK(add_record(carol_in, chat::sign_record(r, carol_dsa)), "Carol adds an entry claiming to be from Alice, signed with her own key");
+        }
+        {   // 2. a genuine message from Carol, but addressed to a different set of people
+            chat::Record r = base_record(hid, chat::recipients_hash_for({a, c}), chat::RecordType::Text);
+            r.sender = c;
+            const std::string t = "to the wrong audience";
+            r.payload.assign(t.begin(), t.end());
+            CHECK(add_record(carol_in, chat::sign_record(r, carol_dsa)), "she adds one addressed to a different set of people");
+        }
+        CHECK(add_entry(carol_in, CryptoEngine::random_bytes(120)), "she adds an entry that isn't encrypted under the archive key at all");
+        {   // 4. a checkpoint that contradicts the chain
+            chat::Record r = base_record(hid, chat::recipients_hash_for(trio), chat::RecordType::Checkpoint);
+            r.sender = c;
+            r.payload = chat::checkpoint_payload(1, CryptoEngine::random_bytes(32));
+            CHECK(add_record(carol_in, chat::sign_record(r, carol_dsa)), "and a signed checkpoint claiming entry 1 had a different hash from the one everyone has");
+        }
+        restart_engine(carol);
+        CHECK(alice.engine->send_group_text(hostile, "a real message after all that", err), "Alice writes again");
+        CHECK(wait_for([&] { return got(bob, hostile, "a real message after all that") && got(carol, hostile, "a real message after all that"); }, 60000), "it reaches Bob and Carol: the junk in the archive does not stop the chat");
+        CHECK(wait_for([&] { return !bob.engine->archive_status(hostile).warning.empty() && !alice.engine->archive_status(hostile).warning.empty(); }, 60000), "the contradicting checkpoint warns Alice and Bob");
+        CHECK(has(bob.engine->archive_status(hostile).warning, "contradicts"), "(" + bob.engine->archive_status(hostile).warning + ")");
+        std::string seen;
+        for (User* u : {&alice, &bob}) for (auto& msg : u->engine->group_messages(hostile)) if (msg.text == "forged as Alice" || msg.text == "to the wrong audience") seen += " " + u->name + ":" + msg.text;
+        CHECK(seen.empty(), "and neither the message forged as Alice nor the one to the wrong audience appears for anyone" + seen);
+        CHECK(wait_for([&] { return bob.engine->archive_status(hostile).entries == alice.engine->archive_status(hostile).entries; }, 60000), "everyone's chain still agrees: the entries were skipped, not trusted");
+
+        // --- The relay alters an entry nobody has read yet ---
+        const std::string tampered = make_group("Tampered");
+        bob.engine.reset();
+        carol.engine.reset();
+        const uint64_t at = alice.engine->archive_status(tampered).entries;
+        CHECK(alice.engine->send_group_text(tampered, "written while the others are away", err) && wait_for([&] { return alice.engine->archive_status(tampered).entries > at; }, 60000), "(Alice writes while Bob and Carol are away, and it reaches the archive)");
+        const std::string tlit = hex_literal(*hex_to_bytes(tampered));
+        sql_exec(relay_db, "UPDATE archive_entries SET ciphertext = x'ff' || substr(ciphertext, 2) WHERE archive_id = " + tlit + " AND number = " + std::to_string(alice.engine->archive_status(tampered).entries) + ";");
+        restart_engine(bob);
+        restart_engine(carol);
+        CHECK(wait_for([&] { return !bob.engine->archive_status(tampered).warning.empty() && !carol.engine->archive_status(tampered).warning.empty(); }, 60000), "the relay changes one byte of that entry: Bob and Carol are both warned when they next read it");
+        CHECK(has(bob.engine->archive_status(tampered).warning, "altered"), "(" + bob.engine->archive_status(tampered).warning + ")");
+        CHECK(wait_for([&] { return got(bob, tampered, "written while the others are away") && got(carol, tampered, "written while the others are away"); }, 60000), "and the message still reached them by envelope: the chat goes on");
+
+        // --- The relay shows a different history of the same length ---
+        const std::string forked = make_group("Forked");
+        CHECK(alice.engine->send_group_text(forked, "the one everyone saw", err) && wait_for([&] { return bob.engine->archive_status(forked).entries >= 2 && alice.engine->archive_status(forked).entries == bob.engine->archive_status(forked).entries; }, 60000), "(everyone has read the same two entries)");
+        const uint64_t last = bob.engine->archive_status(forked).entries;
+        const Bytes fid = *hex_to_bytes(forked);
+        Bytes previous_hash;
+        {
+            bob.engine.reset();
+            as(bob);
+            Bytes key = bob.keys->derive_local_key("history key");
+            HistoryStore h(bob.history(), key);
+            if (auto ph = h.archive_hash(fid, last - 1)) previous_hash = *ph;
+        }
+        const Bytes new_content = CryptoEngine::random_bytes(150);
+        const Bytes new_hash = archive::entry_hash(fid, last, previous_hash, new_content);
+        const std::string flit = hex_literal(fid);
+        sql_exec(relay_db, "UPDATE archive_entries SET ciphertext = " + hex_literal(new_content) + ", hash = " + hex_literal(new_hash) + " WHERE archive_id = " + flit + " AND number = " + std::to_string(last) + ";"
+                           "UPDATE archives SET head_hash = " + hex_literal(new_hash) + " WHERE id = " + flit + ";");
+        restart_engine(bob);
+        CHECK(wait_for([&] { return !bob.engine->archive_status(forked).warning.empty(); }, 60000), "the relay swaps the last entry for another, a perfectly valid chain of the same length: Bob, who read the original, is warned");
+        CHECK(has(bob.engine->archive_status(forked).warning, "different end"), "(" + bob.engine->archive_status(forked).warning + ")");
+
+        // --- Nothing to restore from ---
+        restart_engine(mallory);
+        MessagingEngine::RestoreReport none;
+        CHECK(!mallory.engine->restore_from_relay(none, err) && !none.found && has(err, "no saved keyring"), "restoring a mailbox that never saved a keyring says so plainly: " + err);
     }
 
     srv.stop();
