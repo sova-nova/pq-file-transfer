@@ -12,9 +12,14 @@
 // Wire format (big-endian, blobs are u32 length + bytes):
 //   raw  = blob(body) || blob(signature)
 //   body = u32 magic "PQMR" | u32 version | blob conversation_id | blob message_id | blob sender
-//          | blob recipients_hash | u64 sent_at | u32 type | blob payload | blob own_prev | blob seen
+//          | blob recipients_hash | u64 sent_at | u32 type | blob payload | blob own_prev | seen
+//   seen (version 2) = u32 count | blob hash x count      (count <= 15, hashes distinct, 32 bytes each)
+//   seen (version 1) = blob hash                          (empty or 32 bytes; read as a list of 0 or 1)
 //   signature = ML-DSA-65 over string("pq-suite v3 message") || body
 //   entry hash = SHA-256(raw)
+//
+// Records are written as version 2. Version 1 records (made by the first one-to-one chats) are
+// still read, so history keeps working; type 4 (Conversation) exists only in version 2.
 namespace chat {
 
 using Bytes = std::vector<uint8_t>;
@@ -23,11 +28,16 @@ constexpr size_t ID_BYTES = 16;
 constexpr size_t HASH_BYTES = 32;
 constexpr size_t MAX_TEXT_BYTES = 32 * 1024;   // longer content is sent as an attachment (later milestone)
 constexpr size_t MAX_RECORD_BYTES = 40 * 1024;
+constexpr size_t MAX_SEEN = 15;                      // the other members of a 16-person group
+constexpr size_t MAX_GROUP_MEMBERS = 16;             // including the creator
+constexpr size_t MAX_TITLE_BYTES = 64;
+constexpr size_t MAX_CONVERSATION_PAYLOAD = 1024;    // 16 members and a full title take about 700
 
 enum class RecordType : uint32_t {
-    Text = 1,        // payload: the message, UTF-8
-    Receipt = 2,     // payload: see receipt_payload()
-    TokenGrant = 3,  // payload: a 32-byte send token for the recipient to use when writing back
+    Text = 1,          // payload: the message, UTF-8
+    Receipt = 2,       // payload: see receipt_payload()
+    TokenGrant = 3,    // payload: a 32-byte send token for the recipient to use when writing back
+    Conversation = 4,  // payload: see conversation_payload(); creates a group (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -41,10 +51,11 @@ struct Record {
     RecordType type = RecordType::Text;
     Bytes payload;
     // What the sender had committed to when writing this. Without a relay-ordered log there is no
-    // single chain, so each record names the previous record the sender wrote ("own_prev") and the
-    // latest one it had received ("seen"). Each is empty or HASH_BYTES.
+    // single chain, so each record names the previous record the sender wrote ("own_prev", empty
+    // or HASH_BYTES) and the latest record it had received from each other member ("seen": up to
+    // MAX_SEEN distinct hashes of HASH_BYTES each; in a one-to-one chat that is zero or one).
     Bytes own_prev;
-    Bytes seen;
+    std::vector<Bytes> seen;
 };
 
 struct SignedRecord {
@@ -68,6 +79,37 @@ Bytes sign_record(const Record& record, const Bytes& signing_private_key);
 // Parses the structure only. Check the signature with verify_record before trusting anything in it.
 std::optional<SignedRecord> parse_record(const Bytes& raw);
 bool verify_record(const SignedRecord& signed_record, const Bytes& signing_public_key);
+
+// --- Conversation (creation) records ---
+//
+// A group is created by one signed record, which the creator sends to every member separately.
+// It names the members by fingerprint only (their bundles, at about 6.5 KB each, travel beside
+// it in the envelope; see envelope.h). Membership, mode and timer never change afterwards.
+//
+//   payload = u32 payload_version (1) | blob title | u32 mode | u64 timer_seconds | blob previous_id
+//             | u32 member_count | blob fingerprint x member_count
+//
+// The record's `sender` is the creator, who must be one of the members, and its
+// `recipients_hash` must be the hash of exactly the listed members.
+enum class ConversationMode : uint32_t { Saved = 1 };  // Private (timed) chats arrive with a later milestone
+
+struct ConversationInfo {
+    std::string title;             // optional; 0 to MAX_TITLE_BYTES of UTF-8 with no control or direction-override characters
+    ConversationMode mode = ConversationMode::Saved;
+    uint64_t timer_seconds = 0;    // must be 0 for Saved chats
+    Bytes previous_id;             // the conversation this one replaces (a changed group): empty or ID_BYTES
+    std::vector<Bytes> members;    // everyone including the creator, in the creator's order: 2 to MAX_GROUP_MEMBERS
+                                   // distinct fingerprints of HASH_BYTES each
+};
+
+// Encodes the payload. Throws std::runtime_error if `info` is not valid.
+Bytes conversation_payload(const ConversationInfo& info);
+// Decodes and validates a payload. std::nullopt for anything malformed or invalid.
+std::optional<ConversationInfo> parse_conversation_payload(const Bytes& payload);
+// For a record of type Conversation: its payload is valid, its sender is one of the listed
+// members, and its recipients hash matches the member list. Check the signature separately
+// with verify_record. std::nullopt otherwise.
+std::optional<ConversationInfo> conversation_from_record(const SignedRecord& signed_record);
 
 // A receipt tells the sender that these messages were delivered or read.
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids);

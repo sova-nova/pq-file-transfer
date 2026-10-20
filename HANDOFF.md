@@ -16,7 +16,7 @@ A C++17 / Qt 6 application with post-quantum cryptography (ML-KEM-768, ML-DSA-65
 | **M0** | Signed identity bundles (card v2). Done and released. |
 | **M1** | Mailbox relay: SQLite store, invites, relay signing key pinned by clients, per-contact send tokens, challenge sign-in, expiry. Done and released. |
 | **M2** | One-to-one Saved chats: signed records, sealed envelopes, encrypted local history, receipts, message requests, per-contact cards, token revocation, Chats tab. **Built and tested; not yet confirmed on a real Qt build or two real machines.** |
-| **M3** | Groups. **In progress.** Decisions settled (below). Step 2 of 8 is done: the local history database is at schema version 2 (groups, members, per-member delivery) with an automatic upgrade from version 1. Nothing else of M3 exists yet, and no group can be created from the app. |
+| **M3** | Groups. **In progress.** Decisions settled (below). Steps 2 and 3 of 8 are done: the local history database is at schema version 2 (groups, members, per-member delivery, automatic upgrade from version 1), and the wire formats exist (record version 2 with the `seen` list, the group creation record, envelope inner version 2 with `introduced` bundles). Nothing else of M3 exists yet, and no group can be created from the app. |
 | M4 to M8 | Relay archive and restore, attachments in chats, prekeys / forward secrecy, Private chats with timers, hardening. See the design document. |
 
 ## Layout
@@ -49,7 +49,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - Code is compiled with `-Wall -Wextra -Wpedantic -Werror` against a fake liboqs and a small SQLite header shim, and the full suites run against those.
 - The Qt code (`chat_widget`, `main_window`) is only type-checked against a hand-written stub of the Qt classes. That catches typos and API mismatches in our own code, not Qt misuse.
 - **The first CI run is the real test** for the GUI, CMake, Windows and the real liboqs. If it fails, paste the compiler error.
-- Test totals at last run: **762 checks, 0 failed** (sharing 117, keys 69, contacts 53, chat_formats 42, history 117, relay_protocol 61, relay_store 60, e2e 48, relay 77, chat 88, relay_setup 30). Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
+- Test totals at last run: **854 checks, 0 failed** (sharing 117, keys 69, contacts 53, chat_formats 134, history 117, relay_protocol 61, relay_store 60, e2e 48, relay 77, chat 88, relay_setup 30). Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
 
 ## Operational facts and gotchas
 
@@ -60,6 +60,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - **Always use one absolute `--storage` for the server and for `--create-invite`.** A second folder means a second relay identity, and the client reports "relay's identity does not match the one you pinned" (a real mix-up that happened). `--create-invite` now refuses when the storage has no identity (override: `--allow-new-identity`), prints `Relay state:` with the folder it used, and the server warns when it falls back to the temporary default.
 - **`--bind` must include an address the client can reach.** A relay bound to the WireGuard address refuses LAN connections.
 - **Revoking a card is not enough** to cut someone off: a first message carries a token grant that replaces the card's token on the receiver's side. Use **Revoke access** (`revoke_tokens_for`).
+- **All clients must be updated together (new wire formats).** Messages are now written as record version 2 inside envelope inner version 2. A client from before this change can't read them: it drops them silently, and the relay deletes them once the old client acknowledges. New clients still read everything the old ones wrote. The relay itself is unaffected (it never parses records), but update every client before relying on messages between them.
 - **`history.db` is upgraded automatically** from schema version 1 to 2 the first time the new app opens it. Before rewriting anything it copies the old file to `history.db.before-v2` next to it (kept, never overwritten). A history made by a *newer* app is refused with an explanation rather than opened. Once the upgrade has been confirmed good, the `.before-v2` copy can be deleted.
 - **Clients keep history only on the device** until M4. Back up `~/.pq-file-transfer/` including `history.db`.
 - The deployment is a Proxmox VM running the relay with WireGuard. The relay is currently reached at `10.0.0.248:9000` on the LAN; the WireGuard clients use the `10.8.0.x` range. Check the real service unit name and `--bind` before assuming anything.
@@ -92,7 +93,7 @@ Build order, with what is done:
 
 1. Settle decisions and record them. **Done.**
 2. Database migration and per-member delivery, one-to-one behaviour unchanged. **Done** (`HistoryStore`: `create_group`, `conversation`, `set_conversation_state`, `raise_delivery`, `deliveries`; the engine's one-to-one path now uses `raise_delivery`).
-3. Creation record, record version 2 and envelope version 2, each with tamper tests on every field.
+3. Creation record, record version 2 and envelope version 2, each with tamper tests on every field. **Done.** `message_record.h`: `RecordType::Conversation` (4), `ConversationInfo` with `conversation_payload`, `parse_conversation_payload` and `conversation_from_record` (checks the creator is a member and the recipients hash matches the list); `Record::seen` is now a list (at most 15, distinct), version 1 records are still read; titles must be strict UTF-8 without control or direction-override characters. `envelope.h`: `Inner::introduced` (declared last, with an initializer, so `{bundle, records}` built positionally keeps its meaning), `encode_inner` and `decode_inner` exposed for tests; inner version 1 is still read. A real bundle is 6,597 bytes: at least 8 fit in one envelope beside a creation record (measured), 15 do not.
 4. Engine: create, fan-out, group invite as a request, accept and decline, membership checks, group receipts.
 5. Token grants and forwarding through the creator; raise the relay token cap.
 6. Trust labels.

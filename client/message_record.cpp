@@ -11,7 +11,9 @@ namespace chat {
 namespace {
 
 constexpr uint32_t RECORD_MAGIC = 0x50514D52;  // "PQMR"
-constexpr uint32_t RECORD_VERSION = 1;
+constexpr uint32_t RECORD_VERSION = 2;      // what is written
+constexpr uint32_t MIN_RECORD_VERSION = 1;  // the oldest still read
+constexpr uint32_t CONVERSATION_PAYLOAD_VERSION = 1;
 const char SIGNATURE_LABEL[] = "pq-suite v3 message";
 const char CONVERSATION_LABEL[] = "pq-suite v3 one-to-one conversation";
 const char RECIPIENTS_LABEL[] = "pq-suite v3 recipients";
@@ -29,13 +31,64 @@ bool empty_or(const Bytes& b, size_t size) { return b.empty() || b.size() == siz
 bool well_formed(const Record& r) {
     if (r.conversation_id.size() != ID_BYTES || r.message_id.size() != ID_BYTES) return false;
     if (r.sender.size() != HASH_BYTES || r.recipients_hash.size() != HASH_BYTES) return false;
-    if (!empty_or(r.own_prev, HASH_BYTES) || !empty_or(r.seen, HASH_BYTES)) return false;
+    if (!empty_or(r.own_prev, HASH_BYTES)) return false;
+    if (r.seen.size() > MAX_SEEN) return false;
+    for (size_t i = 0; i < r.seen.size(); i++) {
+        if (r.seen[i].size() != HASH_BYTES) return false;
+        for (size_t j = 0; j < i; j++)
+            if (r.seen[i] == r.seen[j]) return false;  // naming the same entry twice says nothing more
+    }
     switch (r.type) {
         case RecordType::Text: return r.payload.size() <= MAX_TEXT_BYTES;
         case RecordType::Receipt: return r.payload.size() <= 1 + 4 + MAX_RECEIPT_IDS * (4 + ID_BYTES);
         case RecordType::TokenGrant: return r.payload.size() == 32;
+        // The first thing in a conversation: nothing came before it, and it has seen nothing.
+        case RecordType::Conversation: return r.payload.size() <= MAX_CONVERSATION_PAYLOAD && r.own_prev.empty() && r.seen.empty();
     }
     return false;
+}
+
+// True for well-formed UTF-8 that is safe to show as a label: no overlong forms, surrogates or
+// values beyond U+10FFFF, no control characters, and none of the bidirectional embedding,
+// override or isolate characters that can make text read in a different order than it is typed.
+bool valid_label(const std::string& s) {
+    static const uint32_t MIN_FOR_LENGTH[] = {0, 0, 0x80, 0x800, 0x10000};
+    size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        uint32_t cp;
+        size_t len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1Fu; len = 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0Fu; len = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07u; len = 4; }
+        else return false;
+        if (i + len > s.size()) return false;
+        for (size_t k = 1; k < len; k++) {
+            const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+            if ((cc & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cc & 0x3Fu);
+        }
+        if (len > 1 && cp < MIN_FOR_LENGTH[len]) return false;  // overlong
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        if (cp < 0x20 || (cp >= 0x7F && cp <= 0x9F)) return false;
+        if ((cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2066 && cp <= 0x2069)) return false;
+        i += len;
+    }
+    return true;
+}
+
+bool valid_info(const ConversationInfo& c) {
+    if (c.title.size() > MAX_TITLE_BYTES || !valid_label(c.title)) return false;
+    if (c.mode != ConversationMode::Saved || c.timer_seconds != 0) return false;
+    if (!c.previous_id.empty() && c.previous_id.size() != ID_BYTES) return false;
+    if (c.members.size() < 2 || c.members.size() > MAX_GROUP_MEMBERS) return false;
+    for (size_t i = 0; i < c.members.size(); i++) {
+        if (c.members[i].size() != HASH_BYTES) return false;
+        for (size_t j = 0; j < i; j++)
+            if (c.members[i] == c.members[j]) return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -75,7 +128,8 @@ Bytes sign_record(const Record& r, const Bytes& signing_private_key) {
     write_u32(body, static_cast<uint32_t>(r.type));
     write_blob(body, r.payload);
     write_blob(body, r.own_prev);
-    write_blob(body, r.seen);
+    write_u32(body, static_cast<uint32_t>(r.seen.size()));
+    for (const auto& s : r.seen) write_blob(body, s);
 
     Bytes signature = CryptoEngine::sign(signing_input(body), signing_private_key);
     Bytes raw;
@@ -95,7 +149,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
     const Bytes& bd = *body;
     auto magic = read_u32(bd.data(), bd.size(), b);
     auto version = read_u32(bd.data(), bd.size(), b);
-    if (!magic || *magic != RECORD_MAGIC || !version || *version != RECORD_VERSION) return std::nullopt;
+    if (!magic || *magic != RECORD_MAGIC || !version || *version < MIN_RECORD_VERSION || *version > RECORD_VERSION) return std::nullopt;
 
     Record r;
     auto conv = read_blob(bd.data(), bd.size(), b, ID_BYTES);
@@ -106,9 +160,26 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
     auto type = read_u32(bd.data(), bd.size(), b);
     auto payload = read_blob(bd.data(), bd.size(), b, MAX_TEXT_BYTES + 1);
     auto prev = read_blob(bd.data(), bd.size(), b, HASH_BYTES);
-    auto seen = read_blob(bd.data(), bd.size(), b, HASH_BYTES);
-    if (!conv || !msg || !sender || !rh || !sent || !type || !payload || !prev || !seen || b != bd.size()) return std::nullopt;
-    if (*type < 1 || *type > 3) return std::nullopt;
+    if (!conv || !msg || !sender || !rh || !sent || !type || !payload || !prev) return std::nullopt;
+
+    std::vector<Bytes> seen;
+    if (*version == 1) {
+        // The first one-to-one chats: a single hash, or nothing.
+        auto one = read_blob(bd.data(), bd.size(), b, HASH_BYTES);
+        if (!one) return std::nullopt;
+        if (!one->empty()) seen.push_back(std::move(*one));
+    } else {
+        auto count = read_u32(bd.data(), bd.size(), b);
+        if (!count || *count > MAX_SEEN) return std::nullopt;
+        for (uint32_t i = 0; i < *count; i++) {
+            auto hash = read_blob(bd.data(), bd.size(), b, HASH_BYTES);
+            if (!hash) return std::nullopt;
+            seen.push_back(std::move(*hash));
+        }
+    }
+    if (b != bd.size()) return std::nullopt;
+    const uint32_t newest_type = *version == 1 ? 3 : 4;  // Conversation records came with version 2
+    if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
     r.message_id = std::move(*msg);
@@ -118,7 +189,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
     r.type = static_cast<RecordType>(*type);
     r.payload = std::move(*payload);
     r.own_prev = std::move(*prev);
-    r.seen = std::move(*seen);
+    r.seen = std::move(seen);
     if (!well_formed(r)) return std::nullopt;
 
     SignedRecord out;
@@ -134,6 +205,56 @@ bool verify_record(const SignedRecord& sr, const Bytes& signing_public_key) {
     // The record must also name the key it claims to be from: the sender field is the fingerprint.
     if (CryptoEngine::fingerprint(signing_public_key) != bytes_to_hex(sr.record.sender)) return false;
     return CryptoEngine::verify(signing_input(sr.body), sr.signature, signing_public_key);
+}
+
+Bytes conversation_payload(const ConversationInfo& info) {
+    if (!valid_info(info)) throw std::runtime_error("The group's details are not valid");
+    Bytes p;
+    write_u32(p, CONVERSATION_PAYLOAD_VERSION);
+    write_blob(p, Bytes(info.title.begin(), info.title.end()));
+    write_u32(p, static_cast<uint32_t>(info.mode));
+    write_u64(p, info.timer_seconds);
+    write_blob(p, info.previous_id);
+    write_u32(p, static_cast<uint32_t>(info.members.size()));
+    for (const auto& m : info.members) write_blob(p, m);
+    return p;
+}
+
+std::optional<ConversationInfo> parse_conversation_payload(const Bytes& payload) {
+    if (payload.size() > MAX_CONVERSATION_PAYLOAD) return std::nullopt;
+    size_t off = 0;
+    auto version = read_u32(payload.data(), payload.size(), off);
+    auto title = read_blob(payload.data(), payload.size(), off, MAX_TITLE_BYTES);
+    auto mode = read_u32(payload.data(), payload.size(), off);
+    auto timer = read_u64(payload.data(), payload.size(), off);
+    auto previous = read_blob(payload.data(), payload.size(), off, ID_BYTES);
+    auto count = read_u32(payload.data(), payload.size(), off);
+    if (!version || *version != CONVERSATION_PAYLOAD_VERSION || !title || !mode || !timer || !previous || !count) return std::nullopt;
+    if (*count < 2 || *count > MAX_GROUP_MEMBERS) return std::nullopt;
+
+    ConversationInfo info;
+    info.title.assign(title->begin(), title->end());
+    info.mode = static_cast<ConversationMode>(*mode);
+    info.timer_seconds = *timer;
+    info.previous_id = std::move(*previous);
+    for (uint32_t i = 0; i < *count; i++) {
+        auto member = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+        if (!member) return std::nullopt;
+        info.members.push_back(std::move(*member));
+    }
+    if (off != payload.size() || !valid_info(info)) return std::nullopt;
+    return info;
+}
+
+std::optional<ConversationInfo> conversation_from_record(const SignedRecord& sr) {
+    const Record& r = sr.record;
+    if (r.type != RecordType::Conversation) return std::nullopt;
+    auto info = parse_conversation_payload(r.payload);
+    if (!info) return std::nullopt;
+    // The creator is a member, and the record is bound to exactly these people.
+    if (std::find(info->members.begin(), info->members.end(), r.sender) == info->members.end()) return std::nullopt;
+    if (r.recipients_hash != recipients_hash_for(info->members)) return std::nullopt;
+    return info;
 }
 
 Bytes receipt_payload(ReceiptKind kind, const std::vector<Bytes>& message_ids) {

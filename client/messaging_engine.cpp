@@ -300,7 +300,7 @@ bool MessagingEngine::send_text(const std::string& contact_fp, const std::string
     r.type = chat::RecordType::Text;
     r.payload.assign(text.begin(), text.end());
     r.own_prev = history_->last_entry_hash(conv.id, true).value_or(Bytes());
-    r.seen = history_->last_entry_hash(conv.id, false).value_or(Bytes());
+    if (auto last_received = history_->last_entry_hash(conv.id, false)) r.seen.push_back(*last_received);
 
     Bytes raw;
     try {
@@ -425,6 +425,8 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             for (const auto& id : info->message_ids) changed |= history_->raise_delivery(conv_id, id, contact.fingerprint, status);
             return changed;
         }
+        case chat::RecordType::Conversation:
+            return false;  // groups are handled in a later step
         case chat::RecordType::TokenGrant: {
             if (sr.record.payload.size() != 32) return false;
             try {

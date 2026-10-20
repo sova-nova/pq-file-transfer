@@ -12,7 +12,8 @@ namespace chat {
 namespace {
 
 constexpr uint32_t ENVELOPE_VERSION = 1;
-constexpr uint32_t INNER_VERSION = 1;
+constexpr uint32_t INNER_VERSION = 2;      // what is written
+constexpr uint32_t MIN_INNER_VERSION = 1;  // the oldest still read
 const char ENVELOPE_AAD_LABEL[] = "pq-suite v3 envelope";
 const char ENVELOPE_KEY_INFO[] = "pq-suite v3 envelope key";
 const size_t BUCKETS[] = {1024, 4096, 16384, 65536};
@@ -36,12 +37,19 @@ Bytes derive_key(const Bytes& shared_secret, const Bytes& header) {
     return CryptoEngine::hkdf_sha256(shared_secret, CryptoEngine::sha256(header), ENVELOPE_KEY_INFO, 32);
 }
 
+}  // namespace
+
 Bytes encode_inner(const Inner& inner) {
     if (inner.sender_bundle.size() > MAX_BUNDLE_BYTES) throw std::runtime_error("The sender bundle is too large");
+    if (inner.introduced.size() > MAX_INTRODUCED_PER_ENVELOPE) throw std::runtime_error("Too many introduced bundles in one envelope");
+    for (const auto& bundle : inner.introduced)
+        if (bundle.size() > MAX_BUNDLE_BYTES) throw std::runtime_error("An introduced bundle is too large");
     if (inner.records.size() > MAX_RECORDS_PER_ENVELOPE) throw std::runtime_error("Too many records in one envelope");
     Bytes b;
     write_u32(b, INNER_VERSION);
     write_blob(b, inner.sender_bundle);
+    write_u32(b, static_cast<uint32_t>(inner.introduced.size()));
+    for (const auto& bundle : inner.introduced) write_blob(b, bundle);
     write_u32(b, static_cast<uint32_t>(inner.records.size()));
     for (const auto& r : inner.records) write_blob(b, r);
     return b;
@@ -50,11 +58,22 @@ Bytes encode_inner(const Inner& inner) {
 std::optional<Inner> decode_inner(const Bytes& b) {
     size_t off = 0;
     auto version = read_u32(b.data(), b.size(), off);
+    if (!version || *version < MIN_INNER_VERSION || *version > INNER_VERSION) return std::nullopt;
     auto bundle = read_blob(b.data(), b.size(), off, MAX_BUNDLE_BYTES);
-    auto count = read_u32(b.data(), b.size(), off);
-    if (!version || *version != INNER_VERSION || !bundle || !count || *count > MAX_RECORDS_PER_ENVELOPE) return std::nullopt;
+    if (!bundle) return std::nullopt;
     Inner inner;
     inner.sender_bundle = std::move(*bundle);
+    if (*version >= 2) {
+        auto introduced = read_u32(b.data(), b.size(), off);
+        if (!introduced || *introduced > MAX_INTRODUCED_PER_ENVELOPE) return std::nullopt;
+        for (uint32_t i = 0; i < *introduced; i++) {
+            auto other = read_blob(b.data(), b.size(), off, MAX_BUNDLE_BYTES);
+            if (!other) return std::nullopt;
+            inner.introduced.push_back(std::move(*other));
+        }
+    }
+    auto count = read_u32(b.data(), b.size(), off);
+    if (!count || *count > MAX_RECORDS_PER_ENVELOPE) return std::nullopt;
     for (uint32_t i = 0; i < *count; i++) {
         auto record = read_blob(b.data(), b.size(), off, 64 * 1024);
         if (!record) return std::nullopt;
@@ -63,8 +82,6 @@ std::optional<Inner> decode_inner(const Bytes& b) {
     if (off != b.size()) return std::nullopt;
     return inner;
 }
-
-}  // namespace
 
 Bytes seal_envelope(const Inner& inner, const Bytes& recipient_public_key) {
     Bytes encoded = encode_inner(inner);

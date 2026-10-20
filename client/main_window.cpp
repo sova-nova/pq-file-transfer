@@ -126,7 +126,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     engine_.set_keystore(keystore_.get());  // transfers use the unlocked keys held by the app
 
     // --- Identity ---
-    layout->addWidget(plain_label("Your fingerprint. Contacts should check it with you before trusting your keys:", this));
+    auto* fingerprint_hint = plain_label("Your fingerprint. Contacts should check it with you before trusting your keys:", this);
+    fingerprint_hint->setAlignment(Qt::AlignCenter);  // centered like the fingerprint beneath it
+    layout->addWidget(fingerprint_hint);
     fingerprint_label_ = plain_label(formatted_fingerprint(keystore_->own_fingerprint()), this);
     fingerprint_label_->setAlignment(Qt::AlignCenter);
     fingerprint_label_->setStyleSheet("font-family: monospace;");
