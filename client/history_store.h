@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -115,6 +116,45 @@ public:
     size_t unread_count(const Bytes& conversation_id);
     std::vector<Bytes> mark_all_read(const Bytes& conversation_id);  // returns the IDs it just marked
 
+    // The conversation one of our outgoing messages belongs to, found by its message ID.
+    std::optional<Bytes> conversation_of_outgoing(const Bytes& message_id);
+
+    // --- Pending group invitations ---
+    // A group creation record from a contact waits here until the user accepts or declines it.
+    // Messages that arrive for the group in the meantime are held with it, in order, and replayed
+    // when the invitation is accepted. (The record itself is encrypted like every other message.)
+    static constexpr size_t MAX_HELD_RECORDS = 200;
+    struct GroupInvite {
+        Bytes conversation_id;
+        std::string creator_fp;  // lowercase hex
+        int64_t received_at = 0;
+        std::vector<Bytes> records;  // [0] is the creation record, then any held messages
+    };
+    // False if an invitation with that conversation ID is already waiting.
+    bool add_group_invite(const Bytes& conversation_id, const std::string& creator_fp, const Bytes& creation_record, int64_t now);
+    std::optional<GroupInvite> group_invite(const Bytes& conversation_id);
+    std::vector<GroupInvite> group_invites();  // oldest first
+    size_t group_invite_count();
+    // Appends a record to an invitation's held messages. False if there is no such invitation or
+    // it already holds MAX_HELD_RECORDS. Holding the same record twice keeps one copy (true).
+    bool hold_for_invite(const Bytes& conversation_id, const Bytes& record);
+    void delete_group_invite(const Bytes& conversation_id);
+
+    // --- People a group's creator introduced (public, self-signed bundles) ---
+    struct IntroducedMember {
+        std::string fp;  // lowercase hex of the signing-key fingerprint
+        Bytes bundle;
+        int64_t issued_at = 0;
+        std::string introduced_by;  // the first person who introduced them
+        int64_t first_seen = 0;
+    };
+    // Keeps the newest bundle per person; who introduced them and when stay as first recorded.
+    void save_introduced(const std::string& fp, const Bytes& bundle, int64_t issued_at, const std::string& introduced_by, int64_t now);
+    std::optional<IntroducedMember> introduced(const std::string& fp);
+    std::vector<IntroducedMember> introduced_members();
+    // Forgets everyone not in `keep` (those no longer in any group or pending invitation).
+    void delete_introduced_except(const std::set<std::string>& keep);
+
     // --- Outgoing queue: records waiting to be sealed and deposited ---
     struct OutboxItem {
         int64_t id = 0;
@@ -166,6 +206,8 @@ public:
 
 private:
     void migrate_v1_to_v2(const std::filesystem::path& db_path);
+    // Opens a stored invitation row; std::nullopt if it is damaged or sealed under another key.
+    std::optional<GroupInvite> open_invite(const Bytes& conv_id, const std::string& creator_fp, int64_t received_at, const Bytes& sealed) const;
     Bytes seal(const Bytes& plaintext, const Bytes& aad) const;
     std::optional<Bytes> unseal(const Bytes& sealed, const Bytes& aad) const;
 

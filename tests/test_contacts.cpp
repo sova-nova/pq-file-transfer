@@ -80,22 +80,28 @@ int main() {
         bob.save_contact_bundle("Alice", b1);
         c = bob.load_contact("Alice");
         CHECK(c && c->kem_verified && c->bundle_issued_at == 1000 && c->pub_kem == alice_kem_pub, "saving from a bundle marks the key verified");
+        auto passed_on = bob.load_contact_bundle_raw("Alice");
+        CHECK(passed_on && *passed_on == b1.raw, "the saved bundle can be read back exactly, to pass on to others");
+        CHECK(!bob.load_contact_bundle_raw("Nobody") && !bob.load_contact_bundle_raw("../keys"), "an unknown contact, or a path-like name, has none");
 
         // Someone swaps the saved encryption key on disk: the bundle no longer matches.
         fs::path dir = ROOT / "bob/.pq-file-transfer/contacts/Alice";
         spit(dir / "pub_kem", mallory_kem.public_key);
         c = bob.load_contact("Alice");
         CHECK(c && !c->kem_verified, "an encryption key swapped on disk is no longer shown as verified");
+        CHECK(!bob.load_contact_bundle_raw("Alice"), "...and its bundle is no longer offered to pass on, since it doesn't match");
 
         bob.save_contact_bundle("Alice", b1);
         spit(dir / "bundle", {1, 2, 3, 4});
         c = bob.load_contact("Alice");
         CHECK(c && !c->kem_verified, "a damaged bundle file means unverified, not a crash");
+        CHECK(!bob.load_contact_bundle_raw("Alice"), "...and nothing to pass on");
 
         bob.save_contact_bundle("Alice", b1);
         bob.save_contact("Alice", alice_kem_pub, alice_ks.load_public_dsa());
         c = bob.load_contact("Alice");
         CHECK(c && !c->kem_verified && !fs::exists(dir / "bundle"), "re-saving from key files drops the old bundle");
+        CHECK(!bob.load_contact_bundle_raw("Alice"), "a contact saved from key files has no bundle to pass on");
 
         CHECK(throws([&] { bob.save_contact_bundle("../keys", b1); }), "a path-like contact name is refused");
         IdentityBundle empty;

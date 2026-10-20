@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,7 +19,7 @@
 #include "relay_client.h"
 #include "sharing.h"
 
-// One-to-one Saved chats over a mailbox relay.
+// One-to-one and group Saved chats over a mailbox relay.
 //
 // The engine owns this user's side of the conversation machinery: it keeps one connection to the
 // relay for receiving, turns what arrives into verified messages in the encrypted history, queues
@@ -119,6 +120,76 @@ public:
     bool accept_request(const std::string& sender_fp, const std::string& contact_name, std::string& error);
     void decline_request(const std::string& sender_fp);
 
+    // --- Groups ---
+    // A group is created by one person, who invites the others; each of them accepts or declines.
+    // Membership never changes afterwards, and a message is sent to each member separately.
+    // Until a member's own "send token" for another member exists (a later step), members who
+    // aren't each other's contacts can't write to each other, and the group shows as not ready.
+    struct GroupMember {
+        std::string fp;        // lowercase hex
+        std::string name;      // a contact's name; else the display name in their bundle (untrusted text); else a short fingerprint
+        bool is_contact = false;
+        bool can_send = false; // from here, we can write to them
+    };
+    struct GroupSummary {
+        std::string id;        // lowercase hex
+        std::string title;     // the creator's suggestion; untrusted text; may be empty
+        std::string creator_fp;
+        bool created_by_me = false;
+        std::vector<GroupMember> members;  // the others; not this user
+        size_t unread = 0;
+        int64_t last_activity = 0;
+        bool ready = false;    // false while some member can't be written to yet ("setting up")
+    };
+    std::vector<GroupSummary> groups();  // most recent activity first
+
+    // Makes a group of the given contacts (not including this user) and invites them all.
+    // Each must be a contact you can message; 1 to 15 of them. `group_id` receives the new ID.
+    bool create_group(const std::string& title, const std::vector<std::string>& member_fps, std::string& group_id, std::string& error);
+
+    struct GroupMessage {
+        int64_t row = 0;
+        std::string message_id;  // lowercase hex
+        std::string sender_fp;   // lowercase hex; this user's own for outgoing messages
+        std::string sender_name; // empty for outgoing messages
+        bool outgoing = false;
+        int64_t sent_at = 0;
+        std::string text;
+        int status = 0;    // outgoing: 0 queued, 1 sent, 2 delivered, 3 read (the lowest across all members). Incoming: 0 unread, 1 read.
+        bool gap = false;  // the sender's record points at a message of theirs we never got
+    };
+    std::vector<GroupMessage> group_messages(const std::string& group_id, size_t limit = 300);
+    struct MemberDelivery {
+        std::string fp;
+        std::string name;
+        int status = 0;  // as above, for this member alone
+    };
+    std::vector<MemberDelivery> group_delivery(const std::string& group_id, const std::string& message_id);
+    // Queues a message to every member; it is sent by pump().
+    bool send_group_text(const std::string& group_id, const std::string& text, std::string& error);
+    // Marks everything read and queues read receipts (to each message's author) if those are on.
+    void mark_group_read(const std::string& group_id);
+    void set_group_receipts(const std::string& group_id, bool delivery, bool read);
+    bool group_receipts_enabled(const std::string& group_id, bool* delivery, bool* read);
+
+    // --- Group invitations: from contacts, waiting for the user's answer ---
+    // (An invitation from someone who isn't a contact arrives as a message request first; once
+    // that person is accepted, their invitation appears here.)
+    struct GroupInvite {
+        std::string id;          // the group's ID, lowercase hex
+        std::string title;       // untrusted text; may be empty
+        std::string creator_fp;
+        std::string creator_name;
+        std::vector<GroupMember> members;  // everyone but this user, creator included
+        int64_t received_at = 0;
+        size_t held_messages = 0;  // messages that arrived for the group while it waited
+    };
+    std::vector<GroupInvite> group_invites();
+    // Joins the group: stores it, then delivers what was held. False (with a reason) if the invitation is gone or invalid.
+    bool accept_group_invite(const std::string& group_id, std::string& error);
+    // Forgets the invitation without telling the creator.
+    void decline_group_invite(const std::string& group_id);
+
     // --- Running ---
     // Handles at most a few events: connects and signs in if needed, waits up to wait_ms for the
     // relay to say something, stores and acknowledges what arrives, sends whatever is queued.
@@ -137,10 +208,31 @@ private:
     void set_status(const std::string& s);
     void bump() { revision_++; }
 
+    // Someone we can verify and (maybe) write to: a contact, or a person a group creator introduced.
+    struct Peer {
+        std::string fp;
+        std::string name;
+        Bytes pub_dsa, pub_kem;
+        std::string relay_address;
+        Bytes relay_id, mailbox_id, send_token;
+        bool is_contact = false;
+        bool can_send = false;
+    };
+    static Peer peer_from_contact(const KeyStore::Contact& contact);
+    std::optional<Peer> resolve_peer(const std::string& fp);
+    GroupMember member_info(const std::string& fp);
+
     bool process_envelope(const relay::StoredEnvelope& envelope);  // true = acknowledge it
     bool handle_record(const KeyStore::Contact& contact, const chat::SignedRecord& record, bool delay_receipt);
+    bool handle_group_record(const Peer& sender, const chat::SignedRecord& record, bool delay_receipt);
+    // A creation record from a contact: keeps it as an invitation, and remembers the people it introduces.
+    bool receive_group_invite(const KeyStore::Contact& creator, const chat::SignedRecord& record, const std::vector<Bytes>& introduced);
+    void prune_introduced();
+    std::vector<Bytes> latest_heads(const Bytes& conversation_id, const std::vector<std::string>& members);
     void note_token_use(const Bytes& token_hash, const std::string& sender_fp);
     void enqueue_receipt(const std::string& contact_fp, chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed);
+    void enqueue_receipt_in(const Bytes& conversation_id, const Bytes& recipients_hash, const std::string& to_fp,
+                            chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed);
     void flush_outbox();
     int64_t retry_delay(int attempts) const;
     Bytes own_bundle_raw();

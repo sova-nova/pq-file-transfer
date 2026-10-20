@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <map>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -15,6 +16,10 @@ namespace {
 int64_t unix_now() { return static_cast<int64_t>(std::time(nullptr)); }
 
 constexpr size_t MAX_PENDING_REQUESTS = 100;
+constexpr size_t MAX_PENDING_GROUP_INVITES = 50;
+// Introduced bundles (about 6.5 KB each) that ride in one invitation envelope. The first envelope to someone
+// also carries our own bundle and a token grant, so this is kept well under what fits in 64 KiB.
+constexpr size_t INTRODUCED_PER_ENVELOPE = 6;
 constexpr int OUTBOX_KIND_MESSAGE = 0;
 constexpr int OUTBOX_KIND_RECEIPT = 1;
 
@@ -119,6 +124,59 @@ MessagingEngine::Bytes MessagingEngine::own_bundle_raw() {
         address.mailbox_id = config->mailbox_id;
     }
     return keys_.make_own_bundle(name, address);
+}
+
+// --- People we can verify and write to ---
+
+MessagingEngine::Peer MessagingEngine::peer_from_contact(const KeyStore::Contact& c) {
+    Peer p;
+    p.fp = c.fingerprint;
+    p.name = c.name;
+    p.pub_dsa = c.pub_dsa;
+    p.pub_kem = c.pub_kem;
+    p.relay_address = c.relay_address;
+    p.relay_id = c.relay_id;
+    p.mailbox_id = c.mailbox_id;
+    p.send_token = c.send_token;
+    p.is_contact = true;
+    p.can_send = c.can_message();
+    return p;
+}
+
+// A contact, or failing that someone a group creator introduced (their bundle is self-signed, so
+// their keys can be checked, but nobody has given us a send token for them yet).
+std::optional<MessagingEngine::Peer> MessagingEngine::resolve_peer(const std::string& fp) {
+    if (auto contact = keys_.find_contact_by_fingerprint(fp)) return peer_from_contact(*contact);
+    auto row = history_->introduced(fp);
+    if (!row) return std::nullopt;
+    auto bundle = parse_identity_bundle(row->bundle);
+    if (!bundle || bundle->fingerprint() != fp) return std::nullopt;
+    Peer p;
+    p.fp = fp;
+    p.name = bundle->display_name.empty() ? short_fp(fp) + "..." : bundle->display_name;
+    p.pub_dsa = bundle->signing_key;
+    p.pub_kem = bundle->encryption_key;
+    if (bundle->has_mailbox()) {
+        p.relay_address = bundle->relay_hint;
+        p.relay_id = bundle->relay_id;
+        p.mailbox_id = bundle->mailbox_id;
+    }
+    p.is_contact = false;
+    p.can_send = false;  // no send token yet (a later step gives group members one)
+    return p;
+}
+
+MessagingEngine::GroupMember MessagingEngine::member_info(const std::string& fp) {
+    GroupMember m;
+    m.fp = fp;
+    if (auto peer = resolve_peer(fp)) {
+        m.name = peer->name;
+        m.is_contact = peer->is_contact;
+        m.can_send = peer->can_send;
+    } else {
+        m.name = short_fp(fp) + "...";
+    }
+    return m;
 }
 
 // --- Setting up and cards ---
@@ -328,19 +386,26 @@ bool MessagingEngine::send_text(const std::string& contact_fp, const std::string
 }
 
 void MessagingEngine::enqueue_receipt(const std::string& contact_fp, chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed) {
-    auto contact = keys_.find_contact_by_fingerprint(contact_fp);
     auto their_fp = hex_to_bytes(contact_fp);
-    if (!contact || !contact->can_message() || !their_fp || their_fp->size() != 32 || ids.empty()) return;
+    if (!their_fp || their_fp->size() != 32) return;
+    enqueue_receipt_in(chat::conversation_id_for(my_fp_, *their_fp), chat::recipients_hash_for({my_fp_, *their_fp}), contact_fp, kind, ids, delayed);
+}
+
+// A receipt goes only to the author of the messages it covers, whatever conversation they are in.
+void MessagingEngine::enqueue_receipt_in(const Bytes& conversation_id, const Bytes& recipients_hash, const std::string& to_fp,
+                                         chat::ReceiptKind kind, const std::vector<Bytes>& ids, bool delayed) {
+    auto peer = resolve_peer(to_fp);
+    if (!peer || !peer->can_send || ids.empty()) return;
 
     // At most 256 messages per receipt record.
     for (size_t start = 0; start < ids.size(); start += 256) {
         std::vector<Bytes> chunk(ids.begin() + static_cast<std::ptrdiff_t>(start),
                                  ids.begin() + static_cast<std::ptrdiff_t>(std::min(ids.size(), start + 256)));
         chat::Record r;
-        r.conversation_id = chat::conversation_id_for(my_fp_, *their_fp);
+        r.conversation_id = conversation_id;
         r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
         r.sender = my_fp_;
-        r.recipients_hash = chat::recipients_hash_for({my_fp_, *their_fp});
+        r.recipients_hash = recipients_hash;
         r.sent_at = static_cast<uint64_t>(unix_now());
         r.type = chat::RecordType::Receipt;
         r.payload = chat::receipt_payload(kind, chunk);
@@ -351,7 +416,7 @@ void MessagingEngine::enqueue_receipt(const std::string& contact_fp, chat::Recei
                 Bytes rnd = CryptoEngine::random_bytes(2);
                 due += static_cast<int64_t>((rnd[0] * 256 + rnd[1]) % (options_.receipt_delay_max_seconds + 1));
             }
-            history_->enqueue(contact_fp, OUTBOX_KIND_RECEIPT, r.message_id, {raw}, due, unix_now());
+            history_->enqueue(to_fp, OUTBOX_KIND_RECEIPT, r.message_id, {raw}, due, unix_now());
         } catch (const std::exception&) {
         }
     }
@@ -392,9 +457,10 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
     auto their_fp = hex_to_bytes(contact.fingerprint);
     if (!their_fp || their_fp->size() != 32 || sr.record.sender != *their_fp) return false;
 
-    // The record must be for exactly this conversation and exactly us two, or it has been redirected.
+    // Not our one-to-one conversation with them: it may belong to a group we are both in.
     const Bytes conv_id = chat::conversation_id_for(my_fp_, *their_fp);
-    if (sr.record.conversation_id != conv_id) return false;
+    if (sr.record.conversation_id != conv_id) return handle_group_record(peer_from_contact(contact), sr, delayed_receipt);
+    // Otherwise it must be for exactly us two, or it has been redirected.
     if (sr.record.recipients_hash != chat::recipients_hash_for({my_fp_, *their_fp})) return false;
 
     const int64_t now = unix_now();
@@ -454,6 +520,7 @@ bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
 
     const Bytes sender = records.front().record.sender;
     const std::string sender_hex = bytes_to_hex(sender);
+    if (sender == my_fp_) return true;  // we never write to ourselves
 
     auto contact = keys_.find_contact_by_fingerprint(sender_hex);
     if (contact) {
@@ -469,20 +536,55 @@ bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
         for (const auto& sr : records) {
             if (sr.record.sender != sender) continue;
             if (!chat::verify_record(sr, contact->pub_dsa)) continue;  // forged, or not from them
-            changed |= handle_record(*contact, sr, true);
+            if (sr.record.type == chat::RecordType::Conversation) changed |= receive_group_invite(*contact, sr, inner->introduced);
+            else changed |= handle_record(*contact, sr, true);
         }
         note_token_use(envelope.token_hash, sender_hex);
         if (changed) bump();
         return true;
     }
 
+    // Not a contact, but maybe someone a group creator introduced, writing to a group we are in
+    // or have been invited to. (Anything else they send falls through to the request path below.)
+    if (auto member = resolve_peer(sender_hex)) {
+        bool for_a_group = false;
+        for (const auto& sr : records) {
+            auto conv = history_->conversation(sr.record.conversation_id);
+            if ((conv && conv->kind == HistoryStore::Group) || history_->group_invite(sr.record.conversation_id)) for_a_group = true;
+        }
+        if (for_a_group) {
+            if (bundle && bundle->fingerprint() == sender_hex) {  // a newer bundle replaces the one we hold
+                history_->save_introduced(sender_hex, bundle->raw, static_cast<int64_t>(bundle->issued_at), std::string(), unix_now());
+                member = resolve_peer(sender_hex);
+            }
+            bool changed = false;
+            if (member) {
+                for (const auto& sr : records) {
+                    if (sr.record.sender != sender || sr.record.type == chat::RecordType::Conversation) continue;
+                    if (!chat::verify_record(sr, member->pub_dsa)) continue;
+                    changed |= handle_group_record(*member, sr, true);
+                }
+            }
+            note_token_use(envelope.token_hash, sender_hex);
+            if (changed) bump();
+            return true;
+        }
+    }
+
     // Someone we don't know. They must introduce themselves with a self-signed bundle, and every
     // record must verify against it. What they sent waits as a request until the user decides.
+    // (A group invitation rides along: the bundles it introduces are kept after the records.)
     if (!bundle || bundle->fingerprint() != sender_hex) return true;
     std::vector<Bytes> verified;
+    bool has_invitation = false;
     for (const auto& sr : records)
-        if (sr.record.sender == sender && chat::verify_record(sr, bundle->signing_key)) verified.push_back(sr.raw);
+        if (sr.record.sender == sender && chat::verify_record(sr, bundle->signing_key)) {
+            verified.push_back(sr.raw);
+            has_invitation |= sr.record.type == chat::RecordType::Conversation;
+        }
     if (verified.empty()) return true;
+    if (has_invitation)
+        for (const auto& raw : inner->introduced) verified.push_back(raw);
     if (history_->request_count() >= MAX_PENDING_REQUESTS) return true;  // flooded: drop
 
     history_->add_request(sender_hex, bundle->raw, verified, unix_now());
@@ -541,10 +643,18 @@ bool MessagingEngine::accept_request(const std::string& sender_fp, const std::st
     // Now that they are a contact, handle what they sent exactly as if it had just arrived.
     auto contact = keys_.load_contact(contact_name);
     if (!contact) { error = "Could not save the contact"; return false; }
+    // A request may carry a group invitation: signed records, then the bundles of the people it introduces.
+    std::vector<Bytes> introduced;
     for (const auto& row : rows)
         for (const auto& raw : row.records)
-            if (auto sr = chat::parse_record(raw))
-                if (chat::verify_record(*sr, contact->pub_dsa)) handle_record(*contact, *sr, true);
+            if (!chat::parse_record(raw)) introduced.push_back(raw);
+    for (const auto& row : rows)
+        for (const auto& raw : row.records) {
+            auto sr = chat::parse_record(raw);
+            if (!sr || !chat::verify_record(*sr, contact->pub_dsa)) continue;
+            if (sr->record.type == chat::RecordType::Conversation) receive_group_invite(*contact, *sr, introduced);
+            else handle_record(*contact, *sr, true);
+        }
     history_->delete_requests(sender_fp);
     bump();
     return true;
@@ -555,14 +665,479 @@ void MessagingEngine::decline_request(const std::string& sender_fp) {
     bump();
 }
 
+// --- Groups ---
+
+// The latest entry we hold from each of the given members (newest first), for a record's "seen" list.
+std::vector<MessagingEngine::Bytes> MessagingEngine::latest_heads(const Bytes& conversation_id, const std::vector<std::string>& members) {
+    std::vector<Bytes> out;
+    std::set<std::string> remaining(members.begin(), members.end());
+    auto messages = history_->messages(conversation_id, 200);  // oldest first
+    for (auto it = messages.rbegin(); it != messages.rend() && !remaining.empty() && out.size() < chat::MAX_SEEN; ++it) {
+        if (it->outgoing) continue;
+        auto sr = chat::parse_record(it->record);
+        if (!sr) continue;
+        if (remaining.erase(bytes_to_hex(sr->record.sender))) out.push_back(it->entry_hash);
+    }
+    return out;
+}
+
+// Forgets introduced people who are no longer in any group or waiting invitation.
+void MessagingEngine::prune_introduced() {
+    std::set<std::string> keep;
+    for (const auto& conv : history_->conversations())
+        if (conv.kind == HistoryStore::Group) keep.insert(conv.members.begin(), conv.members.end());
+    for (const auto& invite : history_->group_invites()) {
+        auto sr = chat::parse_record(invite.records.front());
+        auto info = sr ? chat::conversation_from_record(*sr) : std::nullopt;
+        if (!info) continue;
+        for (const auto& m : info->members) keep.insert(bytes_to_hex(m));
+    }
+    history_->delete_introduced_except(keep);
+}
+
+std::vector<MessagingEngine::GroupSummary> MessagingEngine::groups() {
+    std::vector<GroupSummary> out;
+    for (const auto& conv : history_->conversations()) {
+        if (conv.kind != HistoryStore::Group) continue;
+        GroupSummary g;
+        g.id = bytes_to_hex(conv.id);
+        g.title = conv.title;
+        g.creator_fp = conv.creator_fp;
+        g.created_by_me = conv.creator_fp == my_fp_hex_;
+        g.unread = history_->unread_count(conv.id);
+        g.last_activity = conv.last_activity;
+        g.ready = true;
+        for (const auto& fp : conv.members) {
+            GroupMember m = member_info(fp);
+            g.ready = g.ready && m.can_send;
+            g.members.push_back(std::move(m));
+        }
+        const int wanted = g.ready ? HistoryStore::Active : HistoryStore::SettingUp;
+        if (conv.state != wanted) history_->set_conversation_state(conv.id, wanted);
+        out.push_back(std::move(g));
+    }
+    return out;  // conversations() is already most recent first
+}
+
+bool MessagingEngine::create_group(const std::string& title, const std::vector<std::string>& member_fps, std::string& group_id, std::string& error) {
+    if (!is_set_up()) { error = "Set up messaging first"; return false; }
+    if (title.size() > chat::MAX_TITLE_BYTES) { error = "The group name is too long (64 bytes at most)"; return false; }
+    if (member_fps.empty()) { error = "Choose at least one person to invite"; return false; }
+    if (member_fps.size() > chat::MAX_GROUP_MEMBERS - 1) { error = "A group can have at most 16 people, including you"; return false; }
+
+    chat::ConversationInfo info;
+    info.title = title;
+    info.members.push_back(my_fp_);  // the creator first
+    std::vector<std::string> others;
+    std::vector<Bytes> bundles;  // each other member's signed bundle, to introduce them to one another
+    for (const auto& fp : member_fps) {
+        auto raw = hex_to_bytes(fp);
+        if (!raw || raw->size() != 32) { error = "One of those isn't a valid contact"; return false; }
+        if (fp == my_fp_hex_) { error = "You are already in the group"; return false; }
+        if (std::find(others.begin(), others.end(), fp) != others.end()) { error = "Someone is listed twice"; return false; }
+        auto contact = keys_.find_contact_by_fingerprint(fp);
+        if (!contact) { error = "One of those people isn't in your contacts"; return false; }
+        if (!contact->can_message()) { error = contact->name + " can't be messaged yet. Ask them for a new contact card."; return false; }
+        auto bundle = keys_.load_contact_bundle_raw(contact->name);
+        if (!bundle) { error = "You don't have a signed identity bundle for " + contact->name + ". Ask them for a new contact card."; return false; }
+        others.push_back(fp);
+        info.members.push_back(*raw);
+        bundles.push_back(std::move(*bundle));
+    }
+
+    const int64_t now = unix_now();
+    chat::Record r;
+    r.conversation_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    r.sender = my_fp_;
+    r.recipients_hash = chat::recipients_hash_for(info.members);
+    r.sent_at = static_cast<uint64_t>(now);
+    r.type = chat::RecordType::Conversation;
+    Bytes raw_record;
+    try {
+        r.payload = chat::conversation_payload(info);
+        raw_record = chat::sign_record(r, dsa_private_);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    auto parsed = chat::parse_record(raw_record);
+    if (!parsed) { error = "Could not sign the invitation"; return false; }
+
+    try {
+        history_->create_group(r.conversation_id, title, my_fp_hex_, HistoryStore::Saved, 0, Bytes(), others, HistoryStore::Active, now);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    // The creation record is the first entry of the transcript, and the invitation's delivery is
+    // tracked for each member like any message.
+    HistoryStore::Message first;
+    first.conversation_id = r.conversation_id;
+    first.message_id = r.message_id;
+    first.outgoing = true;
+    first.sent_at = now;
+    first.received_at = now;
+    first.status = HistoryStore::Queued;
+    first.entry_hash = parsed->entry_hash;
+    first.record = raw_record;
+    history_->add_message(first);
+
+    // Each member gets the record and the others' bundles (not their own, and not ours: they
+    // already hold or receive ours). Long lists are split over several envelopes.
+    for (size_t i = 0; i < others.size(); i++) {
+        std::vector<Bytes> to_introduce;
+        for (size_t j = 0; j < others.size(); j++)
+            if (j != i) to_introduce.push_back(bundles[j]);
+        size_t start = 0;
+        do {
+            std::vector<Bytes> payload = {raw_record};
+            for (size_t k = start; k < to_introduce.size() && k < start + INTRODUCED_PER_ENVELOPE; k++) payload.push_back(to_introduce[k]);
+            history_->enqueue(others[i], OUTBOX_KIND_MESSAGE, r.message_id, payload, now, now);
+            start += INTRODUCED_PER_ENVELOPE;
+        } while (start < to_introduce.size());
+    }
+    group_id = bytes_to_hex(r.conversation_id);
+    bump();
+    return true;
+}
+
+std::vector<MessagingEngine::GroupMessage> MessagingEngine::group_messages(const std::string& group_id, size_t limit) {
+    std::vector<GroupMessage> out;
+    auto id = hex_to_bytes(group_id);
+    if (!id) return out;
+    auto conv = history_->conversation(*id);
+    if (!conv || conv->kind != HistoryStore::Group) return out;
+    for (auto& m : history_->messages(conv->id, limit)) {
+        auto record = chat::parse_record(m.record);
+        if (!record || record->record.type != chat::RecordType::Text) continue;
+        GroupMessage gm;
+        gm.row = m.row;
+        gm.message_id = bytes_to_hex(m.message_id);
+        gm.sender_fp = bytes_to_hex(record->record.sender);
+        gm.outgoing = m.outgoing;
+        if (!gm.outgoing) gm.sender_name = member_info(gm.sender_fp).name;
+        gm.sent_at = m.sent_at;
+        gm.text.assign(record->record.payload.begin(), record->record.payload.end());
+        gm.status = m.status;
+        gm.gap = m.gap;
+        out.push_back(std::move(gm));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const GroupMessage& a, const GroupMessage& b) {
+        return a.sent_at != b.sent_at ? a.sent_at < b.sent_at : a.row < b.row;
+    });
+    return out;
+}
+
+std::vector<MessagingEngine::MemberDelivery> MessagingEngine::group_delivery(const std::string& group_id, const std::string& message_id) {
+    std::vector<MemberDelivery> out;
+    auto id = hex_to_bytes(group_id);
+    auto mid = hex_to_bytes(message_id);
+    if (!id || !mid) return out;
+    for (const auto& d : history_->deliveries(*id, *mid)) out.push_back({d.member_fp, member_info(d.member_fp).name, d.status});
+    return out;
+}
+
+bool MessagingEngine::send_group_text(const std::string& group_id, const std::string& text, std::string& error) {
+    if (text.empty()) { error = "There is nothing to send"; return false; }
+    if (text.size() > chat::MAX_TEXT_BYTES) { error = "That message is too long (32 KiB at most)"; return false; }
+    auto id = hex_to_bytes(group_id);
+    auto conv = id ? history_->conversation(*id) : std::nullopt;
+    if (!conv || conv->kind != HistoryStore::Group) { error = "That group isn't in your list"; return false; }
+
+    std::vector<Bytes> everyone = {my_fp_};
+    for (const auto& fp : conv->members) {
+        auto raw = hex_to_bytes(fp);
+        if (!raw) { error = "That group is damaged"; return false; }
+        everyone.push_back(std::move(*raw));
+    }
+
+    const int64_t now = unix_now();
+    chat::Record r;
+    r.conversation_id = conv->id;
+    r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    r.sender = my_fp_;
+    r.recipients_hash = chat::recipients_hash_for(everyone);
+    r.sent_at = static_cast<uint64_t>(now);
+    r.type = chat::RecordType::Text;
+    r.payload.assign(text.begin(), text.end());
+    r.own_prev = history_->last_entry_hash(conv->id, true).value_or(Bytes());
+    r.seen = latest_heads(conv->id, conv->members);
+
+    Bytes raw;
+    try {
+        raw = chat::sign_record(r, dsa_private_);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    auto parsed = chat::parse_record(raw);
+    if (!parsed) { error = "Could not sign the message"; return false; }
+
+    HistoryStore::Message m;
+    m.conversation_id = conv->id;
+    m.message_id = r.message_id;
+    m.outgoing = true;
+    m.sent_at = now;
+    m.received_at = now;
+    m.status = HistoryStore::Queued;
+    m.entry_hash = parsed->entry_hash;
+    m.record = raw;
+    history_->add_message(m);
+    // One envelope per member, each queued, retried and tracked on its own.
+    for (const auto& fp : conv->members) history_->enqueue(fp, OUTBOX_KIND_MESSAGE, r.message_id, {raw}, now, now);
+    bump();
+    return true;
+}
+
+void MessagingEngine::mark_group_read(const std::string& group_id) {
+    auto id = hex_to_bytes(group_id);
+    auto conv = id ? history_->conversation(*id) : std::nullopt;
+    if (!conv || conv->kind != HistoryStore::Group) return;
+    auto ids = history_->mark_all_read(conv->id);
+    if (ids.empty()) return;
+    if (conv->send_read_receipts) {
+        std::vector<Bytes> everyone = {my_fp_};
+        for (const auto& fp : conv->members)
+            if (auto raw = hex_to_bytes(fp)) everyone.push_back(std::move(*raw));
+        const Bytes recipients = chat::recipients_hash_for(everyone);
+        // Each author hears only about their own messages.
+        std::map<std::string, std::vector<Bytes>> by_author;
+        for (const auto& mid : ids) {
+            auto m = history_->find_message(conv->id, mid);
+            auto sr = m ? chat::parse_record(m->record) : std::nullopt;
+            if (sr) by_author[bytes_to_hex(sr->record.sender)].push_back(mid);
+        }
+        for (const auto& [author, author_ids] : by_author)
+            enqueue_receipt_in(conv->id, recipients, author, chat::ReceiptKind::Read, author_ids, false);
+    }
+    bump();
+}
+
+void MessagingEngine::set_group_receipts(const std::string& group_id, bool delivery, bool read) {
+    auto id = hex_to_bytes(group_id);
+    auto conv = id ? history_->conversation(*id) : std::nullopt;
+    if (!conv || conv->kind != HistoryStore::Group) return;
+    history_->set_receipt_settings(conv->id, delivery, read);
+}
+
+bool MessagingEngine::group_receipts_enabled(const std::string& group_id, bool* delivery, bool* read) {
+    auto id = hex_to_bytes(group_id);
+    auto conv = id ? history_->conversation(*id) : std::nullopt;
+    const bool found = conv && conv->kind == HistoryStore::Group;
+    if (delivery) *delivery = found ? conv->send_delivery_receipts : true;
+    if (read) *read = found ? conv->send_read_receipts : true;
+    return found;
+}
+
+// A signed record in a group conversation, from someone whose signature the caller has already
+// checked. It counts only if the sender is a member and the record is bound to exactly this group.
+bool MessagingEngine::handle_group_record(const Peer& sender, const chat::SignedRecord& sr, bool delayed_receipt) {
+    if (sr.record.sender == my_fp_) return false;
+    const Bytes& conv_id = sr.record.conversation_id;
+
+    if (auto conv = history_->conversation(conv_id); conv && conv->kind == HistoryStore::Group) {
+        if (std::find(conv->members.begin(), conv->members.end(), sender.fp) == conv->members.end()) return false;  // not a member
+        std::vector<Bytes> everyone = {my_fp_};
+        for (const auto& fp : conv->members) {
+            auto raw = hex_to_bytes(fp);
+            if (!raw) return false;
+            everyone.push_back(std::move(*raw));
+        }
+        if (sr.record.recipients_hash != chat::recipients_hash_for(everyone)) return false;  // redirected from another group
+
+        const int64_t now = unix_now();
+        switch (sr.record.type) {
+            case chat::RecordType::Text: {
+                HistoryStore::Message m;
+                m.conversation_id = conv_id;
+                m.message_id = sr.record.message_id;
+                m.outgoing = false;
+                m.sent_at = static_cast<int64_t>(sr.record.sent_at);
+                m.received_at = now;
+                m.status = 0;
+                m.entry_hash = sr.entry_hash;
+                m.record = sr.raw;
+                // They pointed at an earlier message of theirs that we never saw: something went missing.
+                m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
+                if (!history_->add_message(m)) return false;  // a duplicate or replay
+                if (conv->send_delivery_receipts)
+                    enqueue_receipt_in(conv_id, sr.record.recipients_hash, sender.fp, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
+                return true;
+            }
+            case chat::RecordType::Receipt: {
+                auto info = chat::parse_receipt_payload(sr.record.payload);
+                if (!info) return false;
+                const int status = info->kind == chat::ReceiptKind::Read ? HistoryStore::Read : HistoryStore::Delivered;
+                bool changed = false;
+                for (const auto& id : info->message_ids) changed |= history_->raise_delivery(conv_id, id, sender.fp, status);
+                return changed;
+            }
+            case chat::RecordType::TokenGrant:     // grants use the one-to-one conversation
+            case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
+                return false;
+        }
+        return false;
+    }
+
+    // A group we have been invited to but haven't answered: keep what its members send until we do.
+    if (auto invite = history_->group_invite(conv_id)) {
+        if (sr.record.type != chat::RecordType::Text) return false;
+        auto creation = chat::parse_record(invite->records.front());
+        auto info = creation ? chat::conversation_from_record(*creation) : std::nullopt;
+        if (!info) return false;
+        const Bytes sender_raw = hex_to_bytes(sender.fp).value_or(Bytes());
+        if (std::find(info->members.begin(), info->members.end(), sender_raw) == info->members.end()) return false;
+        if (sr.record.recipients_hash != chat::recipients_hash_for(info->members)) return false;
+        return history_->hold_for_invite(conv_id, sr.raw);
+    }
+    return false;  // not a group we know of
+}
+
+bool MessagingEngine::receive_group_invite(const KeyStore::Contact& creator, const chat::SignedRecord& sr, const std::vector<Bytes>& introduced) {
+    auto info = chat::conversation_from_record(sr);
+    auto creator_raw = hex_to_bytes(creator.fingerprint);
+    if (!info || !creator_raw || sr.record.sender != *creator_raw) return false;
+    // It must name us, or it isn't for us.
+    if (std::find(info->members.begin(), info->members.end(), my_fp_) == info->members.end()) return false;
+
+    const Bytes& id = sr.record.conversation_id;
+    if (id == chat::conversation_id_for(my_fp_, *creator_raw)) return false;  // that ID is our one-to-one chat
+
+    // Is this a group we already hold, or an invitation already waiting? A long list of introductions
+    // is split over several envelopes, each repeating the creation record, so the same record may
+    // arrive again. That adds its introduced bundles but changes nothing else. Anything that
+    // doesn't match what we hold is ignored (a replay can't rewrite a group).
+    bool already_known = false;
+    if (auto conv = history_->conversation(id)) {
+        std::vector<std::string> others;
+        for (const auto& m : info->members)
+            if (m != my_fp_) others.push_back(bytes_to_hex(m));
+        std::sort(others.begin(), others.end());
+        std::vector<std::string> held = conv->members;
+        std::sort(held.begin(), held.end());
+        if (conv->kind != HistoryStore::Group || conv->creator_fp != creator.fingerprint || held != others) return false;
+        already_known = true;
+    } else if (auto pending = history_->group_invite(id)) {
+        if (pending->records.front() != sr.raw) return false;
+        already_known = true;
+    }
+
+    const int64_t now = unix_now();
+    if (!already_known) {
+        if (history_->group_invite_count() >= MAX_PENDING_GROUP_INVITES) return false;
+        if (!history_->add_group_invite(id, creator.fingerprint, sr.raw, now)) return false;
+    }
+
+    // Remember the people it introduces. Their bundles are self-signed, so a swapped key or a
+    // person the record doesn't name is simply ignored.
+    bool saved_any = false;
+    for (const auto& raw : introduced) {
+        auto bundle = parse_identity_bundle(raw);
+        if (!bundle) continue;
+        const std::string fp = bundle->fingerprint();
+        auto fp_raw = hex_to_bytes(fp);
+        if (!fp_raw || *fp_raw == my_fp_ || *fp_raw == *creator_raw) continue;
+        if (std::find(info->members.begin(), info->members.end(), *fp_raw) == info->members.end()) continue;
+        if (keys_.find_contact_by_fingerprint(fp)) continue;  // already someone we know
+        history_->save_introduced(fp, raw, static_cast<int64_t>(bundle->issued_at), creator.fingerprint, now);
+        saved_any = true;
+    }
+    if (!already_known)
+        notify(creator.name + " invited you to the group " + (info->title.empty() ? std::string("(no name)") : "\"" + info->title + "\"") + ".");
+    if (!already_known || saved_any) bump();
+    return !already_known;
+}
+
+std::vector<MessagingEngine::GroupInvite> MessagingEngine::group_invites() {
+    std::vector<GroupInvite> out;
+    for (const auto& invite : history_->group_invites()) {
+        auto sr = chat::parse_record(invite.records.front());
+        auto info = sr ? chat::conversation_from_record(*sr) : std::nullopt;
+        if (!info) continue;
+        GroupInvite gi;
+        gi.id = bytes_to_hex(invite.conversation_id);
+        gi.title = info->title;
+        gi.creator_fp = invite.creator_fp;
+        gi.creator_name = member_info(invite.creator_fp).name;
+        for (const auto& m : info->members)
+            if (m != my_fp_) gi.members.push_back(member_info(bytes_to_hex(m)));
+        gi.received_at = invite.received_at;
+        gi.held_messages = invite.records.size() - 1;
+        out.push_back(std::move(gi));
+    }
+    return out;
+}
+
+bool MessagingEngine::accept_group_invite(const std::string& group_id, std::string& error) {
+    auto id = hex_to_bytes(group_id);
+    auto invite = id ? history_->group_invite(*id) : std::nullopt;
+    if (!invite) { error = "That invitation is no longer there"; return false; }
+    auto creator = keys_.find_contact_by_fingerprint(invite->creator_fp);
+    if (!creator) { error = "The person who invited you is no longer one of your contacts"; return false; }
+    auto sr = chat::parse_record(invite->records.front());
+    auto info = sr ? chat::conversation_from_record(*sr) : std::nullopt;
+    if (!sr || !info || !chat::verify_record(*sr, creator->pub_dsa)) { error = "That invitation is not valid"; return false; }
+
+    std::vector<std::string> others;  // everyone but us, in the creator's order
+    bool ready = true;
+    for (const auto& m : info->members) {
+        if (m == my_fp_) continue;
+        others.push_back(bytes_to_hex(m));
+        auto peer = resolve_peer(others.back());
+        ready = ready && peer && peer->can_send;
+    }
+
+    const int64_t now = unix_now();
+    try {
+        history_->create_group(*id, info->title, invite->creator_fp, HistoryStore::Saved, 0, info->previous_id, others,
+                               ready ? HistoryStore::Active : HistoryStore::SettingUp, now);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    // The creation record is the first entry of the group's transcript.
+    HistoryStore::Message first;
+    first.conversation_id = *id;
+    first.message_id = sr->record.message_id;
+    first.outgoing = false;
+    first.sent_at = static_cast<int64_t>(sr->record.sent_at);
+    first.received_at = now;
+    first.status = 1;  // read: there is nothing to read in it
+    first.entry_hash = sr->entry_hash;
+    first.record = sr->raw;
+    history_->add_message(first);
+
+    // What arrived while the invitation waited is handled now, in the order it came.
+    for (size_t i = 1; i < invite->records.size(); i++) {
+        auto held = chat::parse_record(invite->records[i]);
+        if (!held) continue;
+        auto sender = resolve_peer(bytes_to_hex(held->record.sender));
+        if (!sender || !chat::verify_record(*held, sender->pub_dsa)) continue;
+        handle_group_record(*sender, *held, true);
+    }
+    history_->delete_group_invite(*id);
+    prune_introduced();
+    bump();
+    return true;
+}
+
+void MessagingEngine::decline_group_invite(const std::string& group_id) {
+    auto id = hex_to_bytes(group_id);
+    if (!id) return;
+    history_->delete_group_invite(*id);
+    prune_introduced();
+    bump();
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
     const int64_t now = unix_now();
     for (auto& item : history_->due_items(now, 20)) {
         try {
-        auto contact = keys_.find_contact_by_fingerprint(item.contact_fp);
-        if (!contact || !contact->can_message()) {
+        auto peer = resolve_peer(item.contact_fp);
+        if (!peer || !peer->can_send) {  // no way to reach them (yet): try again later
             history_->outbox_failed(item.id, now + retry_delay(item.attempts));
             continue;
         }
@@ -581,7 +1156,7 @@ void MessagingEngine::flush_outbox() {
                     history_->outbox_failed(item.id, now + 15);
                     continue;
                 }
-                history_->add_issued_token(CryptoEngine::sha256(token), "first message to " + contact->name, item.contact_fp, now);
+                history_->add_issued_token(CryptoEngine::sha256(token), "first message to " + peer->name, item.contact_fp, now);
 
                 auto their_fp = hex_to_bytes(item.contact_fp);
                 chat::Record g;
@@ -597,24 +1172,28 @@ void MessagingEngine::flush_outbox() {
             }
         }
 
+        // The queued items are signed records, plus (for a group invitation) bundles to introduce.
         chat::Inner inner;
-        inner.records = records;
+        for (const auto& raw : records) {
+            if (chat::parse_record(raw)) inner.records.push_back(raw);
+            else inner.introduced.push_back(raw);
+        }
         try {
             if (first_message) inner.sender_bundle = own_bundle_raw();
-            Bytes envelope = chat::seal_envelope(inner, contact->pub_kem);
+            Bytes envelope = chat::seal_envelope(inner, peer->pub_kem);
 
-            auto address = parse_server_address(contact->relay_address);
+            auto address = parse_server_address(peer->relay_address);
             if (!address) throw std::runtime_error("Their relay address is not valid");
             RelayClient depositor;
             std::string err;
-            if (!depositor.connect(address->host, address->port, contact->relay_id, options_.connect_timeout_seconds, err) ||
-                !depositor.deposit(contact->mailbox_id, contact->send_token, envelope, options_.envelope_ttl_seconds, nullptr, err)) {
+            if (!depositor.connect(address->host, address->port, peer->relay_id, options_.connect_timeout_seconds, err) ||
+                !depositor.deposit(peer->mailbox_id, peer->send_token, envelope, options_.envelope_ttl_seconds, nullptr, err)) {
                 if (err.find("Unknown mailbox or token") != std::string::npos) {
                     const std::string key = "dead-token:" + item.contact_fp;
                     bool first_time;
                     { std::lock_guard<std::mutex> lock(mutex_); first_time = told_about_.insert(key).second; }
                     if (first_time)
-                        notify(contact->name + "'s contact card no longer works, so your messages to them are waiting. Ask them for a new card.");
+                        notify(peer->name + "'s contact card no longer works, so your messages to them are waiting. Ask them for a new card.");
                 }
                 history_->outbox_failed(item.id, now + retry_delay(item.attempts));
                 continue;
@@ -627,8 +1206,8 @@ void MessagingEngine::flush_outbox() {
         history_->outbox_done(item.id);
         if (first_message) history_->set_bundle_sent(item.contact_fp);
         if (item.kind == OUTBOX_KIND_MESSAGE) {
-            auto their_fp = hex_to_bytes(item.contact_fp);
-            history_->raise_delivery(chat::conversation_id_for(my_fp_, *their_fp), item.message_id, item.contact_fp, HistoryStore::Sent);
+            if (auto conv = history_->conversation_of_outgoing(item.message_id))
+                history_->raise_delivery(*conv, item.message_id, item.contact_fp, HistoryStore::Sent);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 told_about_.erase("dead-token:" + item.contact_fp);

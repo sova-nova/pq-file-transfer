@@ -170,6 +170,11 @@ public:
     BundleImport import_bundle_for_known_identity(const IdentityBundle& bundle,
                                                   const std::vector<uint8_t>& send_token = std::vector<uint8_t>());
 
+    // The contact's signed identity bundle exactly as saved, for passing on to others (a group
+    // creator introduces members this way). std::nullopt if there is none, or it no longer
+    // matches the contact's keys (a contact saved from an old card has no bundle).
+    std::optional<std::vector<uint8_t>> load_contact_bundle_raw(const std::string& name) const;
+
     // Returns std::nullopt if the contact is missing or its keys are invalid.
     std::optional<Contact> load_contact(const std::string& name) const;
     bool contact_exists(const std::string& name) const;

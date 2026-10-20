@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 2, "opening it upgrades it to version 2");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 3, "opening it upgrades it to the current version (3)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 2, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 3, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 2 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at version 2, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 3 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -494,6 +494,97 @@ int main() {
         CHECK(h.raise_delivery(conv_a, id(1), fp_a, HistoryStore::Sent) && h.find_message(conv_a, id(1))->status == HistoryStore::Sent, "in a direct conversation the one member's state is the message's state");
         CHECK(h.raise_delivery(conv_a, id(1), fp_a, HistoryStore::Read) && h.find_message(conv_a, id(1))->status == HistoryStore::Read, "...all the way to Read");
         CHECK(!h.raise_delivery(conv_a, id(1), fp_b, HistoryStore::Read), "and someone else's receipt is ignored there too");
+    }
+
+    std::cout << "Upgrading a version 2 history adds the new tables\n";
+    {
+        fs::path v2 = dir / "v2.db";
+        const std::string fp_c = fp_of('c');
+        {
+            HistoryStore h(v2, key);
+            h.create_group(id(0x61), "Kept through the upgrade", fp_a, HistoryStore::Saved, 0, Bytes(), {fp_a, fp_b, fp_c}, HistoryStore::Active, 100);
+            h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
+        }
+        // Make it exactly what version 2 left: no invitation or introduced-member tables.
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; PRAGMA user_version=2;");
+        CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
+        {
+            HistoryStore h(v2, key);
+            CHECK(raw_int(v2, "PRAGMA user_version") == 3, "opening it upgrades it to version 3");
+            auto g = h.conversation(id(0x61));
+            CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
+                  "the groups and messages it held are untouched");
+            CHECK(h.add_group_invite(id(0x70), fp_b, text("creation"), 300) && h.group_invite_count() == 1, "the new tables work straight away");
+        }
+        CHECK(!fs::exists(fs::path(v2.string() + ".before-v2")), "adding tables needs no backup of the old file");
+    }
+
+    std::cout << "Pending group invitations\n";
+    {
+        HistoryStore h(dir / "invites.db", key);
+        const std::string fp_c = fp_of('c');
+        Bytes inv1 = id(0x71), inv2 = id(0x72);
+        CHECK(h.group_invite_count() == 0 && h.group_invites().empty() && !h.group_invite(inv1), "there are none to begin with");
+        CHECK(h.add_group_invite(inv1, fp_a, text("CREATION-RECORD-ONE"), 1000), "an invitation is stored");
+        CHECK(!h.add_group_invite(inv1, fp_b, text("a different record"), 2000), "a second with the same conversation ID is refused");
+        auto one = h.group_invite(inv1);
+        CHECK(one && one->conversation_id == inv1 && one->creator_fp == fp_a && one->received_at == 1000 && one->records.size() == 1 && one->records[0] == text("CREATION-RECORD-ONE"),
+              "it is read back with its creator, time and the original record (not the refused one)");
+        h.add_group_invite(inv2, fp_c, text("CREATION-RECORD-TWO"), 500);
+        auto both = h.group_invites();
+        CHECK(both.size() == 2 && both[0].conversation_id == inv2 && both[1].conversation_id == inv1 && h.group_invite_count() == 2, "they are listed oldest first");
+
+        CHECK(h.hold_for_invite(inv1, text("message 1")) && h.hold_for_invite(inv1, text("message 2")), "messages that arrive before the user decides are held");
+        auto held = h.group_invite(inv1);
+        CHECK(held && held->records.size() == 3 && held->records[0] == text("CREATION-RECORD-ONE") && held->records[1] == text("message 1") && held->records[2] == text("message 2"), "...in order, after the creation record");
+        CHECK(h.hold_for_invite(inv1, text("message 1")) && h.group_invite(inv1)->records.size() == 3, "holding the same record twice keeps one copy");
+        CHECK(!h.hold_for_invite(id(0x99), text("for nobody")), "a message for a conversation with no invitation is not held");
+        for (size_t i = 0; i < HistoryStore::MAX_HELD_RECORDS - 2; i++) h.hold_for_invite(inv1, text("filler " + std::to_string(i)));
+        CHECK(h.group_invite(inv1)->records.size() == 1 + HistoryStore::MAX_HELD_RECORDS && !h.hold_for_invite(inv1, text("one too many")), "at most 200 are held per invitation");
+        CHECK(h.group_invite(inv2)->records.size() == 1, "(another invitation is not affected)");
+
+        CHECK(!file_contains(dir / "invites.db", "CREATION-RECORD-ONE") && !file_contains(fs::path((dir / "invites.db").string() + "-wal"), "CREATION-RECORD-ONE") &&
+                  !file_contains(dir / "invites.db", "message 1") && !file_contains(fs::path((dir / "invites.db").string() + "-wal"), "message 1"),
+              "nothing of an invitation or the messages held with it is readable on disk");
+        h.delete_group_invite(inv1);
+        CHECK(!h.group_invite(inv1) && h.group_invite_count() == 1 && h.group_invites()[0].conversation_id == inv2, "declining removes it, and what was held with it");
+        HistoryStore other(dir / "invites.db", CryptoEngine::random_bytes(32));
+        CHECK(other.group_invites().empty() && !other.group_invite(inv2), "with a different key an invitation can't be read (and nothing crashes)");
+    }
+
+    std::cout << "People introduced by a group's creator\n";
+    {
+        HistoryStore h(dir / "introduced.db", key);
+        const std::string fp_c = fp_of('c');
+        CHECK(h.introduced_members().empty() && !h.introduced(fp_b), "nobody is introduced to begin with");
+        h.save_introduced(fp_b, text("bundle b v1"), 100, fp_a, 1000);
+        auto b = h.introduced(fp_b);
+        CHECK(b && b->fp == fp_b && b->bundle == text("bundle b v1") && b->issued_at == 100 && b->introduced_by == fp_a && b->first_seen == 1000, "an introduced person is stored with who introduced them and when");
+        h.save_introduced(fp_b, text("bundle b v2"), 200, fp_c, 2000);
+        b = h.introduced(fp_b);
+        CHECK(b && b->bundle == text("bundle b v2") && b->issued_at == 200 && b->introduced_by == fp_a && b->first_seen == 1000, "a newer bundle replaces the old one, while who introduced them first is kept");
+        h.save_introduced(fp_b, text("an OLD bundle"), 50, fp_c, 3000);
+        CHECK(h.introduced(fp_b)->bundle == text("bundle b v2"), "an older bundle is ignored");
+        h.save_introduced(fp_c, text("bundle c"), 10, fp_a, 1500);
+        auto all = h.introduced_members();
+        CHECK(all.size() == 2 && all[0].fp == fp_b && all[1].fp == fp_c, "they are listed in the order they were first seen");
+        h.delete_introduced_except({fp_c});
+        CHECK(!h.introduced(fp_b) && h.introduced(fp_c) && h.introduced_members().size() == 1, "people no longer in any group or invitation can be forgotten");
+        h.delete_introduced_except({});
+        CHECK(h.introduced_members().empty(), "...all of them if need be");
+    }
+
+    std::cout << "Finding the conversation of an outgoing message\n";
+    {
+        HistoryStore h(dir / "outgoing.db", key);
+        h.ensure_conversation(conv_a, fp_a, 1000);
+        h.create_group(id(0x61), "G", fp_a, HistoryStore::Saved, 0, Bytes(), {fp_a, fp_b}, HistoryStore::Active, 1000);
+        h.add_message(msg(conv_a, 1, true, 2000, "direct out"));
+        h.add_message(msg(id(0x61), 2, true, 2001, "group out"));
+        h.add_message(msg(id(0x61), 3, false, 2002, "group in"));
+        auto of = [&](uint8_t n) { return h.conversation_of_outgoing(id(n)); };
+        CHECK(of(1) && *of(1) == conv_a && of(2) && *of(2) == id(0x61), "an outgoing message is found in its direct or group conversation");
+        CHECK(!of(3) && !of(99), "a message we received, or one that doesn't exist, is not");
     }
 
     std::cout << "Groups and delivery survive a restart\n";

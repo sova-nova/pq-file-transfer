@@ -440,6 +440,18 @@ KeyStore::BundleImport KeyStore::import_bundle_for_known_identity(const Identity
     return result;
 }
 
+std::optional<std::vector<uint8_t>> KeyStore::load_contact_bundle_raw(const std::string& name) const {
+    auto dir = contact_dir(name);
+    if (!dir) return std::nullopt;
+    auto pub_kem = read_file_bytes(*dir / "pub_kem");
+    auto pub_dsa = read_file_bytes(*dir / "pub_dsa");
+    auto raw = read_file_bytes(*dir / "bundle");
+    if (raw.empty()) return std::nullopt;
+    auto bundle = parse_identity_bundle(raw);
+    if (!bundle || bundle->signing_key != pub_dsa || bundle->encryption_key != pub_kem) return std::nullopt;
+    return raw;
+}
+
 std::optional<KeyStore::Contact> KeyStore::load_contact(const std::string& name) const {
     auto dir = contact_dir(name);
     if (!dir) return std::nullopt;

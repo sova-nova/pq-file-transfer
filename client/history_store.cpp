@@ -48,7 +48,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 2;
+constexpr int64_t SCHEMA_VERSION = 3;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -98,7 +98,13 @@ const char SCHEMA_REST[] =
     "  token_hash BLOB PRIMARY KEY, label TEXT NOT NULL, created_at INTEGER NOT NULL,"
     "  bound_fp TEXT NOT NULL DEFAULT '', revoked INTEGER NOT NULL DEFAULT 0);"
     "CREATE TABLE IF NOT EXISTS contact_state("
-    "  contact_fp TEXT PRIMARY KEY, bundle_sent INTEGER NOT NULL DEFAULT 0);";
+    "  contact_fp TEXT PRIMARY KEY, bundle_sent INTEGER NOT NULL DEFAULT 0);"
+    // Added in version 3:
+    "CREATE TABLE IF NOT EXISTS group_invites("
+    "  conv_id BLOB PRIMARY KEY, creator_fp TEXT NOT NULL, received_at INTEGER NOT NULL, sealed BLOB NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS introduced_members("
+    "  fp TEXT PRIMARY KEY, bundle BLOB NOT NULL, issued_at INTEGER NOT NULL,"
+    "  introduced_by TEXT NOT NULL, first_seen INTEGER NOT NULL);";
 
 const char CONVERSATION_COLUMNS[] =
     "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
@@ -140,13 +146,19 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
     if (version > SCHEMA_VERSION)
         throw std::runtime_error("This message history was made by a newer version of the app (" + path +
                                  "). Update the app; it can't be opened by this one.");
-    if (has_conversations && version < SCHEMA_VERSION) {
-        migrate_v1_to_v2(db_path);
+    if (has_conversations && version < 2) {
+        migrate_v1_to_v2(db_path);  // rewrites a table, so it keeps a copy of the old file first
+    } else if (has_conversations && version == 2) {
+        // Version 3 only adds tables (group invitations and introduced members): nothing to rewrite.
+        Transaction tx(db_);
+        exec(db_, SCHEMA_REST);
+        exec(db_, "PRAGMA user_version=3");
+        tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=2");
+        exec(db_, "PRAGMA user_version=3");
         tx.commit();
     }
     } catch (...) {
@@ -187,7 +199,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=2");
+            exec(db_, "PRAGMA user_version=3");  // SCHEMA_REST already holds the version 3 tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -499,6 +511,137 @@ std::vector<HistoryStore::Delivery> HistoryStore::deliveries(const Bytes& conver
         out.push_back(std::move(d));
     }
     return out;
+}
+
+std::optional<HistoryStore::Bytes> HistoryStore::conversation_of_outgoing(const Bytes& message_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT conv_id FROM messages WHERE msg_id = ? AND outgoing = 1 LIMIT 1");
+    s.blob(1, message_id);
+    if (!s.step()) return std::nullopt;
+    return s.column_blob(0);
+}
+
+// --- Pending group invitations ---
+
+static const char GROUP_INVITE_AAD[] = "pq-suite v3 history group invite";
+
+std::optional<HistoryStore::GroupInvite> HistoryStore::open_invite(const Bytes& conv_id, const std::string& creator_fp, int64_t received_at, const Bytes& sealed) const {
+    auto plain = unseal(sealed, aad_of(GROUP_INVITE_AAD, conv_id));
+    auto records = plain ? unpack(*plain) : std::nullopt;
+    if (!records || records->empty()) return std::nullopt;  // damaged, or sealed under a different key
+    GroupInvite invite;
+    invite.conversation_id = conv_id;
+    invite.creator_fp = creator_fp;
+    invite.received_at = received_at;
+    invite.records = std::move(*records);
+    return invite;
+}
+
+bool HistoryStore::add_group_invite(const Bytes& conversation_id, const std::string& creator_fp, const Bytes& creation_record, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Bytes sealed = seal(pack({creation_record}), aad_of(GROUP_INVITE_AAD, conversation_id));
+    Stmt(db_, "INSERT OR IGNORE INTO group_invites(conv_id, creator_fp, received_at, sealed) VALUES(?, ?, ?, ?)")
+        .blob(1, conversation_id).text(2, creator_fp).i64(3, now).blob(4, sealed).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+std::optional<HistoryStore::GroupInvite> HistoryStore::group_invite(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT conv_id, creator_fp, received_at, sealed FROM group_invites WHERE conv_id = ?");
+    s.blob(1, conversation_id);
+    if (!s.step()) return std::nullopt;
+    return open_invite(s.column_blob(0), s.column_text(1), s.column_i64(2), s.column_blob(3));
+}
+
+std::vector<HistoryStore::GroupInvite> HistoryStore::group_invites() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT conv_id, creator_fp, received_at, sealed FROM group_invites ORDER BY received_at, rowid");
+    std::vector<GroupInvite> out;
+    while (s.step())
+        if (auto invite = open_invite(s.column_blob(0), s.column_text(1), s.column_i64(2), s.column_blob(3))) out.push_back(std::move(*invite));
+    return out;
+}
+
+size_t HistoryStore::group_invite_count() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT COUNT(*) FROM group_invites");
+    return s.step() ? static_cast<size_t>(s.column_i64(0)) : 0;
+}
+
+bool HistoryStore::hold_for_invite(const Bytes& conversation_id, const Bytes& record) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    std::vector<Bytes> records;
+    {
+        Stmt s(db_, "SELECT sealed FROM group_invites WHERE conv_id = ?");
+        s.blob(1, conversation_id);
+        if (!s.step()) return false;
+        auto plain = unseal(s.column_blob(0), aad_of(GROUP_INVITE_AAD, conversation_id));
+        auto unpacked = plain ? unpack(*plain) : std::nullopt;
+        if (!unpacked || unpacked->empty()) return false;
+        records = std::move(*unpacked);
+    }
+    if (std::find(records.begin(), records.end(), record) != records.end()) return true;
+    if (records.size() >= 1 + MAX_HELD_RECORDS) return false;
+    records.push_back(record);
+    Stmt(db_, "UPDATE group_invites SET sealed = ? WHERE conv_id = ?")
+        .blob(1, seal(pack(records), aad_of(GROUP_INVITE_AAD, conversation_id))).blob(2, conversation_id).step();
+    tx.commit();
+    return true;
+}
+
+void HistoryStore::delete_group_invite(const Bytes& conversation_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "DELETE FROM group_invites WHERE conv_id = ?").blob(1, conversation_id).step();
+}
+
+// --- Introduced members ---
+
+void HistoryStore::save_introduced(const std::string& fp, const Bytes& bundle, int64_t issued_at, const std::string& introduced_by, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT INTO introduced_members(fp, bundle, issued_at, introduced_by, first_seen) VALUES(?, ?, ?, ?, ?) "
+              "ON CONFLICT(fp) DO UPDATE SET bundle = excluded.bundle, issued_at = excluded.issued_at "
+              "WHERE excluded.issued_at > introduced_members.issued_at")
+        .text(1, fp).blob(2, bundle).i64(3, issued_at).text(4, introduced_by).i64(5, now).step();
+}
+
+static HistoryStore::IntroducedMember read_introduced(Stmt& s) {
+    HistoryStore::IntroducedMember m;
+    m.fp = s.column_text(0);
+    m.bundle = s.column_blob(1);
+    m.issued_at = s.column_i64(2);
+    m.introduced_by = s.column_text(3);
+    m.first_seen = s.column_i64(4);
+    return m;
+}
+
+std::optional<HistoryStore::IntroducedMember> HistoryStore::introduced(const std::string& fp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT fp, bundle, issued_at, introduced_by, first_seen FROM introduced_members WHERE fp = ?");
+    s.text(1, fp);
+    if (!s.step()) return std::nullopt;
+    return read_introduced(s);
+}
+
+std::vector<HistoryStore::IntroducedMember> HistoryStore::introduced_members() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT fp, bundle, issued_at, introduced_by, first_seen FROM introduced_members ORDER BY first_seen, fp");
+    std::vector<IntroducedMember> out;
+    while (s.step()) out.push_back(read_introduced(s));
+    return out;
+}
+
+void HistoryStore::delete_introduced_except(const std::set<std::string>& keep) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> doomed;
+    {
+        Stmt s(db_, "SELECT fp FROM introduced_members");
+        while (s.step()) {
+            std::string fp = s.column_text(0);
+            if (!keep.count(fp)) doomed.push_back(fp);
+        }
+    }
+    for (const auto& fp : doomed) Stmt(db_, "DELETE FROM introduced_members WHERE fp = ?").text(1, fp).step();
 }
 
 // --- Outbox ---
