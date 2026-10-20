@@ -85,9 +85,17 @@ public:
         size_t unread = 0;
         int64_t last_activity = 0;
         bool can_send = false;
+        bool verified = false;           // you compared their fingerprint with them
         std::string cannot_send_reason;  // why not, in words
     };
     std::vector<ChatSummary> chats();
+
+    // --- Trust ---
+    // Marks someone (a contact, or a person known from a group) as verified: you compared their
+    // fingerprint with them yourself. Accepting a message request does this too, because the app
+    // asks you to check the fingerprint first. False if we don't know that person.
+    bool set_verified(const std::string& fp, bool verified);
+    bool is_verified(const std::string& fp);
 
     struct ChatMessage {
         int64_t row = 0;
@@ -115,8 +123,8 @@ public:
         std::string first_text;
     };
     std::vector<Request> requests();
-    // Adds the sender as a contact and delivers what they sent. The caller has already checked
-    // the fingerprint with the user.
+    // Adds the sender as a contact (marked verified) and delivers what they sent. The caller has
+    // already checked the fingerprint with the user.
     bool accept_request(const std::string& sender_fp, const std::string& contact_name, std::string& error);
     void decline_request(const std::string& sender_fp);
 
@@ -126,11 +134,22 @@ public:
     // Members who aren't each other's contacts get a send token from one another when they accept:
     // each makes a token for the others and sends it sealed through the group's creator, who can't
     // read it. Until those arrive the group shows as not ready.
+    // How far a person can be trusted to be who they seem. A group's creator can pass on the keys of
+    // people you have never checked, so the app shows where each person's identity came from.
+    enum class Trust {
+        Unknown,     // we hold no keys for them
+        Introduced,  // someone in a group the creator introduced; nobody has checked their fingerprint
+        Contact,     // in your contacts, not marked verified
+        Verified,    // you compared their fingerprint with them
+    };
     struct GroupMember {
         std::string fp;        // lowercase hex
         std::string name;      // a contact's name; else the display name in their bundle (untrusted text); else a short fingerprint
         bool is_contact = false;
         bool can_send = false; // from here, we can write to them
+        Trust trust = Trust::Unknown;
+        std::string introduced_by;  // for someone known only from a group: the name of who introduced them
+        std::string label;     // for display: "Verified by you", "Contact", "Introduced by Alice" or "Unknown"
     };
     struct GroupSummary {
         std::string id;        // lowercase hex
@@ -224,6 +243,7 @@ private:
     // With `conversation_id`, a send token a member gave us for that group counts too.
     std::optional<Peer> resolve_peer(const std::string& fp, const Bytes& conversation_id = Bytes());
     GroupMember member_info(const std::string& fp, const Bytes& conversation_id = Bytes());
+    std::string person_name(const std::string& fp);  // a contact's name, else a short fingerprint
     // After joining a group: queues the job of making a send token for each member who needs one.
     void queue_group_grants(const Bytes& conversation_id, const std::string& creator_fp, const std::vector<std::string>& others);
     // Turns such a job into signed Forward records for the creator. False if it must be retried.

@@ -155,6 +155,14 @@ public:
     // Forgets everyone not in `keep` (those no longer in any group or pending invitation).
     void delete_introduced_except(const std::set<std::string>& keep);
 
+    // --- People the user has verified ---
+    // "I compared this person's fingerprint with them." It is about the person, not about how we
+    // know them, so it holds whether they are a contact or only known from a group, and carries over
+    // if one becomes the other.
+    void set_verified(const std::string& fp, bool verified, int64_t now);
+    bool is_verified(const std::string& fp);
+    std::vector<std::string> verified_people();
+
     // --- Send tokens other group members gave us ---
     // A token lets us write to one member's mailbox, and is good for one group only. It is a bearer
     // secret, so it is stored encrypted like the messages. Saving again for the same group and

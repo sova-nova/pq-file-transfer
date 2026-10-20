@@ -355,6 +355,9 @@ int main(int argc, char** argv) {
         CHECK(bob.engine->accept_group_invite(hiking, err), "Bob accepts (" + err + ")");
         auto g = find_group(bob, hiking);
         CHECK(g && g->title == "Hiking" && g->creator_fp == alice.fp && !g->created_by_me && g->members.size() == 2 && g->ready, "the group is now his, ready (Alice and Carol are both his contacts)");
+        bool contact_labels = false;
+        if (g) for (auto& mem : g->members) if (mem.fp == carol.fp && mem.trust == MessagingEngine::Trust::Contact && mem.label == "Contact") contact_labels = true;
+        CHECK(contact_labels, "Bob's contacts in the group are labelled \"Contact\" (not verified)");
         CHECK(!find_invite(bob, hiking) && got(bob, hiking, "welcome everyone"), "the held message was delivered, and the invitation is gone");
         auto first = bob.engine->group_messages(hiking);
         CHECK(first.size() == 1 && first[0].sender_fp == alice.fp && first[0].sender_name == "Alice" && !first[0].gap && !first[0].outgoing, "it shows who wrote it, with no gap");
@@ -464,6 +467,10 @@ int main(int argc, char** argv) {
         bool dave_known = false;
         if (invite) for (auto& mem : invite->members) if (mem.fp == dave.fp && mem.name == "dave" && !mem.is_contact && !mem.can_send) dave_known = true;
         CHECK(dave_known, "Bob's invitation names Dave from the bundle Alice passed on, as someone Bob can't write to yet");
+        bool dave_introduced = false;
+        if (invite) for (auto& mem : invite->members)
+            if (mem.fp == dave.fp && mem.trust == MessagingEngine::Trust::Introduced && mem.introduced_by == "Alice" && mem.label == "Introduced by Alice") dave_introduced = true;
+        CHECK(dave_introduced, "...and labels him \"Introduced by Alice\": the keys came from the creator, nobody has checked them");
         CHECK(bob.engine->accept_group_invite(mixed, err) && dave.engine->accept_group_invite(mixed, err), "both accept");
         CHECK(find_group(alice, mixed) && find_group(alice, mixed)->ready, "for Alice it is ready from the start (they are both her contacts)");
 
@@ -495,6 +502,21 @@ int main(int argc, char** argv) {
         bob.engine->mark_group_read(mixed);
         CHECK(wait_for([&] { return member_status(dave, mixed, "Dave to the mixed group", bob.fp) == 3; }, 30000), "and Bob's read receipt reaches Dave directly");
         CHECK(any_notice(bob, "passed on") == false, "no token was reported as passed on (the creator's forwarding doesn't look like misuse)");
+
+        // Trust: Bob compares Dave's fingerprint with him.
+        auto label_of = [&](User& viewer, const std::string& group, const std::string& fp) {
+            auto g = find_group(viewer, group);
+            if (g) for (auto& mem : g->members) if (mem.fp == fp) return std::make_pair(mem.trust, mem.label);
+            return std::make_pair(MessagingEngine::Trust::Unknown, std::string("(not found)"));
+        };
+        CHECK(label_of(bob, mixed, dave.fp).second == "Introduced by Alice" && !bob.engine->is_verified(dave.fp), "after the group is working Dave is still just introduced");
+        CHECK(!bob.engine->set_verified(std::string(64, 'a'), true), "someone Bob knows nothing about can't be marked verified");
+        CHECK(bob.engine->set_verified(dave.fp, true) && bob.engine->is_verified(dave.fp), "Bob marks Dave verified (he compared fingerprints)");
+        CHECK(label_of(bob, mixed, dave.fp).first == MessagingEngine::Trust::Verified && label_of(bob, mixed, dave.fp).second == "Verified by you", "Dave now reads \"Verified by you\"");
+        bob.engine->set_verified(dave.fp, false);
+        CHECK(label_of(bob, mixed, dave.fp).second == "Introduced by Alice", "taking it back returns him to \"Introduced by Alice\"");
+        bob.engine->set_verified(dave.fp, true);
+        CHECK(label_of(alice, mixed, bob.fp).second == "Contact" && label_of(dave, mixed, bob.fp).second == "Introduced by Alice", "each person's labels are their own: Alice sees Bob as a contact, Dave sees him as introduced");
     }
 
     std::cout << "8. Hostile input\n";
@@ -601,6 +623,9 @@ int main(int argc, char** argv) {
         CHECK(reqs.size() == 1 && reqs[0].sender_fp == erin.fp && alice.engine->accept_request(erin.fp, "Erin", accept_err), "Alice accepts Erin as a contact (" + accept_err + ")");
         auto invite = find_invite(alice, from_erin);
         CHECK(invite && invite->title == "Erin's group" && invite->creator_name == "Erin", "then the invitation appears, from a contact");
+        bool erin_verified = false;
+        for (auto& chat : alice.engine->chats()) if (chat.contact_fp == erin.fp && chat.verified) erin_verified = true;
+        CHECK(erin_verified && alice.engine->is_verified(erin.fp), "accepting the request counted as checking Erin's fingerprint: she is verified");
         CHECK(alice.engine->accept_group_invite(from_erin, err), "she accepts it (" + err + ")");
         erin.engine->send_group_text(from_erin, "Hello from Erin", err);
         alice.engine->send_group_text(from_erin, "Hello Erin", err);

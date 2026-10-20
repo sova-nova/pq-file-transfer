@@ -185,18 +185,43 @@ std::optional<MessagingEngine::Peer> MessagingEngine::resolve_peer(const std::st
     return found;
 }
 
+std::string MessagingEngine::person_name(const std::string& fp) {
+    if (auto contact = keys_.find_contact_by_fingerprint(fp)) return contact->name;
+    return short_fp(fp) + "...";
+}
+
 MessagingEngine::GroupMember MessagingEngine::member_info(const std::string& fp, const Bytes& conversation_id) {
     GroupMember m;
     m.fp = fp;
+    const bool verified = history_->is_verified(fp);
     if (auto peer = resolve_peer(fp, conversation_id)) {
         m.name = peer->name;
         m.is_contact = peer->is_contact;
         m.can_send = peer->can_send;
+        if (!peer->is_contact) {
+            if (auto row = history_->introduced(fp)) m.introduced_by = person_name(row->introduced_by);
+        }
+        m.trust = verified ? Trust::Verified : (peer->is_contact ? Trust::Contact : Trust::Introduced);
     } else {
         m.name = short_fp(fp) + "...";
     }
+    switch (m.trust) {
+        case Trust::Verified: m.label = "Verified by you"; break;
+        case Trust::Contact: m.label = "Contact"; break;
+        case Trust::Introduced: m.label = "Introduced by " + (m.introduced_by.empty() ? std::string("the group's creator") : m.introduced_by); break;
+        case Trust::Unknown: m.label = "Unknown"; break;
+    }
     return m;
 }
+
+bool MessagingEngine::set_verified(const std::string& fp, bool verified) {
+    if (!keys_.find_contact_by_fingerprint(fp) && !history_->introduced(fp)) return false;  // we don't know them
+    history_->set_verified(fp, verified, unix_now());
+    bump();
+    return true;
+}
+
+bool MessagingEngine::is_verified(const std::string& fp) { return history_->is_verified(fp); }
 
 // --- Setting up and cards ---
 
@@ -301,6 +326,7 @@ std::vector<MessagingEngine::ChatSummary> MessagingEngine::chats() {
         s.contact_name = name;
         s.contact_fp = contact->fingerprint;
         s.can_send = contact->can_message();
+        s.verified = history_->is_verified(contact->fingerprint);
         if (!contact->kem_verified) s.cannot_send_reason = "Their encryption key isn't verified. Ask them for a new contact card.";
         else if (contact->relay_address.empty()) s.cannot_send_reason = "They haven't shared a messaging address. Ask them for a new contact card.";
         else if (contact->send_token.size() != 32) s.cannot_send_reason = "You don't have permission to message them yet. Ask them for a new contact card.";
@@ -582,8 +608,10 @@ bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
         }
         if (for_a_group) {
             if (bundle && bundle->fingerprint() == sender_hex) {  // a newer bundle replaces the one we hold
+                const Bytes old_key = member->pub_kem;
                 history_->save_introduced(sender_hex, bundle->raw, static_cast<int64_t>(bundle->issued_at), std::string(), unix_now());
                 member = resolve_peer(sender_hex);
+                if (member && member->pub_kem != old_key) notify(member->name + " is using a new encryption key.");
             }
             bool changed = false;
             if (member) {
@@ -671,6 +699,7 @@ bool MessagingEngine::accept_request(const std::string& sender_fp, const std::st
     // Now that they are a contact, handle what they sent exactly as if it had just arrived.
     auto contact = keys_.load_contact(contact_name);
     if (!contact) { error = "Could not save the contact"; return false; }
+    history_->set_verified(sender_fp, true, unix_now());  // the caller had the user check their fingerprint
     // A request may carry a group invitation: signed records, then the bundles of the people it introduces.
     std::vector<Bytes> introduced;
     for (const auto& row : rows)

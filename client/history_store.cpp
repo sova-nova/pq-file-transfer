@@ -48,7 +48,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 4;
+constexpr int64_t SCHEMA_VERSION = 5;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -108,7 +108,10 @@ const char SCHEMA_REST[] =
     // Added in version 4:
     "CREATE TABLE IF NOT EXISTS member_tokens("
     "  conv_id BLOB NOT NULL, fp TEXT NOT NULL, sealed BLOB NOT NULL, received_at INTEGER NOT NULL,"
-    "  PRIMARY KEY(conv_id, fp));";
+    "  PRIMARY KEY(conv_id, fp));"
+    // Added in version 5:
+    "CREATE TABLE IF NOT EXISTS verified_people("
+    "  fp TEXT PRIMARY KEY, verified_at INTEGER NOT NULL);";
 
 const char CONVERSATION_COLUMNS[] =
     "id, contact_fp, created_at, last_activity, send_delivery, send_read, kind, state, title, creator_fp, mode, timer_seconds, previous_id";
@@ -153,17 +156,17 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
     if (has_conversations && version < 2) {
         migrate_v1_to_v2(db_path);  // rewrites a table, so it keeps a copy of the old file first
     } else if (has_conversations && version < SCHEMA_VERSION) {
-        // Versions 3 and 4 only add tables (group invitations, introduced members, member tokens):
-        // nothing to rewrite, so nothing to back up.
+        // Versions 3 to 5 only add tables (group invitations, introduced members, member tokens,
+        // verified people): nothing to rewrite, so nothing to back up.
         Transaction tx(db_);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=4");
+        exec(db_, "PRAGMA user_version=5");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=4");
+        exec(db_, "PRAGMA user_version=5");
         tx.commit();
     }
     } catch (...) {
@@ -204,7 +207,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=4");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=5");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -647,6 +650,29 @@ void HistoryStore::delete_introduced_except(const std::set<std::string>& keep) {
         }
     }
     for (const auto& fp : doomed) Stmt(db_, "DELETE FROM introduced_members WHERE fp = ?").text(1, fp).step();
+}
+
+// --- Verified people ---
+
+void HistoryStore::set_verified(const std::string& fp, bool verified, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (verified) Stmt(db_, "INSERT OR IGNORE INTO verified_people(fp, verified_at) VALUES(?, ?)").text(1, fp).i64(2, now).step();
+    else Stmt(db_, "DELETE FROM verified_people WHERE fp = ?").text(1, fp).step();
+}
+
+bool HistoryStore::is_verified(const std::string& fp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT 1 FROM verified_people WHERE fp = ?");
+    s.text(1, fp);
+    return s.step();
+}
+
+std::vector<std::string> HistoryStore::verified_people() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT fp FROM verified_people ORDER BY verified_at, fp");
+    std::vector<std::string> out;
+    while (s.step()) out.push_back(s.column_text(0));
+    return out;
 }
 
 // --- Member tokens ---

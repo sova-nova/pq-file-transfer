@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 4, "opening it upgrades it to the current version (4)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 5, "opening it upgrades it to the current version (5)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 4, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 5, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 4 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 5 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 4, "opening it upgrades it to the current version (4)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 5, "opening it upgrades it to the current version (5)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -585,6 +585,23 @@ int main() {
         auto of = [&](uint8_t n) { return h.conversation_of_outgoing(id(n)); };
         CHECK(of(1) && *of(1) == conv_a && of(2) && *of(2) == id(0x61), "an outgoing message is found in its direct or group conversation");
         CHECK(!of(3) && !of(99), "a message we received, or one that doesn't exist, is not");
+    }
+
+    std::cout << "People the user has verified\n";
+    {
+        HistoryStore h(dir / "verified.db", key);
+        const std::string fp_c = fp_of('c');
+        CHECK(!h.is_verified(fp_a) && h.verified_people().empty(), "nobody is verified to begin with");
+        h.set_verified(fp_b, true, 100);
+        h.set_verified(fp_a, true, 200);
+        h.set_verified(fp_b, true, 300);
+        CHECK(h.is_verified(fp_a) && h.is_verified(fp_b) && !h.is_verified(fp_c), "people are marked verified one by one");
+        auto all = h.verified_people();
+        CHECK(all.size() == 2 && all[0] == fp_b && all[1] == fp_a, "marking someone again changes nothing, and they are listed in the order verified");
+        h.set_verified(fp_b, false, 400);
+        CHECK(!h.is_verified(fp_b) && h.is_verified(fp_a), "it can be taken back");
+        h.set_verified(fp_c, false, 500);
+        CHECK(!h.is_verified(fp_c) && h.verified_people().size() == 1, "taking it back from someone not verified is harmless");
     }
 
     std::cout << "Send tokens other group members gave us\n";
