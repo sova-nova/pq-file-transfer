@@ -44,6 +44,7 @@ enum class RecordType : uint32_t {
     Checkpoint = 7,    // payload: see checkpoint_payload(); "I have seen the archive up to this entry" (version 2 only)
     DeleteRequest = 8, // payload: see delete_request_payload(); "let's delete this chat, or these entries" (version 2 only)
     DeleteAccept = 9,  // payload: see delete_accept_payload(); one member's agreement, with their archive key's signature (version 2 only)
+    Attachment = 10,   // payload: see attachment_payload(); a message that carries a file (version 2 only)
 };
 
 enum class ReceiptKind : uint8_t { Delivered = 1, Read = 2 };
@@ -174,6 +175,34 @@ struct CheckpointInfo {
 // Throws std::runtime_error if the number is 0 or the hash isn't HASH_BYTES.
 Bytes checkpoint_payload(uint64_t number, const Bytes& hash);
 std::optional<CheckpointInfo> parse_checkpoint_payload(const Bytes& payload);
+
+// --- Attachments ---
+//
+// A message that carries a file. The file itself is encrypted and parked on the sender's relay; this record holds
+// only what everyone in the chat may see (and what the archive keeps): the file's ID, name and size, the SHA-256 of
+// its contents, when the relay will delete it, and where it is. The key that opens it, and each recipient's one-time
+// download token, are NOT here: they travel only in that recipient's own envelope (envelope.h), so a chat restored
+// from its archive can never yield a readable file. A transcript record, like text: it has a place in the chain.
+//
+//   payload = blob file_id (16) | blob name | u64 size | blob sha256 (32) | u64 expires_at | blob relay_address | blob relay_id (32) | blob caption
+constexpr size_t MAX_ATTACHMENT_NAME_BYTES = 255;
+constexpr size_t MAX_ATTACHMENT_CAPTION_BYTES = 1024;
+constexpr size_t MAX_ATTACHMENT_PAYLOAD = 2048;
+constexpr uint64_t MAX_ATTACHMENT_FILE_BYTES = 15ull * 1024 * 1024 * 1024;
+
+struct AttachmentInfo {
+    Bytes file_id;            // 16 bytes
+    std::string name;         // as the sender called it: shown, and made safe before it is ever used as a file name
+    uint64_t size = 0;        // bytes of the file itself
+    Bytes sha256;             // 32 bytes: of the file's contents, checked after downloading
+    uint64_t expires_at = 0;  // unix seconds: when the relay will delete it
+    std::string relay_address;  // host:port of the relay that holds it (visible printable characters only)
+    Bytes relay_id;           // HASH_BYTES: that relay's identity, to pin
+    std::string caption;      // optional text to go with it
+};
+// Throws std::runtime_error if any part is not valid.
+Bytes attachment_payload(const AttachmentInfo& info);
+std::optional<AttachmentInfo> parse_attachment_payload(const Bytes& payload);
 
 // --- Deleting by agreement ---
 //

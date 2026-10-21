@@ -1,5 +1,6 @@
 // Tests for signed message records and sealed envelopes.
 #include "archive.h"
+#include "attachment.h"
 #include "crypto_engine.h"
 #include "keyring.h"
 #include "envelope.h"
@@ -8,10 +9,13 @@
 #include "relay_protocol.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <set>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 
 using namespace chat;
 
@@ -22,6 +26,7 @@ static int failures = 0;
         else { std::cout << "  FAIL " << (msg) << "\n"; failures++; } \
     } while (0)
 
+static bool has(const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; }
 template <typename F> static bool throws(F f) { try { f(); } catch (const std::exception&) { return true; } return false; }
 
 struct Person {
@@ -652,7 +657,7 @@ int main() {
         CHECK(as_record(8, 2, Bytes(), 0, sp).has_value() && as_record(9, 2, Bytes(), 0, ap).has_value(), "(control) both parse as version 2 records");
         CHECK(!as_record(8, 1, Bytes(), 0, sp) && !as_record(9, 1, Bytes(), 0, ap), "...but not as version 1");
         CHECK(!as_record(8, 2, CryptoEngine::random_bytes(HASH_BYTES), 0, sp) && !as_record(9, 2, Bytes(), 1, ap), "they are outside the transcript: no previous entry, nothing seen");
-        CHECK(!as_record(8, 2, Bytes(), 0, Bytes(MAX_DELETE_REQUEST_PAYLOAD + 1, 1)) && !as_record(9, 2, Bytes(), 0, Bytes(MAX_DELETE_ACCEPT_PAYLOAD + 1, 1)) && !as_record(10, 2, Bytes(), 0, sp), "and their payloads have limits, and there is no type 10");
+        CHECK(!as_record(8, 2, Bytes(), 0, Bytes(MAX_DELETE_REQUEST_PAYLOAD + 1, 1)) && !as_record(9, 2, Bytes(), 0, Bytes(MAX_DELETE_ACCEPT_PAYLOAD + 1, 1)) && !as_record(11, 2, Bytes(), 0, sp), "and their payloads have limits, and there is no type 11");
     }
 
     std::cout << "The keyring\n";
@@ -805,6 +810,356 @@ int main() {
         auto shorter = archive::verify_chain(id, start, truncated_chain);
         CHECK(shorter && shorter->number == 4, "a chain with its last entry withheld still verifies, but ends earlier (the caller compares it with the relay's reported end)");
         CHECK(!archive::verify_chain(CryptoEngine::random_bytes(16), start, entries), "the same entries under another archive's ID do not verify");
+    }
+
+    std::cout << "Attachment chunks\n";
+    {
+        namespace fs = std::filesystem;
+        auto begin_ok = [&](uint64_t plain) {
+            auto plan = attachment::plan_for(plain);
+            relay::FileBegin b;
+            b.file_id = CryptoEngine::random_bytes(16); b.total_size = plan.ciphertext_size; b.chunk_size = plan.chunk_size; b.chunk_count = plan.chunk_count; b.expires_at = 1;
+            b.token_hashes = {CryptoEngine::random_bytes(32)};
+            return relay::decode_file_begin(relay::encode(b)).has_value();
+        };
+        bool relay_accepts = true;
+        for (uint64_t size : std::initializer_list<uint64_t>{0, 1, 100, 49151, 49152, 49153, 98304, 100000, 10ull * 1024 * 1024, 1024ull * 1024 * 1024, attachment::MAX_PLAINTEXT_BYTES}) relay_accepts &= begin_ok(size);
+        CHECK(relay_accepts, "for every size, from empty to the largest, the chunking this makes is one the relay's protocol accepts");
+        auto p0 = attachment::plan_for(0), p1 = attachment::plan_for(1), pe = attachment::plan_for(2 * 49152), pe1 = attachment::plan_for(2 * 49152 + 1);
+        CHECK(p0.chunk_count == 1 && p0.ciphertext_size == 16 && p1.chunk_count == 1 && p1.ciphertext_size == 17 && pe.chunk_count == 2 && pe.ciphertext_size == 2 * 49152 + 32 && pe1.chunk_count == 3 && pe1.chunk_size == 49168,
+              "an empty file is one chunk holding only its tag; whole multiples and one over fill chunks as expected");
+        CHECK(throws([&] { attachment::plan_for(attachment::MAX_PLAINTEXT_BYTES + 1); }) && attachment::MAX_PLAINTEXT_BYTES == MAX_ATTACHMENT_FILE_BYTES, "a file over the limit is refused, and the file layer and the record agree on the limit");
+
+        const Bytes key = CryptoEngine::random_bytes(32), fid = CryptoEngine::random_bytes(16);
+        const Bytes plain = CryptoEngine::random_bytes(300);
+        Bytes sealed = attachment::seal_chunk(key, fid, 3, 10, plain);
+        auto opened = attachment::open_chunk(key, fid, 3, 10, sealed);
+        CHECK(opened && *opened == plain && sealed.size() == plain.size() + 16, "a chunk opens to what was sealed, with a 16-byte tag and no nonce stored (it comes from the chunk number)");
+        CHECK(!contains(sealed, std::string(plain.begin(), plain.begin() + 16)), "the content is not visible in it");
+        CHECK(!attachment::open_chunk(CryptoEngine::random_bytes(32), fid, 3, 10, sealed) && !attachment::open_chunk(key, CryptoEngine::random_bytes(16), 3, 10, sealed) &&
+                  !attachment::open_chunk(key, fid, 4, 10, sealed) && !attachment::open_chunk(key, fid, 3, 11, sealed) && !attachment::open_chunk(key, fid, 2, 10, sealed),
+              "it opens only under its own key, for its own file, at its own place, among its own count of chunks: it can't be moved or repeated");
+        CHECK(attachment::seal_chunk(key, fid, 0, 10, plain) != attachment::seal_chunk(key, fid, 1, 10, plain) && attachment::seal_chunk(key, fid, 0, 10, plain) == attachment::seal_chunk(key, fid, 0, 10, plain),
+              "the same content in two places seals differently (the place is the nonce), while one place always seals the same: fine, because the key is this file's alone");
+        std::set<Bytes> distinct;
+        for (uint32_t i = 0; i < 2000; i++) distinct.insert(attachment::seal_chunk(key, fid, i, 2000, Bytes(32, 0)));
+        CHECK(distinct.size() == 2000, "2,000 chunks of identical content under one key all seal differently: no nonce repeats");
+        int accepted = 0;
+        for (size_t i = 0; i < sealed.size(); i++) {
+            Bytes bad = sealed;
+            bad[i] ^= 1;
+            if (attachment::open_chunk(key, fid, 3, 10, bad)) accepted++;
+        }
+        bool prefixes_fail = true;
+        for (size_t n = 0; n < sealed.size(); n += 11)
+            if (attachment::open_chunk(key, fid, 3, 10, Bytes(sealed.begin(), sealed.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes_fail = false;
+        CHECK(accepted == 0 && prefixes_fail && !attachment::open_chunk(key, fid, 3, 10, Bytes()), "a one-bit change anywhere, any truncation, or nothing at all, is refused");
+        Bytes empty_sealed = attachment::seal_chunk(key, fid, 0, 1, Bytes());
+        auto empty_opened = attachment::open_chunk(key, fid, 0, 1, empty_sealed);
+        CHECK(empty_sealed.size() == 16 && empty_opened && empty_opened->empty(), "an empty chunk is just a tag, and opens");
+        CHECK(throws([&] { attachment::seal_chunk(Bytes(31, 1), fid, 0, 1, plain); }) && throws([&] { attachment::seal_chunk(key, Bytes(15, 1), 0, 1, plain); }) && throws([&] { attachment::seal_chunk(key, fid, 1, 1, plain); }) &&
+                  throws([&] { attachment::seal_chunk(key, fid, 0, 0, plain); }) && throws([&] { attachment::seal_chunk(key, fid, 0, 1, Bytes(attachment::CHUNK_PLAINTEXT_BYTES + 1, 1)); }) &&
+                  attachment::open_chunk(key, fid, 0, 1, attachment::seal_chunk(key, fid, 0, 1, Bytes(attachment::CHUNK_PLAINTEXT_BYTES, 1))),
+              "a bad key, ID, place or count, or too large a chunk, is refused; the largest chunk is accepted");
+
+        // Hashing a piece at a time gives the same answer as hashing at once.
+        bool hashes_match = true;
+        for (size_t size : {0u, 1u, 55u, 64u, 1000u, 100000u}) {
+            Bytes data = CryptoEngine::random_bytes(size);
+            attachment::Sha256 h;
+            for (size_t at = 0; at < size; at += 777) h.update(data.data() + at, std::min<size_t>(777, size - at));
+            hashes_match &= h.finish() == CryptoEngine::sha256(data);
+        }
+        CHECK(hashes_match, "hashing in pieces gives the same SHA-256 as all at once, for empty to large");
+    }
+
+    std::cout << "Attachment files\n";
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / ("pq-attach-test-" + std::to_string(::getpid()));
+        fs::remove_all(dir);
+        fs::create_directories(dir / "in");
+        fs::create_directories(dir / "out");
+        auto write_file = [&](const fs::path& p, const Bytes& data) { std::ofstream f(p, std::ios::binary); f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())); };
+        auto read_file = [&](const fs::path& p) { std::ifstream f(p, std::ios::binary); return Bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); };
+        const Bytes key = CryptoEngine::random_bytes(32), fid = CryptoEngine::random_bytes(16);
+        // Sends a file through the encryptor and into a decryptor; returns what happened.
+        struct Result { bool ok = false; std::string error; fs::path saved; };
+        auto round_trip = [&](const Bytes& content, const std::string& name, const fs::path& out_dir) {
+            Result r;
+            const fs::path src = dir / "in" / "source.bin";
+            write_file(src, content);
+            auto fp = attachment::fingerprint_file(src, r.error);
+            if (!fp) return r;
+            attachment::Encryptor enc(src, key, fid, fp->size);
+            attachment::Decryptor dec(out_dir, name, key, fid, fp->size, fp->sha256);
+            if (!dec.begin(false, r.error)) return r;
+            for (uint32_t i = 0; i < enc.plan().chunk_count; i++) {
+                Bytes sealed;
+                if (!enc.chunk(i, sealed, r.error) || !dec.accept(i, sealed, r.error)) return r;
+            }
+            r.ok = dec.finish(r.saved, r.error);
+            return r;
+        };
+
+        const Bytes three = CryptoEngine::random_bytes(2 * 49152 + 31696);
+        write_file(dir / "in" / "source.bin", three);
+        std::string err;
+        auto fp = attachment::fingerprint_file(dir / "in" / "source.bin", err);
+        CHECK(fp && fp->size == three.size() && fp->sha256 == CryptoEngine::sha256(three), "a file's size and SHA-256 are worked out by reading it once");
+        CHECK(!attachment::fingerprint_file(dir / "in" / "missing.bin", err) && !err.empty(), "a file that isn't there is refused with a reason");
+
+        auto r = round_trip(three, "holiday photo.jpg", dir / "out");
+        CHECK(r.ok && r.saved == dir / "out" / "holiday photo.jpg" && read_file(r.saved) == three, "a file of three chunks goes through the encryptor and the decryptor and comes out identical (" + r.error + ")");
+        CHECK(!fs::exists(dir / "out" / (".pqft-" + bytes_to_hex(fid).substr(0, 16) + ".part")), "with no temporary file left behind");
+        for (size_t size : {size_t(0), size_t(1), size_t(49152), size_t(49153), size_t(2 * 49152), size_t(5 * 1024 * 1024)}) {
+            Bytes content = CryptoEngine::random_bytes(size);
+            auto x = round_trip(content, "size-" + std::to_string(size) + ".bin", dir / "out");
+            CHECK(x.ok && read_file(x.saved) == content, "files of " + std::to_string(size) + " bytes (empty, one byte, exact chunk multiples, 5 MiB) come out identical (" + x.error + ")");
+        }
+        auto again = round_trip(three, "holiday photo.jpg", dir / "out");
+        CHECK(again.ok && again.saved == dir / "out" / "holiday photo (2).jpg" && read_file(dir / "out" / "holiday photo.jpg") == three, "a file with a name already taken is saved under another: nothing existing is overwritten");
+        auto sneaky = round_trip(three, "../../etc/passwd", dir / "out");
+        CHECK(sneaky.ok && sneaky.saved.parent_path() == dir / "out" && sneaky.saved.filename() == "_.._etc_passwd", "a name that tries to climb out of the folder is made harmless and the file stays inside it");
+
+        // Every way the end can fail leaves nothing saved.
+        const fs::path out2 = dir / "out2";
+        fs::create_directories(out2);
+        auto count_files = [&](const fs::path& d) { size_t n = 0; for (auto& e : fs::directory_iterator(d)) { (void)e; n++; } return n; };
+        {
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size());
+            attachment::Decryptor dec(out2, "x.bin", key, fid, three.size(), CryptoEngine::sha256(Bytes{1}));  // the wrong fingerprint
+            std::string e;
+            dec.begin(false, e);
+            for (uint32_t i = 0; i < 3; i++) { Bytes c; enc.chunk(i, c, e); dec.accept(i, c, e); }
+            fs::path saved;
+            CHECK(!dec.finish(saved, e) && has(e, "does not match the fingerprint") && count_files(out2) == 0, "a file that doesn't match the fingerprint in the signed message is not saved, and its partial file is removed");
+        }
+        {
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size());
+            attachment::Decryptor dec(out2, "x.bin", key, fid, three.size(), fp->sha256);
+            std::string e;
+            dec.begin(false, e);
+            Bytes c0, c1, c2;
+            enc.chunk(0, c0, e); enc.chunk(1, c1, e); enc.chunk(2, c2, e);
+            CHECK(!dec.accept(1, c1, e) && has(e, "out of order"), "a chunk that skips ahead is refused");
+            CHECK(dec.accept(0, c0, e) && !dec.accept(0, c0, e), "(and one repeated)");
+            Bytes bad = c1;
+            bad[100] ^= 1;
+            CHECK(!dec.accept(1, bad, e) && has(e, "damaged"), "a chunk that has been altered is refused");
+            CHECK(!dec.accept(1, c2, e), "a chunk from another place is refused");
+            Bytes wrong_file;
+            { attachment::Encryptor other(dir / "in" / "source.bin", key, CryptoEngine::random_bytes(16), three.size()); other.chunk(1, wrong_file, e); }
+            CHECK(!dec.accept(1, wrong_file, e), "and one from another file");
+            CHECK(dec.accept(1, c1, e), "(the right one still works)");
+            fs::path saved;
+            CHECK(!dec.finish(saved, e) && has(e, "not complete") && count_files(out2) == 1, "finishing before the last chunk is refused (only the partial file exists)");
+            dec.abort();
+            CHECK(count_files(out2) == 0, "and aborting throws away what was written");
+        }
+        {
+            attachment::Decryptor dec(out2, "x.bin", key, fid, three.size() + 1, fp->sha256);  // told the file is a byte longer than it is
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size());
+            std::string e;
+            dec.begin(false, e);
+            bool refused = false;
+            for (uint32_t i = 0; i < 3 && !refused; i++) { Bytes c; enc.chunk(i, c, e); refused = !dec.accept(i, c, e); }
+            CHECK(refused, "a chunk of the wrong size for the declared file size is refused");
+            dec.abort();
+        }
+        {
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size() + 5000);  // the file is shorter than expected
+            std::string e;
+            Bytes c;
+            CHECK(enc.chunk(0, c, e) && enc.chunk(1, c, e) && !enc.chunk(2, c, e) && has(e, "changed"), "a file that is shorter when sent than when measured is noticed: " + e);
+            CHECK(!enc.chunk(3, c, e) && has(e, "past the end"), "and a chunk past the end is refused");
+        }
+        {
+            attachment::Decryptor dec(dir / "no-such-folder", "x.bin", key, fid, 10, CryptoEngine::sha256(Bytes{1}));
+            std::string e;
+            CHECK(!dec.begin(false, e) && has(e, "doesn't exist"), "saving into a folder that doesn't exist is refused: " + e);
+        }
+
+        // Carrying on after an interruption.
+        const fs::path out3 = dir / "out3";
+        fs::create_directories(out3);
+        {
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size());
+            std::string e;
+            {
+                attachment::Decryptor first(out3, "big.bin", key, fid, three.size(), fp->sha256);
+                first.begin(false, e);
+                for (uint32_t i = 0; i < 2; i++) { Bytes c; enc.chunk(i, c, e); first.accept(i, c, e); }
+            }  // interrupted after two chunks
+            const fs::path part = out3 / (".pqft-" + bytes_to_hex(fid).substr(0, 16) + ".part");
+            CHECK(fs::exists(part) && fs::file_size(part) == 2 * 49152, "(an interrupted download leaves what it had)");
+            { std::ofstream junk(part, std::ios::binary | std::ios::app); junk << "half a chunk that never finished"; }
+            attachment::Decryptor second(out3, "big.bin", key, fid, three.size(), fp->sha256);
+            CHECK(second.begin(true, e) && second.next_chunk() == 2 && fs::file_size(part) == 2 * 49152, "resuming keeps the whole chunks, drops a partial one, and asks for chunk 2 next");
+            Bytes c;
+            enc.chunk(2, c, e);
+            fs::path saved;
+            CHECK(second.accept(2, c, e) && second.finish(saved, e) && read_file(saved) == three, "and the rest completes the file, identical to the original, checked as a whole");
+        }
+        {
+            attachment::Encryptor enc(dir / "in" / "source.bin", key, fid, three.size());
+            std::string e;
+            const fs::path part = out3 / (".pqft-" + bytes_to_hex(fid).substr(0, 16) + ".part");
+            {
+                attachment::Decryptor first(out3, "damaged.bin", key, fid, three.size(), fp->sha256);
+                first.begin(false, e);
+                Bytes c;
+                enc.chunk(0, c, e); first.accept(0, c, e);
+            }
+            { std::fstream f(part, std::ios::binary | std::ios::in | std::ios::out); f.seekp(10); f.put('\x55'); }  // the half-finished file is tampered with on disk
+            attachment::Decryptor second(out3, "damaged.bin", key, fid, three.size(), fp->sha256);
+            second.begin(true, e);
+            Bytes c1, c2;
+            enc.chunk(1, c1, e); enc.chunk(2, c2, e);
+            second.accept(1, c1, e); second.accept(2, c2, e);
+            fs::path saved;
+            CHECK(!second.finish(saved, e) && has(e, "does not match") && saved.empty(), "a leftover partial file that was altered is caught: the final check covers it too, and nothing is saved");
+        }
+        {
+            attachment::Decryptor fresh(out3, "restart.bin", key, fid, three.size(), fp->sha256);
+            std::string e;
+            CHECK(fresh.begin(true, e) && fresh.next_chunk() == 0, "resuming when there is nothing to resume from simply starts at the beginning");
+            fresh.abort();
+        }
+        fs::remove_all(dir);
+    }
+
+    std::cout << "Safe file names\n";
+    {
+        namespace fs = std::filesystem;
+        auto san = attachment::sanitize_filename;
+        CHECK(san("report.pdf") == "report.pdf" && san("résumé 日本.pdf") == "résumé 日本.pdf" && san("a b (1).txt") == "a b (1).txt", "ordinary names, including spaces, accents and other scripts, are left as they are");
+        CHECK(san("../../etc/passwd") == "_.._etc_passwd" && san("a/b\\c") == "a_b_c" && san("C:\\Windows\\x") == "C__Windows_x", "path separators and drive colons are replaced");
+        CHECK(san("a*b?c\"d<e>f|g") == "a_b_c_d_e_f_g", "characters Windows forbids are replaced");
+        CHECK(san(std::string("a\nb\tc\x01" "d\x7f" "e")) == "a_b_c_d_e", "control characters are replaced");
+        CHECK(san("invoice\xE2\x80\xAE" "fdp.exe") == "invoice_fdp.exe" && san("a\xE2\x80\x8F" "b") == "a_b" && san("x\xE2\x81\xA7y") == "x_y", "text-direction overrides, isolates and marks, which can make a name read backwards, are replaced");
+        CHECK(san(".hidden") == "hidden" && san("  spaced  ") == "spaced" && san("name.") == "name" && san("...") == "attachment" && san("") == "attachment" && san("   ") == "attachment", "no leading or trailing dots or spaces, and never empty");
+        CHECK(san("\xFF\xFE") == "attachment" && san("bad\xC0\xAF") == "attachment" && san("\xED\xA0\x80") == "attachment" && san("\xF4\x90\x80\x80") == "attachment", "text that isn't valid UTF-8 (including overlong, surrogate and out-of-range forms) is not used");
+        CHECK(san("CON") == "_CON" && san("con.txt") == "_con.txt" && san("NUL.tar.gz") == "_NUL.tar.gz" && san("com1") == "_com1" && san("LPT9.log") == "_LPT9.log" && san("COM0") == "COM0" && san("console.txt") == "console.txt",
+              "Windows device names, with or without an extension, are defused; near misses are left alone");
+        std::string accents;
+        for (int i = 0; i < 120; i++) accents += "\xC3\xA9";  // 240 bytes of é
+        std::string longname = san(accents + ".txt");
+        bool utf8_ok = longname.size() <= 200 && longname.substr(longname.size() - 4) == ".txt" && (longname.size() - 4) % 2 == 0;
+        CHECK(utf8_ok && san(std::string(300, 'a') + ".png").size() == 200 && san(std::string(300, 'a') + ".png").substr(196) == ".png", "a long name is cut to 200 bytes on a character boundary, keeping its extension");
+
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / ("pq-name-test-" + std::to_string(::getpid()));
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        CHECK(attachment::unique_path(dir, "a.txt") == dir / "a.txt", "a free name is used as it is");
+        { std::ofstream(dir / "a.txt") << "x"; }
+        CHECK(attachment::unique_path(dir, "a.txt") == dir / "a (2).txt", "a taken name gets (2)");
+        { std::ofstream(dir / "a (2).txt") << "x"; }
+        CHECK(attachment::unique_path(dir, "a.txt") == dir / "a (3).txt", "then (3)");
+        { std::ofstream(dir / "noext") << "x"; }
+        CHECK(attachment::unique_path(dir, "noext") == dir / "noext (2)", "a name with no extension gets its number at the end");
+        std::error_code ec;
+        fs::create_symlink(dir / "does-not-exist", dir / "dangling.txt", ec);
+        if (!ec) CHECK(attachment::unique_path(dir, "dangling.txt") == dir / "dangling (2).txt", "a name taken by a link that points nowhere counts as taken: a file is never written through a link");
+        fs::remove_all(dir);
+    }
+
+    std::cout << "The attachment record\n";
+    {
+        AttachmentInfo a;
+        a.file_id = CryptoEngine::random_bytes(16);
+        a.name = "holiday photo.jpg";
+        a.size = 123456789;
+        a.sha256 = CryptoEngine::random_bytes(32);
+        a.expires_at = 1700000000;
+        a.relay_address = "10.0.0.248:9000";
+        a.relay_id = CryptoEngine::random_bytes(32);
+        a.caption = "from the beach";
+        Bytes payload = attachment_payload(a);
+        auto back = parse_attachment_payload(payload);
+        CHECK(back && back->file_id == a.file_id && back->name == a.name && back->size == a.size && back->sha256 == a.sha256 && back->expires_at == a.expires_at && back->relay_address == a.relay_address && back->relay_id == a.relay_id && back->caption == a.caption &&
+                  payload.size() <= MAX_ATTACHMENT_PAYLOAD,
+              "an attachment's details round trip: file, name, size, fingerprint, expiry, relay and caption");
+        CHECK(!contains(payload, std::string(32, '\x01')) && payload.size() < 400, "(it is small, and carries no key or token: those are not part of it)");
+        a.caption.clear();
+        CHECK(parse_attachment_payload(attachment_payload(a)) && parse_attachment_payload(attachment_payload(a))->caption.empty(), "the caption is optional");
+        a.caption = "from the beach";
+        auto bad = [&](const std::function<void(AttachmentInfo&)>& f) { AttachmentInfo x = a; f(x); return throws([&] { attachment_payload(x); }); };
+        CHECK(bad([](AttachmentInfo& x) { x.name.clear(); }) && bad([](AttachmentInfo& x) { x.name = std::string(256, 'a'); }) && bad([](AttachmentInfo& x) { x.name = "a\nb"; }) && bad([](AttachmentInfo& x) { x.name = "evil\xE2\x80\xAEgpj.exe"; }) && bad([](AttachmentInfo& x) { x.name = "\xFF"; }),
+              "a name that is empty, too long, has control or direction characters, or isn't UTF-8 is refused");
+        CHECK(bad([](AttachmentInfo& x) { x.caption = std::string(1025, 'a'); }) && bad([](AttachmentInfo& x) { x.caption = "x\x01y"; }) && bad([](AttachmentInfo& x) { x.size = MAX_ATTACHMENT_FILE_BYTES + 1; }), "a bad caption, or a file over the limit, is refused");
+        CHECK(bad([](AttachmentInfo& x) { x.file_id.pop_back(); }) && bad([](AttachmentInfo& x) { x.sha256.pop_back(); }) && bad([](AttachmentInfo& x) { x.relay_id.push_back(0); }) && bad([](AttachmentInfo& x) { x.relay_address.clear(); }) &&
+                  bad([](AttachmentInfo& x) { x.relay_address = "a b:1"; }) && bad([](AttachmentInfo& x) { x.relay_address = std::string(256, 'a'); }), "IDs, hashes and addresses of the wrong size or form are refused");
+        Bytes trailing = payload; trailing.push_back(0);
+        bool prefixes = true;
+        for (size_t n = 0; n < payload.size(); n++)
+            if (parse_attachment_payload(Bytes(payload.begin(), payload.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes lying; write_blob(lying, Bytes(16, 1)); write_u32(lying, 0xFFFFFFFF);
+        CHECK(!parse_attachment_payload(trailing) && prefixes && !parse_attachment_payload(Bytes()) && !parse_attachment_payload(lying) && !parse_attachment_payload(Bytes(MAX_ATTACHMENT_PAYLOAD + 1, 1)),
+              "trailing bytes, every truncation, a huge declared length and an oversized payload are rejected");
+        Bytes hostile_name; write_blob(hostile_name, a.file_id); write_blob(hostile_name, Bytes{'a', '\n'}); write_u64(hostile_name, 5); write_blob(hostile_name, a.sha256); write_u64(hostile_name, 5);
+        write_blob(hostile_name, Bytes{'h', ':', '1'}); write_blob(hostile_name, a.relay_id); write_blob(hostile_name, Bytes());
+        CHECK(!parse_attachment_payload(hostile_name), "a hostile name is rejected on the receiving side too");
+
+        Bytes recipients = recipients_hash_for({alice.fingerprint, bob.fingerprint});
+        auto as_record = [&](uint32_t version, const Bytes& own_prev, uint32_t seen_count, const Bytes& body) {
+            return parse_record(hand_record(alice, version, 10, alice.fingerprint, recipients, body, own_prev,
+                                            [&](Bytes& b) { if (version == 1) write_blob(b, Bytes()); else { write_u32(b, seen_count); for (uint32_t i = 0; i < seen_count; i++) write_blob(b, CryptoEngine::random_bytes(HASH_BYTES)); } }));
+        };
+        CHECK(as_record(2, Bytes(), 0, payload).has_value(), "(control) an attachment record parses as version 2");
+        CHECK(!as_record(1, Bytes(), 0, payload), "...but not as version 1");
+        CHECK(as_record(2, CryptoEngine::random_bytes(HASH_BYTES), 1, payload).has_value(), "it is part of the transcript, like text: it can follow an earlier message and have seen others'");
+        CHECK(!as_record(2, Bytes(), 0, Bytes(MAX_ATTACHMENT_PAYLOAD + 1, 1)), "its payload has a limit");
+    }
+
+    std::cout << "Attachment grants in the envelope\n";
+    {
+        Inner in;
+        in.sender_bundle = Bytes();
+        in.records = {CryptoEngine::random_bytes(200)};
+        const Bytes plain_form = encode_inner(in);
+        size_t off = 0;
+        CHECK(read_u32(plain_form.data(), plain_form.size(), off) == 2u, "an envelope with no attachment grants is written exactly as before (version 2)");
+        in.grants = {{CryptoEngine::random_bytes(16), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)}, {CryptoEngine::random_bytes(16), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)}};
+        in.introduced = {CryptoEngine::random_bytes(500)};
+        Bytes encoded = encode_inner(in);
+        off = 0;
+        auto back = decode_inner(encoded);
+        CHECK(read_u32(encoded.data(), encoded.size(), off) == 3u && back && back->grants.size() == 2 && back->grants[0].file_id == in.grants[0].file_id && back->grants[0].key == in.grants[0].key && back->grants[1].token == in.grants[1].token &&
+                  back->records == in.records && back->introduced == in.introduced,
+              "with grants it is version 3, and each recipient's file ID, key and token come back exactly, alongside the records and introduced bundles");
+        auto old_one = decode_inner(plain_form);
+        CHECK(old_one && old_one->grants.empty() && old_one->records == in.records, "an envelope without grants reads as having none");
+        Bytes sealed = seal_envelope(in, bob.kem.public_key);
+        auto opened = open_envelope(sealed, bob.kem.private_key);
+        CHECK(opened && opened->grants.size() == 2 && opened->grants[0].key == in.grants[0].key && !open_envelope(sealed, mallory.kem.private_key), "sealed to Bob, the grants are Bob's to read and nobody else's");
+        CHECK(!contains(sealed, std::string(in.grants[0].key.begin(), in.grants[0].key.begin() + 16)), "(and the key is not visible in the envelope)");
+
+        auto invalid = [&](const std::function<void(Inner&)>& f) { Inner x = in; f(x); return throws([&] { encode_inner(x); }); };
+        CHECK(invalid([](Inner& x) { x.grants.assign(MAX_GRANTS_PER_ENVELOPE + 1, x.grants[0]); }) && invalid([](Inner& x) { x.grants[1].file_id = x.grants[0].file_id; }) && invalid([](Inner& x) { x.grants[0].key.pop_back(); }) &&
+                  invalid([](Inner& x) { x.grants[0].token.push_back(0); }) && invalid([](Inner& x) { x.grants[0].file_id.pop_back(); }),
+              "too many grants, two for the same file, or a key, token or ID of the wrong size is refused when building");
+        Bytes zero;
+        write_u32(zero, 3); write_blob(zero, Bytes()); write_u32(zero, 0); write_u32(zero, 0); write_u32(zero, 0);
+        Bytes dup = encoded;
+        // Make the second grant name the first grant's file by hand.
+        Bytes hostile;
+        write_u32(hostile, 3); write_blob(hostile, Bytes()); write_u32(hostile, 0); write_u32(hostile, 2);
+        for (int i = 0; i < 2; i++) { write_blob(hostile, Bytes(16, 7)); write_blob(hostile, Bytes(32, 1)); write_blob(hostile, Bytes(32, 2)); }
+        write_u32(hostile, 0);
+        Bytes lying;
+        write_u32(lying, 3); write_blob(lying, Bytes()); write_u32(lying, 0); write_u32(lying, 0xFFFFFFFF);
+        Bytes shortkey;
+        write_u32(shortkey, 3); write_blob(shortkey, Bytes()); write_u32(shortkey, 0); write_u32(shortkey, 1); write_blob(shortkey, Bytes(16, 7)); write_blob(shortkey, Bytes(31, 1)); write_blob(shortkey, Bytes(32, 2)); write_u32(shortkey, 0);
+        CHECK(!decode_inner(zero) && !decode_inner(hostile) && !decode_inner(lying) && !decode_inner(shortkey), "version 3 with no grants, the same file twice, a declared count of four billion, or a short key is rejected");
+        bool prefixes = true;
+        for (size_t n = 0; n < encoded.size(); n += 13)
+            if (decode_inner(Bytes(encoded.begin(), encoded.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes trailing = encoded; trailing.push_back(0);
+        Bytes version4 = encoded; version4[3] = 4;
+        CHECK(prefixes && !decode_inner(trailing) && !decode_inner(version4), "every truncation, trailing bytes and a version this build doesn't know are rejected");
+        (void)dup;
     }
 
     std::cout << "The inside of an envelope: versions and hostile input\n";

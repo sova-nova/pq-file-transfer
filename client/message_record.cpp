@@ -40,6 +40,7 @@ bool well_formed(const Record& r) {
     }
     switch (r.type) {
         case RecordType::Text: return r.payload.size() <= MAX_TEXT_BYTES;
+        case RecordType::Attachment: return r.payload.size() <= MAX_ATTACHMENT_PAYLOAD;
         case RecordType::Receipt: return r.payload.size() <= 1 + 4 + MAX_RECEIPT_IDS * (4 + ID_BYTES);
         case RecordType::TokenGrant: return r.payload.size() == 32;
         // The first thing in a conversation: nothing came before it, and it has seen nothing.
@@ -184,7 +185,7 @@ std::optional<SignedRecord> parse_record(const Bytes& raw) {
         }
     }
     if (b != bd.size()) return std::nullopt;
-    const uint32_t newest_type = *version == 1 ? 3 : 9;  // Conversation, Forward, ArchiveGrant, Checkpoint and the delete records came with version 2
+    const uint32_t newest_type = *version == 1 ? 3 : 10;  // Conversation, Forward, ArchiveGrant, Checkpoint and the delete records came with version 2
     if (*type < 1 || *type > newest_type) return std::nullopt;
 
     r.conversation_id = std::move(*conv);
@@ -318,6 +319,56 @@ std::optional<ArchiveGrantInfo> parse_archive_grant_payload(const Bytes& payload
         info.join_token.size() != 32)
         return std::nullopt;
     return info;
+}
+
+static bool valid_attachment(const AttachmentInfo& a) {
+    if (a.file_id.size() != 16 || a.sha256.size() != HASH_BYTES || a.relay_id.size() != HASH_BYTES) return false;
+    if (a.name.empty() || a.name.size() > MAX_ATTACHMENT_NAME_BYTES || !valid_label(a.name)) return false;
+    if (a.caption.size() > MAX_ATTACHMENT_CAPTION_BYTES || !valid_label(a.caption)) return false;
+    if (a.size > MAX_ATTACHMENT_FILE_BYTES) return false;
+    if (a.relay_address.empty() || a.relay_address.size() > MAX_RELAY_ADDRESS_BYTES) return false;
+    for (unsigned char c : a.relay_address)
+        if (c < 0x21 || c > 0x7E) return false;
+    return true;
+}
+
+Bytes attachment_payload(const AttachmentInfo& a) {
+    if (!valid_attachment(a)) throw std::runtime_error("The attachment details are not valid");
+    Bytes p;
+    write_blob(p, a.file_id);
+    write_blob(p, Bytes(a.name.begin(), a.name.end()));
+    write_u64(p, a.size);
+    write_blob(p, a.sha256);
+    write_u64(p, a.expires_at);
+    write_blob(p, Bytes(a.relay_address.begin(), a.relay_address.end()));
+    write_blob(p, a.relay_id);
+    write_blob(p, Bytes(a.caption.begin(), a.caption.end()));
+    return p;
+}
+
+std::optional<AttachmentInfo> parse_attachment_payload(const Bytes& payload) {
+    if (payload.size() > MAX_ATTACHMENT_PAYLOAD) return std::nullopt;
+    size_t off = 0;
+    auto id = read_blob(payload.data(), payload.size(), off, 16);
+    auto name = read_blob(payload.data(), payload.size(), off, MAX_ATTACHMENT_NAME_BYTES);
+    auto size = read_u64(payload.data(), payload.size(), off);
+    auto hash = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    auto expires = read_u64(payload.data(), payload.size(), off);
+    auto address = read_blob(payload.data(), payload.size(), off, MAX_RELAY_ADDRESS_BYTES);
+    auto relay_id = read_blob(payload.data(), payload.size(), off, HASH_BYTES);
+    auto caption = read_blob(payload.data(), payload.size(), off, MAX_ATTACHMENT_CAPTION_BYTES);
+    if (!id || !name || !size || !hash || !expires || !address || !relay_id || !caption || off != payload.size()) return std::nullopt;
+    AttachmentInfo a;
+    a.file_id = std::move(*id);
+    a.name.assign(name->begin(), name->end());
+    a.size = *size;
+    a.sha256 = std::move(*hash);
+    a.expires_at = *expires;
+    a.relay_address.assign(address->begin(), address->end());
+    a.relay_id = std::move(*relay_id);
+    a.caption.assign(caption->begin(), caption->end());
+    if (!valid_attachment(a)) return std::nullopt;
+    return a;
 }
 
 Bytes delete_request_payload(const DeleteRequestInfo& info) {

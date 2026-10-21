@@ -12,7 +12,7 @@ namespace chat {
 namespace {
 
 constexpr uint32_t ENVELOPE_VERSION = 1;
-constexpr uint32_t INNER_VERSION = 2;      // what is written
+constexpr uint32_t INNER_VERSION = 3;      // the newest understood; encode_inner writes 2 unless there are attachment grants
 constexpr uint32_t MIN_INNER_VERSION = 1;  // the oldest still read
 const char ENVELOPE_AAD_LABEL[] = "pq-suite v3 envelope";
 const char ENVELOPE_KEY_INFO[] = "pq-suite v3 envelope key";
@@ -45,11 +45,26 @@ Bytes encode_inner(const Inner& inner) {
     for (const auto& bundle : inner.introduced)
         if (bundle.size() > MAX_BUNDLE_BYTES) throw std::runtime_error("An introduced bundle is too large");
     if (inner.records.size() > MAX_RECORDS_PER_ENVELOPE) throw std::runtime_error("Too many records in one envelope");
+    if (inner.grants.size() > MAX_GRANTS_PER_ENVELOPE) throw std::runtime_error("Too many attachment grants in one envelope");
+    for (size_t i = 0; i < inner.grants.size(); i++) {
+        const auto& g = inner.grants[i];
+        if (g.file_id.size() != 16 || g.key.size() != 32 || g.token.size() != 32) throw std::runtime_error("An attachment grant is not valid");
+        for (size_t j = 0; j < i; j++)
+            if (inner.grants[j].file_id == g.file_id) throw std::runtime_error("Two attachment grants name the same file");
+    }
     Bytes b;
-    write_u32(b, INNER_VERSION);
+    write_u32(b, inner.grants.empty() ? 2u : 3u);
     write_blob(b, inner.sender_bundle);
     write_u32(b, static_cast<uint32_t>(inner.introduced.size()));
     for (const auto& bundle : inner.introduced) write_blob(b, bundle);
+    if (!inner.grants.empty()) {
+        write_u32(b, static_cast<uint32_t>(inner.grants.size()));
+        for (const auto& g : inner.grants) {
+            write_blob(b, g.file_id);
+            write_blob(b, g.key);
+            write_blob(b, g.token);
+        }
+    }
     write_u32(b, static_cast<uint32_t>(inner.records.size()));
     for (const auto& r : inner.records) write_blob(b, r);
     return b;
@@ -70,6 +85,19 @@ std::optional<Inner> decode_inner(const Bytes& b) {
             auto other = read_blob(b.data(), b.size(), off, MAX_BUNDLE_BYTES);
             if (!other) return std::nullopt;
             inner.introduced.push_back(std::move(*other));
+        }
+    }
+    if (*version >= 3) {
+        auto grants = read_u32(b.data(), b.size(), off);
+        if (!grants || *grants < 1 || *grants > MAX_GRANTS_PER_ENVELOPE) return std::nullopt;  // version 3 means there are some
+        for (uint32_t i = 0; i < *grants; i++) {
+            auto id = read_blob(b.data(), b.size(), off, 16);
+            auto key = read_blob(b.data(), b.size(), off, 32);
+            auto token = read_blob(b.data(), b.size(), off, 32);
+            if (!id || !key || !token || id->size() != 16 || key->size() != 32 || token->size() != 32) return std::nullopt;
+            for (const auto& other : inner.grants)
+                if (other.file_id == *id) return std::nullopt;
+            inner.grants.push_back({std::move(*id), std::move(*key), std::move(*token)});
         }
     }
     auto count = read_u32(b.data(), b.size(), off);

@@ -30,12 +30,25 @@ constexpr size_t MAX_RECORDS_PER_ENVELOPE = 16;
 constexpr size_t MAX_BUNDLE_BYTES = 16 * 1024;
 constexpr size_t MAX_INTRODUCED_PER_ENVELOPE = 15;  // the other members of a 16-person group
 
+// What one recipient needs to fetch and open one attachment: the file's ID, the key it is encrypted under, and
+// that recipient's own one-time download token. Sealed in the recipient's own envelope and nowhere else: the
+// message record the whole chat sees (and the archive keeps) holds none of it.
+constexpr size_t MAX_GRANTS_PER_ENVELOPE = 4;
+struct AttachmentGrant {
+    Bytes file_id;  // 16 bytes
+    Bytes key;      // 32 bytes
+    Bytes token;    // 32 bytes
+};
+
 struct Inner {
     Bytes sender_bundle;         // the sender's identity bundle, included on first contact; may be empty
     std::vector<Bytes> records;  // signed records (message_record.h)
     // Other people's identity bundles (self-signed; check them before use). Declared last, with an
     // initializer, so code that builds an Inner as {sender_bundle, records} keeps its meaning.
     std::vector<Bytes> introduced{};
+    // File keys and tokens for the attachments among `records` (up to MAX_GRANTS_PER_ENVELOPE). Written only when
+    // there are some, as inner version 3: an envelope without any is exactly what it always was.
+    std::vector<AttachmentGrant> grants{};
 };
 
 // The unpadded inner content, exposed so the format can be tested directly.

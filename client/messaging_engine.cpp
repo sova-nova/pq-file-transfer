@@ -602,6 +602,8 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             return receive_deletion_request(peer_from_contact(contact), sr);
         case chat::RecordType::DeleteAccept:
             return receive_deletion_accept(peer_from_contact(contact), sr);
+        case chat::RecordType::Attachment:  // the engine does not send or show attachments yet (the next step)
+            return false;
         case chat::RecordType::Checkpoint:  // these live only in an archive, never in an envelope
         case chat::RecordType::Conversation:
         case chat::RecordType::Forward:
@@ -1131,6 +1133,8 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 return receive_deletion_request(sender, sr);
             case chat::RecordType::DeleteAccept:
                 return receive_deletion_accept(sender, sr);
+            case chat::RecordType::Attachment:     // the engine does not send or show attachments yet (the next step)
+                return false;
             case chat::RecordType::Checkpoint:     // only ever found in an archive
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
