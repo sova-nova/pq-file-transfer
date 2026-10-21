@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -25,6 +26,11 @@ class ChatWidget : public QWidget {
 public:
     ChatWidget(KeyStore& keys, const std::filesystem::path& history_path, QWidget* parent = nullptr);
     ~ChatWidget() override;
+    // Called with the relay's address ("host:port") once messaging has been set up on it, so the Files tab can use the same one.
+    void set_on_relay_chosen(std::function<void(const QString&)> f) { on_relay_chosen_ = std::move(f); }
+    // Called with how many messages are waiting to be read, across all chats, whenever that changes.
+    void set_on_unread_changed(std::function<void(size_t)> f) { on_unread_changed_ = std::move(f); }
+    void refresh_now() { refresh(); }  // for when this tab is shown again: what was waiting is now seen
 
     bool available() const { return engine_ != nullptr; }
     bool is_set_up() const { return engine_ && engine_->is_set_up(); }
@@ -45,6 +51,7 @@ private:
     void make_relay_invite();
     void restore_history();
     void attach_file();
+    void report_unread();
     void show_attachment(const QString& file_id);
     void review_deletions();
     void request_delete_chat();
@@ -80,6 +87,9 @@ private:
     QPushButton* relay_invite_button_ = nullptr;
     QPushButton* restore_button_ = nullptr;
     QPushButton* attach_button_ = nullptr;   // choose a file to send in the chat on screen
+    std::function<void(const QString&)> on_relay_chosen_;
+    std::function<void(size_t)> on_unread_changed_;
+    size_t last_unread_ = static_cast<size_t>(-1);
     bool animating_ = false;                 // an upload or download is under way: redraw now and then to show its progress
     QPushButton* deletions_button_ = nullptr;     // requests from others to delete a chat or messages
     QPushButton* delete_chat_button_ = nullptr;   // ask everyone to delete the chat on screen

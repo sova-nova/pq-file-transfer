@@ -283,6 +283,9 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         messages_->verticalScrollBar()->setValue(keep);
     });
     progress_timer->start(700);
+    auto* unread_timer = new QTimer(this);  // messages arrive while another tab is showing: keep the tab's count up to date
+    connect(unread_timer, &QTimer::timeout, this, [this] { report_unread(); });
+    unread_timer->start(1000);
     connect(input_, &QLineEdit::returnPressed, this, [this] { send_current(); });
     connect(contacts_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* item, QListWidgetItem*) {
         if (!updating_ui_ && item) select_contact(item->data(Qt::UserRole).toString());
@@ -332,6 +335,18 @@ void ChatWidget::refresh() {
     render_groups();
     render_messages(true);
     update_header();
+    report_unread();
+}
+
+// How many messages are waiting, across every chat and group, for the indicator on the Chats tab.
+void ChatWidget::report_unread() {
+    if (!engine_ || !on_unread_changed_) return;
+    size_t total = 0;
+    for (const auto& c : engine_->chats()) total += c.unread;
+    for (const auto& g : engine_->groups()) total += g.unread;
+    if (total == last_unread_) return;
+    last_unread_ = total;
+    on_unread_changed_(total);
 }
 
 void ChatWidget::refresh_if_changed() {
@@ -755,7 +770,14 @@ void ChatWidget::setup_messaging() {
                         "if they prove they hold this key:\n\n" + formatted(bytes_to_hex(invite->relay_id)),
                         QMessageBox::Yes | QMessageBox::No, this);
     plain_box(confirm);
-    if (confirm.exec() != QMessageBox::Yes) return;
+    confirm.setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);  // so the relay ID can be highlighted and copied
+    QAbstractButton* copy_id = confirm.addButton("Copy relay ID", QMessageBox::ActionRole);
+    while (true) {
+        confirm.exec();
+        if (confirm.clickedButton() != copy_id) break;
+        QGuiApplication::clipboard()->setText(qstr(bytes_to_hex(invite->relay_id)));  // then the question is asked again
+    }
+    if (confirm.standardButton(confirm.clickedButton()) != QMessageBox::Yes) return;
 
     QGuiApplication::setOverrideCursor(Qt::WaitCursor);
     std::string error;
@@ -765,9 +787,12 @@ void ChatWidget::setup_messaging() {
         QMessageBox::warning(this, "Set up messaging", qstr(error));
         return;
     }
+    // Sending files by transfer ID uses the same relay: set the Files tab to it, so it only has to be chosen once.
+    const QString relay = qstr(format_server_address(invite->server));
+    if (on_relay_chosen_) on_relay_chosen_(relay);
     QMessageBox::information(this, "Set up messaging",
-                             "Messaging is ready. Use \"Copy My Contact Card\" on the Files tab to give someone a card, "
-                             "and add the card they give you with +.");
+                             "Messaging is ready. The relay for sending files on the Files tab has been set to the same one (" + relay + ").\n\n"
+                             "Use \"Copy My Contact Card\" on the Files tab to give someone a card, and add the card they give you with +.");
     refresh();
 }
 

@@ -77,7 +77,7 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     next_archive_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
     next_keyring_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.keyring_check_seconds));
     next_deletion_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
-    next_attachment_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+    next_attachment_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.attachment_status_fast_seconds));
     history_->reset_downloading();  // nothing is being fetched after a restart
 
     my_fp_hex_ = keys_.own_fingerprint();
@@ -2851,12 +2851,16 @@ bool MessagingEngine::withdraw_attachment(const std::string& file_id, std::strin
     return true;
 }
 
-// Housekeeping: time runs out, and a sender finds out how many have fetched their file.
+// Housekeeping: time runs out, and a sender finds out how many have fetched their file. A file that was only just sent is
+// asked about every few seconds (so "0 of 1 have it" turns into "1 of 1" almost at once, as the recipient fetches it); an
+// older one, less often. One connection to the relay serves them all.
 void MessagingEngine::check_attachments() {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_attachment_check_) return;
-    next_attachment_check_ = now + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
     const int64_t wall = unix_now();
+    bool recent = false;
+    bool tried = false, connected = false;
+    RelayClient client;
     for (const auto& a : history_->attachments_in_state(HistoryStore::AttachAvailable)) {
         if (wall >= a.expires_at) {
             history_->set_attachment_state(a.file_id, HistoryStore::AttachExpired, std::string());
@@ -2864,10 +2868,15 @@ void MessagingEngine::check_attachments() {
             continue;
         }
         if (!a.outgoing) continue;
-        RelayClient client;
+        if (wall - a.created_at < 900) recent = true;
+        if (!tried) {
+            tried = true;
+            std::string e;
+            connected = connect_authenticated(client, e);
+        }
+        if (!connected) continue;
         relay::FileStatus status;
         std::string err;
-        if (!connect_authenticated(client, err)) continue;
         if (client.file_status(a.file_id, status, err)) {
             if (status.tokens_redeemed != a.redeemed) {
                 history_->set_attachment_redeemed(a.file_id, status.tokens_redeemed);
@@ -2878,8 +2887,11 @@ void MessagingEngine::check_attachments() {
             history_->set_attachment_redeemed(a.file_id, a.recipients);
             history_->set_attachment_state(a.file_id, HistoryStore::AttachTransferred, std::string());
             bump();
+        } else {
+            connected = false;  // the connection may be gone: try again next time
         }
     }
+    next_attachment_check_ = now + std::chrono::seconds(std::max(1, recent ? options_.attachment_status_fast_seconds : options_.attachment_status_slow_seconds));
 }
 
 // --- Sending ---

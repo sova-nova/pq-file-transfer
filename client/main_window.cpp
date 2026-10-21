@@ -264,7 +264,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     // The Chats tab owns the messaging engine and its worker thread.
     chat_widget_ = new ChatWidget(*keystore_, keystore_->app_dir() / "history.db", tabs);
-    tabs->addTab(chat_widget_, "Chats");
+    const int chats_tab = tabs->addTab(chat_widget_, "Chats");
+    // Setting up messaging on a relay also sets the Files tab's relay to it.
+    chat_widget_->set_on_relay_chosen([this](const QString& server) {
+        server_edit_->setText(server);
+        save_server_setting();
+    });
+    // Something arrived while another tab was showing: say so on the Chats tab.
+    chat_widget_->set_on_unread_changed([tabs, chats_tab](size_t unread) {
+        tabs->setTabText(chats_tab, unread ? QString("Chats (%1)").arg(static_cast<qulonglong>(unread)) : QString("Chats"));
+    });
+    connect(tabs, &QTabWidget::currentChanged, this, [this](int) { chat_widget_->refresh_now(); });  // shown again: what was waiting is seen
 }
 
 MainWindow::~MainWindow() {
@@ -528,13 +538,10 @@ std::optional<QString> MainWindow::ask_contact_name(const QString& suggested) {
 }
 
 void MainWindow::add_contact_from_card() {
-    // If a card is already on the clipboard, save the user a paste.
-    QString clip = QGuiApplication::clipboard()->text();
-    QString initial = looks_like_contact_card(clip.toStdString()) ? clip : QString();
-
+    // The box starts empty: the user pastes the card themselves (nothing is read from the clipboard unasked).
     bool ok = false;
     QString text = QInputDialog::getMultiLineText(this, "Add Contact",
-                                                  "Paste the contact card you received:", initial, &ok);
+                                                  "Paste the contact card you received:", QString(), &ok);
     if (!ok || text.trimmed().isEmpty()) return;
 
     std::string error;

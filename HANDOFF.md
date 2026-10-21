@@ -77,6 +77,18 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
 
+## User feedback round after M5
+
+Five points from people using the app, all done (`ChatWidget`, `MainWindow`, `MessagingEngine`):
+
+1. **The relay ID can be copied.** The setup confirmation's text is selectable (mouse and keyboard), and a **Copy relay ID** button puts the plain hex on the clipboard and asks the question again.
+2. **Add Contact no longer reads the clipboard.** The box starts empty; nothing is pasted for the user.
+3. **Setting up messaging also sets the Files tab's relay** (they are the same `pq-server`). `ChatWidget` has a callback (`set_on_relay_chosen`) that `MainWindow` uses to set and save the Files tab's server; the \"Messaging is ready\" message says so. It overwrites whatever was there, as asked; the user can still change it on the Files tab.
+4. **The Chats tab shows what is waiting**, as \"Chats (3)\", counting unread messages in all chats and groups. `ChatWidget::report_unread` (callback `set_on_unread_changed`) runs on every refresh and once a second; the existing rule that a chat is marked read only when its tab is visible and the window active is what makes the count build up while another tab shows. Switching to the tab refreshes it, which marks the open chat read.
+5. **\"0 of 1 have it\" updates within seconds.** The sender's check of how many have fetched a file ran only every `archive_sync_seconds` (300 s), which is why it lagged. It is now every `attachment_status_fast_seconds` (4 s) for a file sent in the last 15 minutes and every `attachment_status_slow_seconds` (60 s) for older ones, over one connection for all of them. The end-to-end tests now require the sender to see it within 20 seconds (it took up to 60 before).
+
+Verified: all suites except the full group suite, and the attachment section of the group suite on its own (`PQ_ONLY_ATTACH=1`); the full group suite was last run, and passed, just before this round (358 checks). `chat_widget.cpp` type-checks against the Qt stub; **`main_window.cpp` cannot be checked against it** (the stub has no `QMainWindow`), so its edits (the callbacks, the tab text, the empty Add Contact box) were only read by hand: build it on real Qt first.
+
 ## M5: attachments (built and tested; all 5 steps done)
 
 An attachment is a chat message that points at an encrypted file parked on the sender's relay. Each recipient has their own one-time download token; the relay deletes the file when every token is redeemed, when the sender withdraws it, or when it expires. The existing transfer-ID file transfer (the v2 protocol in `server/main.cpp`, the "Send File" tab) is left alone and keeps working.

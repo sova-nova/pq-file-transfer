@@ -58,6 +58,8 @@ public:
         int archive_checkpoint_max_age_seconds = 24 * 3600;
         int keyring_check_seconds = 60;  // how often to see whether the keyring on the relay needs updating
         uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;  // the largest file this app will try to send (a relay may allow less)
+        int attachment_status_fast_seconds = 4;   // how often to ask the relay who has fetched a file sent in the last 15 minutes
+        int attachment_status_slow_seconds = 60;  // ...and for older ones
     };
 
     // Throws std::runtime_error if the keys are locked or the history can't be opened.

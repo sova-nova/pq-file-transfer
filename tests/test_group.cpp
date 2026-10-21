@@ -1521,7 +1521,7 @@ int main(int argc, char** argv) {
         CHECK(done && fs::path(done->saved_path).parent_path() == work / "bob-downloads" && read_file(done->saved_path) == big, "byte for byte what Alice sent, in the folder Bob chose");
         CHECK(!bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err) && has(err, "already downloaded"), "it can't be fetched a second time: " + err);
         CHECK(wait_for([&] { return !on_relay(theirs->file_id); }, 30000), "the relay deleted its copy as soon as the only recipient had it");
-        CHECK(wait_for([&] { auto v = view_in_chat(alice, bob.fp, "holiday photo.jpg"); return v && v->state == HistoryStore::AttachTransferred && v->redeemed == 1; }, 60000), "and Alice sees that Bob has it: 1 of 1");
+        CHECK(wait_for([&] { auto v = view_in_chat(alice, bob.fp, "holiday photo.jpg"); return v && v->state == HistoryStore::AttachTransferred && v->redeemed == 1; }, 20000), "and Alice sees that Bob has it: 1 of 1, within seconds");
         CHECK(bob.engine->messages(alice.fp).size() > 0 && bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err) == false, "(the chat is otherwise unchanged)");
 
         // A name that is awkward to use as a file name is made safe by the sender, and the same name twice never overwrites.
@@ -1568,11 +1568,11 @@ int main(int argc, char** argv) {
         fs::create_directories(work / "carol-downloads");
         CHECK(bob.engine->download_attachment(gid, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_group(bob, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "Bob downloads it");
         CHECK(on_relay(gid), "with one of two having it, the relay still holds it");
-        CHECK(wait_for([&] { auto v = view_in_group(alice, files_group, "minutes.pdf"); return v && v->redeemed == 1 && v->state == HistoryStore::AttachAvailable; }, 60000), "and Alice sees 1 of 2 have it");
+        CHECK(wait_for([&] { auto v = view_in_group(alice, files_group, "minutes.pdf"); return v && v->redeemed == 1 && v->state == HistoryStore::AttachAvailable; }, 20000), "and Alice sees 1 of 2 have it, within seconds");
         CHECK(carol.engine->download_attachment(gid, work / "carol-downloads", err) && wait_for([&] { return state_is(view_in_group(carol, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "Carol downloads it");
         CHECK(read_file(view_in_group(bob, files_group, "minutes.pdf")->saved_path) == group_file && read_file(view_in_group(carol, files_group, "minutes.pdf")->saved_path) == group_file, "both copies are identical to the original");
         CHECK(wait_for([&] { return !on_relay(gid); }, 30000), "the relay deleted it once both had it");
-        CHECK(wait_for([&] { return state_is(view_in_group(alice, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "and Alice sees it is done");
+        CHECK(wait_for([&] { return state_is(view_in_group(alice, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 20000), "and Alice sees it is done, within seconds");
 
         // --- Withdrawing ---
         write_file(work / "src" / "oops.txt", Bytes(40000, 0x33));
