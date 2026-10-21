@@ -77,6 +77,19 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
 
+## Planned GUI work (not scheduled yet)
+
+**G1: a message view that can select part of a message.** Users asked for it: highlight some words inside a message and copy them. The message list can only select whole messages (done: see feedback item 6), so this needs the list replaced by a read-only text view (a `QTextBrowser`, or a list whose rows hold selectable text). Kept as its own small milestone, to be done when it can be built and tried on real Qt, which the sandbox this was written in can't do. What it has to keep, so nothing already working is lost:
+
+- **Message text is always shown as plain text, never as HTML or links.** Anything someone else sends must not be able to inject markup, images or clickable links into the view (escape it, and turn off link opening).
+- Outgoing messages on the right, incoming on the left; the delivery marks and state words; the \"(a message before this one is missing)\" and \"(deleted by agreement)\" lines.
+- **Double-click and right-click details** for attachments (download, copy location, withdraw) and for who has received a group message, and **Copy of whole messages** as now (Ctrl+C, right-click), alongside selecting words inside one.
+- The scroll position and the highlight **surviving a redraw** (a new message; the 700 ms progress redraw while a file moves), which is done now by restoring by position: a text view would redraw incrementally instead.
+- Messages marked read only while the tab is visible and the window active (as now); the Chats tab's count.
+- Long chats stay quick (the list shows the last 300 messages); right-to-left text; the keyboard (Ctrl+C, Ctrl+A) and screen readers.
+
+**Other known GUI follow-ups**, to do with G1 or on their own: cancel a download in progress; show per-member delivery details for a group *attachment*; a \"delete this message\" action for deletion by agreement (the engine supports it); and **build and try everything from M4 onwards on real Qt**, because `main_window.cpp` was never compiled here and the rest was only type-checked against a stand-in.
+
 ## User feedback round after M5
 
 Five points from people using the app, all done (`ChatWidget`, `MainWindow`, `MessagingEngine`):
