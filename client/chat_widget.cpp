@@ -4,11 +4,13 @@
 #include "protocol.h"
 #include "sharing.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDateTime>
+#include <QAction>
 #include <QDialog>
 #include <QFileDialog>
 #include <QGuiApplication>
@@ -20,7 +22,10 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QKeySequence>
+#include <QMenu>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
@@ -47,6 +52,21 @@ QString status_word(int status, bool outgoing) {
 
 void plain_box(QMessageBox& box) { box.setTextFormat(Qt::PlainText); }
 
+// The list is rebuilt whenever something changes; this puts back what the user had highlighted (by position), so a message that
+// arrives, or a progress update, doesn't clear a selection that is about to be copied.
+struct SelectionKeeper {
+    QListWidget* list;
+    std::vector<int> rows;
+    SelectionKeeper(QListWidget* l, bool same_chat) : list(l) {
+        if (same_chat)  // switching to another chat starts with nothing highlighted
+            for (auto* item : l->selectedItems()) rows.push_back(l->row(item));
+    }
+    ~SelectionKeeper() {
+        for (int r : rows)
+            if (r >= 0 && r < list->count()) list->item(r)->setSelected(true);
+    }
+};
+
 // "3.1 MB", for telling someone how big a file is before they choose to fetch it.
 static QString human_size(uint64_t bytes) {
     char buf[40];
@@ -69,7 +89,7 @@ static QString attachment_state_text(MessagingEngine& engine, const MessagingEng
         case HistoryStore::AttachDownloading: return moving ? "downloading " + percent : QString("downloading");
         case HistoryStore::AttachAvailable:
             if (a.outgoing) return number(a.redeemed) + " of " + number(a.recipients) + " have it, until " + expires;
-            return "click to download, until " + expires + (a.note.empty() ? QString() : "  (last try: " + qstr(a.note) + ")");
+            return "double-click to download, until " + expires + (a.note.empty() ? QString() : "  (last try: " + qstr(a.note) + ")");
         case HistoryStore::AttachTransferred: return a.outgoing ? QString("everyone has it") : "saved to " + qstr(a.saved_path);
         case HistoryStore::AttachExpired: return QString("expired: it is no longer on the relay");
         case HistoryStore::AttachWithdrawn: return a.outgoing ? QString("you withdrew it") : QString("the sender took it back");
@@ -293,14 +313,30 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(groups_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* item, QListWidgetItem*) {
         if (!updating_ui_ && item) select_group(item->data(Qt::UserRole).toString());
     });
-    connect(messages_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        if (!item) return;
-        const QString attachment = item->data(Qt::UserRole + 1).toString();
-        if (!attachment.isEmpty()) {  // an attachment: what can be done with it
-            show_attachment(attachment);
-            return;
+    // Messages can be highlighted (one click; Ctrl or Shift for several; Ctrl+A for all) and copied (Ctrl+C, or right-click).
+    messages_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    messages_->setContextMenuPolicy(Qt::CustomContextMenu);
+    auto* copy_shortcut = new QShortcut(QKeySequence::Copy, messages_);
+    connect(copy_shortcut, &QShortcut::activated, this, [this] { copy_selected_messages(); });
+    connect(messages_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) { open_details(item); });
+    connect(messages_, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QListWidgetItem* at = messages_->itemAt(pos);
+        if (at && !at->isSelected()) {  // right-clicking something that isn't highlighted highlights it
+            messages_->clearSelection();
+            at->setSelected(true);
         }
-        if (!current_group_.isEmpty()) show_group_delivery(item->data(Qt::UserRole).toString());
+        QMenu menu(this);
+        QAction* copy = menu.addAction("Copy");
+        copy->setEnabled(!messages_->selectedItems().isEmpty());
+        QAction* all = menu.addAction("Select all");
+        QAction* details = nullptr;
+        if (at && (!at->data(Qt::UserRole + 1).toString().isEmpty() || (!current_group_.isEmpty() && !at->data(Qt::UserRole).toString().isEmpty())))
+            details = menu.addAction("Details…");
+        QAction* chosen = menu.exec(messages_->viewport()->mapToGlobal(pos));
+        if (!chosen) return;
+        if (chosen == copy) copy_selected_messages();
+        else if (chosen == all) messages_->selectAll();
+        else if (details && chosen == details) open_details(at);
     });
     connect(delivery_box_, &QCheckBox::toggled, this, [this](bool) { apply_receipt_settings(); });
     connect(read_box_, &QCheckBox::toggled, this, [this](bool) { apply_receipt_settings(); });
@@ -448,6 +484,9 @@ void ChatWidget::render_messages(bool force_scroll) {
         return;
     }
     auto messages = engine_->messages(current_fp_.toStdString());
+    const QString scope = "c:" + current_fp_;
+    SelectionKeeper keep_selection(messages_, scope == selection_scope_);
+    selection_scope_ = scope;
     messages_->clear();
     animating_ = false;
     for (const auto& m : messages) {
@@ -464,9 +503,12 @@ void ChatWidget::render_messages(bool force_scroll) {
         if (m.gap) text += "\n    (a message before this one is missing)";
         auto* item = new QListWidgetItem(text);
         item->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
+        item->setData(Qt::UserRole + 2, m.is_attachment ? "[" + when + "] " + who + ": " + qstr(m.attachment.name) + " (" + human_size(m.attachment.size) + ")" +
+                                                              (m.text.empty() ? QString() : "\n" + qstr(m.text))
+                                                        : "[" + when + "] " + who + ": " + qstr(m.text));  // what Copy puts on the clipboard
         if (m.is_attachment) {
             item->setData(Qt::UserRole + 1, qstr(m.attachment.file_id));  // so a click can offer what can be done with it
-            item->setToolTip("Click for what you can do with this file");
+            item->setToolTip("Double-click for what you can do with this file");
         }
         messages_->addItem(item);
     }
@@ -477,6 +519,9 @@ void ChatWidget::render_messages(bool force_scroll) {
 void ChatWidget::render_group_messages(bool force_scroll) {
     const std::string group = current_group_.toStdString();
     auto messages = engine_->group_messages(group);
+    const QString scope = "g:" + current_group_;
+    SelectionKeeper keep_selection(messages_, scope == selection_scope_);
+    selection_scope_ = scope;
     messages_->clear();
     animating_ = false;
     // Who has received what is looked up for the newest messages of ours that not everyone has read yet.
@@ -501,12 +546,15 @@ void ChatWidget::render_group_messages(bool force_scroll) {
         if (m.gap) text += "\n    (a message before this one is missing)";
         auto* item = new QListWidgetItem(text);
         item->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
+        item->setData(Qt::UserRole + 2, m.is_attachment ? "[" + when + "] " + who + ": " + qstr(m.attachment.name) + " (" + human_size(m.attachment.size) + ")" +
+                                                              (m.text.empty() ? QString() : "\n" + qstr(m.text))
+                                                        : "[" + when + "] " + who + ": " + qstr(m.text));  // what Copy puts on the clipboard
         if (m.is_attachment) {
             item->setData(Qt::UserRole + 1, qstr(m.attachment.file_id));
-            item->setToolTip("Click for what you can do with this file");
+            item->setToolTip("Double-click for what you can do with this file");
         } else if (m.outgoing) {
             item->setData(Qt::UserRole, qstr(m.message_id));  // so a click can show who has it
-            item->setToolTip("Click to see who has received this message");
+            item->setToolTip("Double-click to see who has received this message");
         }
         messages_->addItem(item);
     }
@@ -1138,6 +1186,33 @@ void ChatWidget::request_delete_chat() {
 
 // Choose a file to send in the chat on screen. What is typed in the message box goes with it as a caption. The file is
 // uploaded in the background; the message shows its progress and reaches the others only once the file is on the relay.
+// Puts the highlighted messages on the clipboard, in the order they appear, one after another.
+void ChatWidget::copy_selected_messages() {
+    auto selected = messages_->selectedItems();
+    std::vector<QListWidgetItem*> ordered;
+    for (auto* item : selected) ordered.push_back(item);
+    std::sort(ordered.begin(), ordered.end(), [this](QListWidgetItem* a, QListWidgetItem* b) { return messages_->row(a) < messages_->row(b); });
+    QString joined;
+    for (auto* item : ordered) {
+        QString text = item->data(Qt::UserRole + 2).toString();
+        if (text.isEmpty()) text = item->text();
+        if (!joined.isEmpty()) joined += "\n";
+        joined += text;
+    }
+    if (!joined.isEmpty()) QGuiApplication::clipboard()->setText(joined);
+}
+
+// Double-click (or "Details…" in the right-click menu): an attachment's options, or who has received a group message.
+void ChatWidget::open_details(QListWidgetItem* item) {
+    if (!item) return;
+    const QString attachment = item->data(Qt::UserRole + 1).toString();
+    if (!attachment.isEmpty()) {
+        show_attachment(attachment);
+        return;
+    }
+    if (!current_group_.isEmpty() && !item->data(Qt::UserRole).toString().isEmpty()) show_group_delivery(item->data(Qt::UserRole).toString());
+}
+
 void ChatWidget::attach_file() {
     const bool group = !current_group_.isEmpty();
     if (!group && current_fp_.isEmpty()) return;
