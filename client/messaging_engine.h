@@ -456,7 +456,7 @@ private:
         std::string directory;   // a download's destination
     };
     AttachmentView attachment_view(const chat::AttachmentInfo& info);
-    void note_incoming_attachment(const chat::SignedRecord& record);
+    void note_incoming_attachment(const chat::SignedRecord& record, const std::vector<chat::AttachmentGrant>& grants);
     bool start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
                                const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error);
     void queue_transfer(TransferJob job);

@@ -820,6 +820,20 @@ int main() {
             auto dropped = h.attachment(out.file_id);
             CHECK(dropped && dropped->key.empty() && dropped->recipient_tokens.empty() && dropped->name == out.name && dropped->recipients == 2, "once every recipient has been told, the sender's copy of the key and tokens is forgotten");
         }
+        {   // An attachment that arrived first without its key (from an archive) gets it when the envelope turns up.
+            HistoryStore h(dir / "attachments.db", key);
+            HistoryStore::Attachment early = in;
+            early.file_id = id(0xF3, 16); early.key.clear(); early.token.clear(); early.state = HistoryStore::AttachUnavailable;
+            h.add_attachment(early);
+            CHECK(h.attachment(early.file_id)->key.empty() && h.attachment(early.file_id)->state == HistoryStore::AttachUnavailable, "(one that arrived without a key)");
+            h.grant_attachment(early.file_id, id(0x81, 32), id(0x82, 32), HistoryStore::AttachAvailable, "");
+            auto upgraded = h.attachment(early.file_id);
+            CHECK(upgraded && upgraded->key == id(0x81, 32) && upgraded->token == id(0x82, 32) && upgraded->state == HistoryStore::AttachAvailable, "the key and token that come later are kept, and it can be fetched");
+            h.grant_attachment(early.file_id, id(0x91, 32), id(0x92, 32), HistoryStore::AttachAvailable, "");
+            CHECK(h.attachment(early.file_id)->key == id(0x81, 32), "but a later grant never replaces a key it already has");
+            h.grant_attachment(out.file_id, id(0x91, 32), id(0x92, 32), HistoryStore::AttachAvailable, "");
+            CHECK(h.attachment(out.file_id)->key.empty() && h.attachment(out.file_id)->outgoing, "and one we sent is never touched by it");
+        }
         CHECK(!file_contains(dir / "attachments.db", key_marker) && !file_contains(fs::path((dir / "attachments.db").string() + "-wal"), key_marker) &&
                   !file_contains(dir / "attachments.db", token_marker) && !file_contains(fs::path((dir / "attachments.db").string() + "-wal"), token_marker),
               "the file key and download token are not readable on disk");

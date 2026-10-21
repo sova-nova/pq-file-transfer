@@ -241,6 +241,8 @@ public:
     void set_attachment_state(const Bytes& file_id, int state, const std::string& note);
     void set_attachment_path(const Bytes& file_id, const std::string& path);
     void set_attachment_redeemed(const Bytes& file_id, uint32_t redeemed);
+    // An attachment that arrived without its key (read from an archive before the envelope with it came) gets it now.
+    void grant_attachment(const Bytes& file_id, const Bytes& key, const Bytes& token, int state, const std::string& note);
     void drop_attachment_secrets(const Bytes& file_id);  // once every recipient has what they need
     void reset_downloading();  // after a restart nothing is being fetched
 

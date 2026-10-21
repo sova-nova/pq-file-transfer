@@ -961,6 +961,16 @@ void HistoryStore::set_attachment_redeemed(const Bytes& file_id, uint32_t redeem
     Stmt(db_, "UPDATE attachments SET redeemed = ? WHERE file_id = ?").i64(1, redeemed).blob(2, file_id).step();
 }
 
+void HistoryStore::grant_attachment(const Bytes& file_id, const Bytes& key, const Bytes& token, int state, const std::string& note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Bytes secrets;
+    write_blob(secrets, key);
+    write_blob(secrets, token);
+    write_u32(secrets, 0);
+    Stmt(db_, "UPDATE attachments SET secrets = ?, state = ?, note = ? WHERE file_id = ? AND outgoing = 0 AND length(secrets) = 0")
+        .blob(1, seal(secrets, attachment_secrets_aad(file_id))).i64(2, state).text(3, note).blob(4, file_id).step();
+}
+
 void HistoryStore::drop_attachment_secrets(const Bytes& file_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt(db_, "UPDATE attachments SET secrets = x'' WHERE file_id = ?").blob(1, file_id).step();

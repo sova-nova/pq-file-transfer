@@ -614,9 +614,12 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             m.record = sr.raw;
             // They pointed at an earlier message of theirs that we never saw: something went missing.
             m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
-            if (!history_->add_message(m)) return false;  // a duplicate or replay
+            if (!history_->add_message(m)) {  // a duplicate or replay (but an attachment's envelope may bring the key its archived copy lacked)
+                if (sr.record.type == chat::RecordType::Attachment && !envelope_grants_.empty()) note_incoming_attachment(sr, envelope_grants_);
+                return false;
+            }
             if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));  // the archive may have what went missing
-            if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr);
+            if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr, envelope_grants_);
             auto conv = history_->conversation_for(contact.fingerprint);
             if (conv && conv->send_delivery_receipts) enqueue_receipt(contact.fingerprint, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
             return true;
@@ -1140,9 +1143,12 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 m.record = sr.raw;
                 // They pointed at an earlier message of theirs that we never saw: something went missing.
                 m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
-                if (!history_->add_message(m)) return false;  // a duplicate or replay
+                if (!history_->add_message(m)) {  // a duplicate or replay (but an attachment's envelope may bring the key its archived copy lacked)
+                    if (sr.record.type == chat::RecordType::Attachment && !envelope_grants_.empty()) note_incoming_attachment(sr, envelope_grants_);
+                    return false;
+                }
                 if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));
-                if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr);
+                if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr, envelope_grants_);
                 if (conv->send_delivery_receipts)
                     enqueue_receipt_in(conv_id, sr.record.recipients_hash, sender.fp, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
                 return true;
@@ -1770,7 +1776,7 @@ bool MessagingEngine::handle_archived_records(const Bytes& conversation_id, cons
             changed |= receive_deletion_request(*peer, *sr);
         } else if (sr->record.type == chat::RecordType::DeleteAccept) {
             changed |= receive_deletion_accept(*peer, *sr);
-        } else if (sr->record.type == chat::RecordType::Text) {
+        } else if (sr->record.type == chat::RecordType::Text || sr->record.type == chat::RecordType::Attachment) {
             if (conv->kind == HistoryStore::Direct) {
                 if (auto contact = keys_.find_contact_by_fingerprint(sender_hex)) changed |= handle_record(*contact, *sr, true);
             } else {
@@ -2010,7 +2016,8 @@ size_t MessagingEngine::restore_records(const Bytes& conversation_id, const std:
             if (!mine) process_checkpoint(conversation_id, *sr, sender_hex);
             continue;
         }
-        if (sr->record.type != chat::RecordType::Text && sr->record.type != chat::RecordType::Conversation) continue;
+        if (sr->record.type != chat::RecordType::Text && sr->record.type != chat::RecordType::Conversation && sr->record.type != chat::RecordType::Attachment) continue;
+        if (sr->record.type == chat::RecordType::Attachment && !chat::parse_attachment_payload(sr->record.payload)) continue;
         HistoryStore::Message m;
         m.conversation_id = conversation_id;
         m.message_id = sr->record.message_id;
@@ -2020,7 +2027,10 @@ size_t MessagingEngine::restore_records(const Bytes& conversation_id, const std:
         m.status = mine ? HistoryStore::Sent : 1;  // what we sent is sent; what we received is already read
         m.entry_hash = sr->entry_hash;
         m.record = ar.record;
-        if (history_->add_message(m)) added++;
+        if (history_->add_message(m)) {
+            added++;
+            if (sr->record.type == chat::RecordType::Attachment) note_incoming_attachment(*sr, {});  // the archive never holds the key: it will show as unavailable
+        }
     }
     return added;
 }
@@ -2409,7 +2419,7 @@ MessagingEngine::AttachmentView MessagingEngine::attachment_view(const chat::Att
 
 // An attachment arrives: remember how to fetch it. The key and our own token came in the same envelope; if they didn't
 // (it was read back from an archive, which never holds them), the file can't be fetched and is shown as such.
-void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr) {
+void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr, const std::vector<chat::AttachmentGrant>& grants) {
     auto info = chat::parse_attachment_payload(sr.record.payload);
     if (!info) return;
     const int64_t now = unix_now();
@@ -2417,7 +2427,7 @@ void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr) {
     a.file_id = info->file_id;
     a.conversation_id = sr.record.conversation_id;
     a.message_id = sr.record.message_id;
-    a.outgoing = false;
+    a.outgoing = sr.record.sender == my_fp_;  // one of ours, read back from an archive
     a.name = info->name;
     a.size = info->size;
     a.sha256 = info->sha256;
@@ -2426,15 +2436,34 @@ void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr) {
     a.relay_id = info->relay_id;
     a.created_at = now;
     a.state = HistoryStore::AttachUnavailable;
-    for (const auto& g : envelope_grants_)
+    for (const auto& g : grants)
         if (g.file_id == info->file_id) {
             a.key = g.key;
             a.token = g.token;
             a.state = HistoryStore::AttachAvailable;
         }
     if (!parse_server_address(info->relay_address)) a.state = HistoryStore::AttachUnavailable;
+    // A record can reach us (by archive catch-up) before the file is fully uploaded and its key sent. If it is recent, say that:
+    // it is not "can't be fetched", it is "not ready yet", and the key's arrival will make it available.
+    if (a.state == HistoryStore::AttachUnavailable && !a.outgoing && now - static_cast<int64_t>(sr.record.sent_at) < 3600) a.note = "Waiting for the sender's upload to finish";
+    // A sender's file is on the sender's own relay. A record that names some other address would make this app connect to
+    // wherever a sender chooses (a server of theirs, or one on this machine's own network), so it is not fetched.
+    if (a.state == HistoryStore::AttachAvailable && !a.outgoing) {
+        auto sender = resolve_peer(bytes_to_hex(sr.record.sender), sr.record.conversation_id);
+        auto named = parse_server_address(info->relay_address);
+        auto theirs = sender ? parse_server_address(sender->relay_address) : std::nullopt;
+        if (!sender || !named || !theirs || named->host != theirs->host || named->port != theirs->port || info->relay_id != sender->relay_id) {
+            a.state = HistoryStore::AttachUnavailable;
+            a.note = "The file is on a relay that isn't the sender's own, so it will not be fetched";
+        }
+    }
     if (a.state == HistoryStore::AttachAvailable && a.expires_at <= now) a.state = HistoryStore::AttachExpired;
-    history_->add_attachment(a);
+    if (!history_->add_attachment(a)) {
+        // Already known. If it came first from an archive, without its key, and this envelope has it, now it can be fetched.
+        auto existing = history_->attachment(a.file_id);
+        if (existing && !existing->outgoing && existing->state == HistoryStore::AttachUnavailable && existing->key.empty() && a.state != HistoryStore::AttachUnavailable)
+            history_->grant_attachment(a.file_id, a.key, a.token, a.state, a.note);
+    }
 }
 
 bool MessagingEngine::start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
@@ -2714,7 +2743,10 @@ bool MessagingEngine::download_attachment(const std::string& file_id, const std:
         case HistoryStore::AttachTransferred: error = "You have already downloaded it"; return false;
         case HistoryStore::AttachExpired: error = "It has expired: the relay no longer holds it"; return false;
         case HistoryStore::AttachWithdrawn: error = "The sender took it back"; return false;
-        default: error = "It can't be downloaded: it reached you without the key it needs"; return false;
+        default:
+            error = a->note.rfind("Waiting", 0) == 0 ? "It isn't ready yet: the sender is still uploading it. Try again in a moment."
+                                                     : "It can't be downloaded: it reached you without the key it needs";
+            return false;
     }
     if (unix_now() >= a->expires_at) {
         history_->set_attachment_state(*id, HistoryStore::AttachExpired, std::string());

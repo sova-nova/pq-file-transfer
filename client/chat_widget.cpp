@@ -74,7 +74,10 @@ static QString attachment_state_text(MessagingEngine& engine, const MessagingEng
         case HistoryStore::AttachExpired: return QString("expired: it is no longer on the relay");
         case HistoryStore::AttachWithdrawn: return a.outgoing ? QString("you withdrew it") : QString("the sender took it back");
         case HistoryStore::AttachFailed: return "could not be sent: " + qstr(a.note);
-        default: return QString("can't be downloaded: it reached you without the key it needs");
+        default:
+            if (!a.outgoing && a.note.rfind("Waiting", 0) == 0) return qstr(a.note) + "...";  // not an error: its key is on the way
+            return a.outgoing ? QString("no longer on the relay") : QString("can't be downloaded: it reached you without the key it needs, or isn't on the sender's own relay") +
+                                       (a.note.empty() ? QString() : "  (" + qstr(a.note) + ")");
     }
 }
 
