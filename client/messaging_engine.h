@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -9,10 +11,12 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <thread>
 #include <string>
 #include <vector>
 
 #include "archive.h"
+#include "attachment.h"
 #include "envelope.h"
 #include "history_store.h"
 #include "identity_bundle.h"
@@ -53,6 +57,7 @@ public:
         int archive_checkpoint_every = 50;
         int archive_checkpoint_max_age_seconds = 24 * 3600;
         int keyring_check_seconds = 60;  // how often to see whether the keyring on the relay needs updating
+        uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;  // the largest file this app will try to send (a relay may allow less)
     };
 
     // Throws std::runtime_error if the keys are locked or the history can't be opened.
@@ -135,6 +140,22 @@ public:
     bool set_verified(const std::string& fp, bool verified);
     bool is_verified(const std::string& fp);
 
+    // An attachment as the chat shows it. States are HistoryStore::AttachmentState: uploading (waiting and retrying until it is
+    // on the relay), available, transferred (fetched by us, or by everyone it was for), expired, withdrawn, unavailable
+    // (arrived without a key, for instance read back from an archive), failed, downloading.
+    struct AttachmentView {
+        std::string file_id;  // lowercase hex
+        std::string name;     // as the sender called it; shown, and made safe before it is used as a file name
+        uint64_t size = 0;
+        std::string caption;
+        int state = 5;
+        int64_t expires_at = 0;
+        bool outgoing = false;
+        size_t recipients = 0;   // outgoing: how many it is for
+        size_t redeemed = 0;     // outgoing: how many have fetched it
+        std::string saved_path;  // incoming, once fetched: where it was saved
+        std::string note;        // why it failed, or how the last attempt went
+    };
     struct ChatMessage {
         int64_t row = 0;
         bool outgoing = false;
@@ -143,6 +164,8 @@ public:
         int status = 0;   // outgoing: 0 queued, 1 sent, 2 delivered, 3 read. Incoming: 0 unread, 1 read.
         bool gap = false; // the sender's record points at a message we never got
         bool deleted = false;  // removed by agreement of everyone in the chat: only its place is left
+        bool is_attachment = false;  // then `text` is the caption and `attachment` has the rest
+        AttachmentView attachment;
     };
     std::vector<ChatMessage> messages(const std::string& contact_fp, size_t limit = 300);
 
@@ -217,6 +240,8 @@ public:
         int status = 0;    // outgoing: 0 queued, 1 sent, 2 delivered, 3 read (the lowest across all members). Incoming: 0 unread, 1 read.
         bool gap = false;  // the sender's record points at a message of theirs we never got
         bool deleted = false;  // removed by agreement of everyone in the chat: only its place is left
+        bool is_attachment = false;  // then `text` is the caption and `attachment` has the rest
+        AttachmentView attachment;
     };
     std::vector<GroupMessage> group_messages(const std::string& group_id, size_t limit = 300);
     struct MemberDelivery {
@@ -308,6 +333,26 @@ public:
     std::vector<DeletionInfo> deletions();  // newest first
     bool accept_deletion(const std::string& op_id, std::string& error);
     bool decline_deletion(const std::string& op_id);
+
+    // --- Attachments (M5) ---
+    // A file is sent as a message that points at an encrypted copy on this app's relay. The upload runs in the
+    // background and the message is not delivered until the file is there, so a relay that is down just means waiting and
+    // retrying. Each recipient gets their own one-time download token and the file key in their own envelope. Files are
+    // never fetched automatically: the recipient chooses (download_attachment). `days` is how long the relay keeps it
+    // (1 to 30). The file is read once to fingerprint it, here, before this returns.
+    bool send_attachment(const std::string& contact_fp, const std::filesystem::path& file, const std::string& caption, int days, std::string& error);
+    bool send_group_attachment(const std::string& group_id, const std::filesystem::path& file, const std::string& caption, int days, std::string& error);
+    // Starts fetching an incoming attachment into `directory` and returns at once; follow it with the message's state and
+    // attachment_progress(). The file is checked against the fingerprint the sender signed before it is saved under a safe
+    // name that never replaces anything, and only then is the one-time token used up. A failed or interrupted attempt can be
+    // started again and carries on where it stopped.
+    bool download_attachment(const std::string& file_id, const std::filesystem::path& directory, std::string& error);
+    // One attachment as the chat shows it (the caption lives in the message, so it is empty here). Nothing if it isn't known.
+    std::optional<AttachmentView> attachment(const std::string& file_id);
+    // Takes back an attachment this user sent: the relay deletes it, and recipients who have not fetched it can't.
+    bool withdraw_attachment(const std::string& file_id, std::string& error);
+    // Bytes done and in all, for an upload or download under way. False if nothing is.
+    bool attachment_progress(const std::string& file_id, uint64_t& done, uint64_t& total);
 
     // --- Restoring after a reinstall (M4) ---
     // The keyring is what a reinstalled app needs, beyond the keys folder, to find and open its chats'
@@ -403,6 +448,33 @@ private:
     void check_deletions();
     std::map<std::string, size_t> deletion_submit_attempts_;  // operation -> acceptances held at the last attempt
     std::chrono::steady_clock::time_point next_deletion_check_{};
+    // Attachments: sending and fetching run on one background thread, so a large file never holds up messages.
+    struct TransferJob {
+        enum Kind { Upload, Download } kind = Upload;
+        Bytes file_id;
+        int64_t outbox_id = 0;   // an upload's queue entry, so it can be retried or finished
+        std::string directory;   // a download's destination
+    };
+    AttachmentView attachment_view(const chat::AttachmentInfo& info);
+    void note_incoming_attachment(const chat::SignedRecord& record);
+    bool start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
+                               const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error);
+    void queue_transfer(TransferJob job);
+    void transfer_loop();
+    void stop_transfers();
+    void run_upload(const TransferJob& job);
+    void run_download(const TransferJob& job);
+    void check_attachments();
+    std::vector<chat::AttachmentGrant> envelope_grants_;  // the grants in the envelope being handled
+    std::mutex xfer_mutex_;
+    std::condition_variable xfer_cv_;
+    std::deque<TransferJob> xfer_queue_;
+    std::set<std::string> xfer_active_;
+    std::map<std::string, std::pair<uint64_t, uint64_t>> xfer_progress_;
+    std::thread xfer_thread_;
+    bool xfer_stop_ = false;
+    std::atomic<bool> xfer_cancel_{false};
+    std::chrono::steady_clock::time_point next_attachment_check_{};
     keyring::Contents build_keyring();
     bool store_keyring(const Bytes& plaintext, std::string& error);
     void maintain_keyring();

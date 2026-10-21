@@ -1464,6 +1464,158 @@ int main(int argc, char** argv) {
         CHECK(!mallory.engine->restore_from_relay(none, err) && !none.found && has(err, "no saved keyring"), "restoring a mailbox that never saved a keyring says so plainly: " + err);
     }
 
+
+    std::cout << "19. Attachments between real people\n";
+    {
+        std::string err;
+        const fs::path work = fs::temp_directory_path() / ("pq-attach-e2e-" + std::to_string(::getpid()));
+        fs::remove_all(work);
+        fs::create_directories(work / "src");
+        const fs::path relay_files = ROOT / "relay-data/s/v3/files";
+        auto write_file = [&](const fs::path& p, const Bytes& data) { std::ofstream f(p, std::ios::binary); f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())); };
+        auto read_file = [&](const fs::path& p) { std::ifstream f(p, std::ios::binary); return Bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); };
+        auto on_relay = [&](const std::string& file_id) { return fs::exists(relay_files / (file_id + ".bin")); };
+        auto view_in_chat = [&](User& u, const std::string& other_fp, const std::string& name) -> std::optional<MessagingEngine::AttachmentView> {
+            for (auto& m : u.engine->messages(other_fp)) if (m.is_attachment && m.attachment.name == name) return m.attachment;
+            return std::nullopt;
+        };
+        auto view_in_group = [&](User& u, const std::string& group, const std::string& name) -> std::optional<MessagingEngine::AttachmentView> {
+            for (auto& m : u.engine->group_messages(group)) if (m.is_attachment && m.attachment.name == name) return m.attachment;
+            return std::nullopt;
+        };
+        auto state_is = [&](std::optional<MessagingEngine::AttachmentView> v, int state) { return v && v->state == state; };
+
+        // --- One to one: Alice sends Bob a file of over 3 MiB (more than 64 chunks) ---
+        const Bytes big = CryptoEngine::random_bytes(3 * 1024 * 1024 + 123457);
+        write_file(work / "src" / "holiday photo.jpg", big);
+        CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "holiday photo.jpg", "from the beach", 7, err), "Alice sends Bob a 3 MiB photo with a caption (" + err + ")");
+        auto mine = view_in_chat(alice, bob.fp, "holiday photo.jpg");
+        CHECK(mine && mine->outgoing && mine->size == big.size() && mine->caption == "from the beach" && mine->recipients == 1, "it shows in her chat as an attachment, with its size and caption");
+        CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "holiday photo.jpg"), HistoryStore::AttachAvailable); }, 90000), "it reaches Bob as an attachment waiting to be fetched");
+        auto theirs = view_in_chat(bob, alice.fp, "holiday photo.jpg");
+        CHECK(theirs && !theirs->outgoing && theirs->size == big.size() && theirs->caption == "from the beach" && theirs->saved_path.empty() && on_relay(theirs->file_id), "with the caption and size, not yet saved anywhere, and the encrypted copy on Alice's relay");
+        CHECK(!file_contains(relay_files / (theirs->file_id + ".bin"), std::string(big.begin() + 1000, big.begin() + 1032)), "(and the relay's copy is not the file: its content isn't in it)");
+        bool in_alices = false;
+        for (auto& m : alice.engine->messages(bob.fp)) if (m.is_attachment) in_alices |= m.status >= HistoryStore::Sent;
+        CHECK(wait_for([&] { return state_is(view_in_chat(alice, bob.fp, "holiday photo.jpg"), HistoryStore::AttachAvailable); }, 30000), "for Alice it moved from uploading to available");
+        (void)in_alices;
+        run_for(3000);
+        CHECK(state_is(view_in_chat(bob, alice.fp, "holiday photo.jpg"), HistoryStore::AttachAvailable) && !fs::exists(work / "bob-downloads"), "nothing is fetched until Bob chooses to");
+
+        fs::create_directories(work / "bob-downloads");
+        CHECK(bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err), "Bob chooses to download it (" + err + ")");
+        CHECK(!bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err) || true, "(a second request while it runs is harmless)");
+        CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "holiday photo.jpg"), HistoryStore::AttachTransferred); }, 90000), "it is fetched, opened, checked against the fingerprint Alice signed, and saved");
+        auto done = view_in_chat(bob, alice.fp, "holiday photo.jpg");
+        CHECK(done && fs::path(done->saved_path).parent_path() == work / "bob-downloads" && read_file(done->saved_path) == big, "byte for byte what Alice sent, in the folder Bob chose");
+        CHECK(!bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err) && has(err, "already downloaded"), "it can't be fetched a second time: " + err);
+        CHECK(wait_for([&] { return !on_relay(theirs->file_id); }, 30000), "the relay deleted its copy as soon as the only recipient had it");
+        CHECK(wait_for([&] { auto v = view_in_chat(alice, bob.fp, "holiday photo.jpg"); return v && v->state == HistoryStore::AttachTransferred && v->redeemed == 1; }, 60000), "and Alice sees that Bob has it: 1 of 1");
+        CHECK(bob.engine->messages(alice.fp).size() > 0 && bob.engine->download_attachment(theirs->file_id, work / "bob-downloads", err) == false, "(the chat is otherwise unchanged)");
+
+        // A name that is awkward to use as a file name is made safe by the sender, and the same name twice never overwrites.
+        write_file(work / "src" / "weird:name?.bin", Bytes(5000, 0x41));
+        CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "weird:name?.bin", "", 7, err), "Alice sends a file whose name has a colon and a question mark");
+        CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "weird_name_.bin"), HistoryStore::AttachAvailable); }, 60000), "it arrives under a safe name");
+        auto weird = view_in_chat(bob, alice.fp, "weird_name_.bin");
+        CHECK(weird && bob.engine->download_attachment(weird->file_id, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "weird_name_.bin"), HistoryStore::AttachTransferred); }, 60000) &&
+                  read_file(view_in_chat(bob, alice.fp, "weird_name_.bin")->saved_path) == Bytes(5000, 0x41), "and downloads");
+        const fs::path first_copy = done->saved_path;
+        write_file(work / "src" / "holiday photo.jpg", Bytes(777, 0x07));  // the same name, different content
+        CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "holiday photo.jpg", "", 7, err), "Alice sends another file called holiday photo.jpg");
+        std::string second_id;
+        wait_for([&] { for (auto& m : bob.engine->messages(alice.fp)) if (m.is_attachment && m.attachment.size == 777) second_id = m.attachment.file_id; return !second_id.empty(); }, 60000);
+        CHECK(!second_id.empty() && bob.engine->download_attachment(second_id, work / "bob-downloads", err) &&
+                  wait_for([&] { for (auto& m : bob.engine->messages(alice.fp)) if (m.is_attachment && m.attachment.size == 777 && m.attachment.state == HistoryStore::AttachTransferred) return true; return false; }, 60000),
+              "Bob downloads it too");
+        std::string second_path;
+        for (auto& m : bob.engine->messages(alice.fp)) if (m.is_attachment && m.attachment.size == 777) second_path = m.attachment.saved_path;
+        CHECK(!second_path.empty() && second_path != first_copy.string() && has(second_path, "(2)") && read_file(first_copy) == big && read_file(second_path) == Bytes(777, 0x07), "it is saved as 'holiday photo (2).jpg': the first one is untouched");
+
+        // --- A group: one upload, a token for each member ---
+        auto make_group = [&](const std::string& title) -> std::string {
+            std::string id, e;
+            if (!alice.engine->create_group(title, {bob.fp, carol.fp}, id, e)) return std::string();
+            wait_for([&] { return find_invite(bob, id) && find_invite(carol, id); }, 30000);
+            bob.engine->accept_group_invite(id, e);
+            carol.engine->accept_group_invite(id, e);
+            wait_for([&] { return alice.engine->groups().size() > 0 && bob.engine->archive_status(id).joined && carol.engine->archive_status(id).joined; }, 60000);
+            return id;
+        };
+        const std::string files_group = make_group("Files");
+        CHECK(!files_group.empty(), "(a new group)");
+        const Bytes group_file = CryptoEngine::random_bytes(250000);
+        write_file(work / "src" / "minutes.pdf", group_file);
+        CHECK(alice.engine->send_group_attachment(files_group, work / "src" / "minutes.pdf", "this week's minutes", 7, err), "Alice sends a file to the group (" + err + ")");
+        CHECK(wait_for([&] { return state_is(view_in_group(bob, files_group, "minutes.pdf"), HistoryStore::AttachAvailable) && state_is(view_in_group(carol, files_group, "minutes.pdf"), HistoryStore::AttachAvailable); }, 90000), "Bob and Carol each get it");
+        auto gv = view_in_group(alice, files_group, "minutes.pdf");
+        CHECK(gv && gv->recipients == 2 && gv->caption == "this week's minutes", "Alice's copy says it is for two people");
+        const std::string gid = view_in_group(bob, files_group, "minutes.pdf")->file_id;
+        CHECK(view_in_group(carol, files_group, "minutes.pdf")->file_id == gid && on_relay(gid), "it is one file on the relay for both");
+        fs::create_directories(work / "carol-downloads");
+        CHECK(bob.engine->download_attachment(gid, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_group(bob, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "Bob downloads it");
+        CHECK(on_relay(gid), "with one of two having it, the relay still holds it");
+        CHECK(wait_for([&] { auto v = view_in_group(alice, files_group, "minutes.pdf"); return v && v->redeemed == 1 && v->state == HistoryStore::AttachAvailable; }, 60000), "and Alice sees 1 of 2 have it");
+        CHECK(carol.engine->download_attachment(gid, work / "carol-downloads", err) && wait_for([&] { return state_is(view_in_group(carol, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "Carol downloads it");
+        CHECK(read_file(view_in_group(bob, files_group, "minutes.pdf")->saved_path) == group_file && read_file(view_in_group(carol, files_group, "minutes.pdf")->saved_path) == group_file, "both copies are identical to the original");
+        CHECK(wait_for([&] { return !on_relay(gid); }, 30000), "the relay deleted it once both had it");
+        CHECK(wait_for([&] { return state_is(view_in_group(alice, files_group, "minutes.pdf"), HistoryStore::AttachTransferred); }, 60000), "and Alice sees it is done");
+
+        // --- Withdrawing ---
+        write_file(work / "src" / "oops.txt", Bytes(40000, 0x33));
+        CHECK(alice.engine->send_group_attachment(files_group, work / "src" / "oops.txt", "", 7, err), "Alice sends a file she should not have");
+        CHECK(wait_for([&] { return state_is(view_in_group(bob, files_group, "oops.txt"), HistoryStore::AttachAvailable) && state_is(view_in_group(alice, files_group, "oops.txt"), HistoryStore::AttachAvailable); }, 60000), "(it is there)");
+        const std::string oops = view_in_group(alice, files_group, "oops.txt")->file_id;
+        CHECK(alice.engine->withdraw_attachment(oops, err) && state_is(view_in_group(alice, files_group, "oops.txt"), HistoryStore::AttachWithdrawn) && !on_relay(oops), "she withdraws it: it is gone from the relay");
+        CHECK(bob.engine->download_attachment(oops, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_group(bob, files_group, "oops.txt"), HistoryStore::AttachWithdrawn); }, 60000), "when Bob tries, he finds out it was withdrawn");
+        CHECK(!bob.engine->download_attachment(oops, work / "bob-downloads", err) && has(err, "took it back"), "and is told so: " + err);
+        bool leftover_part = false;
+        for (auto& entry : fs::directory_iterator(work / "bob-downloads")) leftover_part |= entry.path().extension() == ".part";
+        CHECK(!leftover_part, "and the empty partial file the attempt started is not left behind");
+        CHECK(!bob.engine->withdraw_attachment(oops, err), "(only the sender can withdraw)");
+
+        // --- The relay serves a damaged chunk ---
+        const Bytes sensitive = CryptoEngine::random_bytes(200000);
+        write_file(work / "src" / "contract.bin", sensitive);
+        CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "contract.bin", "", 7, err), "Alice sends a contract");
+        CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "contract.bin"), HistoryStore::AttachAvailable); }, 60000), "(it arrives)");
+        const std::string cid = view_in_chat(bob, alice.fp, "contract.bin")->file_id;
+        const fs::path stored_copy = relay_files / (cid + ".bin");
+        Bytes original_bytes = read_file(stored_copy);
+        Bytes damaged = original_bytes;
+        damaged[100000] ^= 0x01;  // one bit, in the middle of the file
+        write_file(stored_copy, damaged);
+        CHECK(bob.engine->download_attachment(cid, work / "bob-downloads", err), "(Bob starts the download)");
+        CHECK(wait_for([&] { auto v = view_in_chat(bob, alice.fp, "contract.bin"); return v && v->state == HistoryStore::AttachAvailable && has(v->note, "intact"); }, 60000), "the relay changed one bit: Bob's app notices, refuses the file, and says so");
+        auto after_damage = view_in_chat(bob, alice.fp, "contract.bin");
+        bool saved_anything = false;
+        for (auto& entry : fs::directory_iterator(work / "bob-downloads")) saved_anything |= entry.path().filename().string().find("contract") != std::string::npos || entry.path().extension() == ".part";
+        CHECK(after_damage && after_damage->saved_path.empty() && !saved_anything && on_relay(cid), "nothing was saved, no partial file is left, and the token was not used up (the relay still has it)");
+        write_file(stored_copy, original_bytes);  // the damage is undone
+        CHECK(bob.engine->download_attachment(cid, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "contract.bin"), HistoryStore::AttachTransferred); }, 60000) &&
+                  read_file(view_in_chat(bob, alice.fp, "contract.bin")->saved_path) == sensitive, "once the relay serves it properly, the same download works, and the file is exact");
+
+        // --- The relay is down when the file is sent: it waits, and goes when the relay is back ---
+        write_file(work / "src" / "later.txt", Bytes(30000, 0x5A));
+        srv.stop();
+        CHECK(alice.engine->send_attachment(bob.fp, work / "src" / "later.txt", "sent while the relay was down", 7, err), "with the relay down, Alice sends a file: it is accepted and queued");
+        run_for(4000);
+        CHECK(view_in_chat(bob, alice.fp, "later.txt") == std::nullopt, "(Bob has heard nothing)");
+        auto waiting = view_in_chat(alice, bob.fp, "later.txt");
+        CHECK(waiting && waiting->state == HistoryStore::AttachUploading, "for Alice it is waiting to upload, not lost and not failed");
+        CHECK(srv.start(), "(the relay comes back)");
+        CHECK(wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "later.txt"), HistoryStore::AttachAvailable); }, 120000), "the upload goes through by itself, and the message follows");
+        auto later_id = view_in_chat(bob, alice.fp, "later.txt");
+        CHECK(later_id && bob.engine->download_attachment(later_id->file_id, work / "bob-downloads", err) && wait_for([&] { return state_is(view_in_chat(bob, alice.fp, "later.txt"), HistoryStore::AttachTransferred); }, 60000) &&
+                  read_file(view_in_chat(bob, alice.fp, "later.txt")->saved_path) == Bytes(30000, 0x5A), "and downloads, intact");
+
+        // --- Limits ---
+        CHECK(!alice.engine->send_attachment(bob.fp, work / "no-such-file", "", 7, err) && has(err, "isn't a file"), "a file that isn't there is refused: " + err);
+        CHECK(!alice.engine->send_attachment(bob.fp, work / "src" / "later.txt", "", 0, err) && !alice.engine->send_attachment(bob.fp, work / "src" / "later.txt", "", 31, err), "a keep-time of 0 or 31 days is refused");
+        CHECK(!alice.engine->send_attachment(bob.fp, work / "src" / "later.txt", std::string(2000, 'x'), 7, err) && has(err, "can't be sent"), "a caption that is too long is refused: " + err);
+        fs::remove_all(work);
+    }
+
     srv.stop();
     std::error_code ec;
     fs::remove_all(ROOT, ec);

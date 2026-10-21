@@ -326,7 +326,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +366,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 8, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 9, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 8 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 9 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +506,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; DROP TABLE deletions; DROP TABLE deletion_accepts; DROP TABLE archive_messages; DROP TABLE archive_redacted; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; DROP TABLE deletions; DROP TABLE deletion_accepts; DROP TABLE archive_messages; DROP TABLE archive_redacted; DROP TABLE attachments; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -779,6 +779,57 @@ int main() {
         CHECK(!h.has_archive(archive) && !h.archive_message_number(archive, id(5)) && !h.archive_hash(archive, 7) && !h.archive_redacted(archive, 7), "forgetting a chat's archive removes its keys, its checked chain and its message map");
     }
 
+    std::cout << "Attachments\n";
+    {
+        const std::string key_marker = "FILE-KEY-MARKER-0123456789ABCDEF", token_marker = "DOWNLOAD-TOKEN-MARKER-0123456789A";
+        HistoryStore::Attachment in;
+        in.file_id = id(0xF1, 16); in.conversation_id = id(0x61); in.message_id = id(0x62); in.outgoing = false;
+        in.name = "holiday photo.jpg"; in.size = 123456; in.sha256 = id(0x55, 32); in.expires_at = 9000;
+        in.relay_address = "10.0.0.248:9000"; in.relay_id = id(0x71, 32); in.state = HistoryStore::AttachAvailable;
+        in.key = text(key_marker); in.token = text(token_marker); in.created_at = 1000;
+        HistoryStore::Attachment out = in;
+        out.file_id = id(0xF2, 16); out.outgoing = true; out.state = HistoryStore::AttachUploading; out.key = id(0x11, 32); out.token.clear();
+        out.recipient_tokens = {{fp_a, id(0x21, 32)}, {fp_b, id(0x22, 32)}};
+        out.path = "/home/me/holiday photo.jpg"; out.recipients = 2;
+        {
+            HistoryStore h(dir / "attachments.db", key);
+            CHECK(!h.attachment(in.file_id) && h.attachments_in_state(HistoryStore::AttachAvailable).empty(), "there are no attachments to begin with");
+            CHECK(h.add_attachment(in) && h.add_attachment(out), "an incoming and an outgoing attachment are stored");
+            auto got = h.attachment(in.file_id);
+            CHECK(got && got->conversation_id == in.conversation_id && got->message_id == in.message_id && !got->outgoing && got->name == in.name && got->size == 123456 && got->sha256 == in.sha256 && got->expires_at == 9000 &&
+                      got->relay_address == in.relay_address && got->relay_id == in.relay_id && got->state == HistoryStore::AttachAvailable && got->key == in.key && got->token == in.token && got->recipient_tokens.empty(),
+                  "an incoming one comes back exactly, with its key and token");
+            auto sent = h.attachment(out.file_id);
+            CHECK(sent && sent->outgoing && sent->key == out.key && sent->recipient_tokens.size() == 2 && sent->recipient_tokens[0].first == fp_a && sent->recipient_tokens[1].second == id(0x22, 32) && sent->path == out.path && sent->recipients == 2 && sent->redeemed == 0,
+                  "an outgoing one comes back with each recipient's own token, the file's path and the recipient count");
+            HistoryStore::Attachment other = in;
+            other.name = "replaced.bin"; other.key = text("A DIFFERENT KEY......................");
+            CHECK(!h.add_attachment(other) && h.attachment(in.file_id)->name == in.name && h.attachment(in.file_id)->key == in.key, "the same file again (a replay) is refused and changes nothing");
+            CHECK(h.attachments_in_state(HistoryStore::AttachAvailable).size() == 1 && h.attachments_in_state(HistoryStore::AttachUploading).size() == 1 && h.attachments_in_state(HistoryStore::AttachExpired).empty(), "they can be listed by state");
+
+            h.set_attachment_state(in.file_id, HistoryStore::AttachDownloading, "");
+            CHECK(h.attachment(in.file_id)->state == HistoryStore::AttachDownloading, "a state changes on its own");
+            h.reset_downloading();
+            CHECK(h.attachment(in.file_id)->state == HistoryStore::AttachAvailable && h.attachment(out.file_id)->state == HistoryStore::AttachUploading, "after a restart nothing is 'downloading' any more, and nothing else is touched");
+            h.set_attachment_state(in.file_id, HistoryStore::AttachFailed, "the file changed after it was attached");
+            CHECK(h.attachment(in.file_id)->note == "the file changed after it was attached", "a reason is kept with it");
+            h.set_attachment_path(in.file_id, "/home/me/Downloads/holiday photo.jpg");
+            h.set_attachment_redeemed(out.file_id, 1);
+            CHECK(h.attachment(in.file_id)->path == "/home/me/Downloads/holiday photo.jpg" && h.attachment(out.file_id)->redeemed == 1, "where it was saved, and how many have fetched it, are kept");
+            h.drop_attachment_secrets(out.file_id);
+            auto dropped = h.attachment(out.file_id);
+            CHECK(dropped && dropped->key.empty() && dropped->recipient_tokens.empty() && dropped->name == out.name && dropped->recipients == 2, "once every recipient has been told, the sender's copy of the key and tokens is forgotten");
+        }
+        CHECK(!file_contains(dir / "attachments.db", key_marker) && !file_contains(fs::path((dir / "attachments.db").string() + "-wal"), key_marker) &&
+                  !file_contains(dir / "attachments.db", token_marker) && !file_contains(fs::path((dir / "attachments.db").string() + "-wal"), token_marker),
+              "the file key and download token are not readable on disk");
+        HistoryStore wrong(dir / "attachments.db", CryptoEngine::random_bytes(32));
+        auto unreadable = wrong.attachment(in.file_id);
+        CHECK(unreadable && unreadable->key.empty() && unreadable->token.empty() && unreadable->name == in.name, "with a different key the secrets can't be opened (and nothing crashes), though what the chat shows is still there");
+        HistoryStore again(dir / "attachments.db", key);
+        CHECK(again.attachment(in.file_id) && again.attachment(in.file_id)->key == in.key && again.attachment(in.file_id)->path == "/home/me/Downloads/holiday photo.jpg", "attachments survive a restart");
+    }
+
     std::cout << "Upgrading a version 6 history\n";
     {
         fs::path v6 = dir / "v6.db";
@@ -804,7 +855,7 @@ int main() {
         CHECK(raw_int(v6, "PRAGMA user_version") == 6 && raw_int(v6, "SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name = 'warning'") == 0, "(setup) the fixture really is a version 6 database");
         {
             HistoryStore h(v6, key);
-            CHECK(raw_int(v6, "PRAGMA user_version") == 8, "opening it upgrades it to the current version (8)");
+            CHECK(raw_int(v6, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
             auto a = h.archive(conv);
             CHECK(a && a->relay_address == "10.0.0.248:9000" && a->role == HistoryStore::ArchiveCreator && a->state == HistoryStore::ArchiveJoined && a->archive_key == id(0x11, 32) &&
                       a->head_number == 9 && a->head_hash == id(0x99, 32) && a->created_at == 1234,

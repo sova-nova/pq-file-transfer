@@ -4,10 +4,13 @@
 #include "protocol.h"
 #include "sharing.h"
 
+#include <cstdio>
+
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDateTime>
 #include <QDialog>
+#include <QFileDialog>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -17,7 +20,9 @@
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -41,6 +46,45 @@ QString status_word(int status, bool outgoing) {
 }
 
 void plain_box(QMessageBox& box) { box.setTextFormat(Qt::PlainText); }
+
+// "3.1 MB", for telling someone how big a file is before they choose to fetch it.
+static QString human_size(uint64_t bytes) {
+    char buf[40];
+    if (bytes < 1024) std::snprintf(buf, sizeof(buf), "%llu bytes", static_cast<unsigned long long>(bytes));
+    else if (bytes < 1024ull * 1024) std::snprintf(buf, sizeof(buf), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+    else if (bytes < 1024ull * 1024 * 1024) std::snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    else std::snprintf(buf, sizeof(buf), "%.2f GB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+    return QString(buf);
+}
+
+// Where an attachment stands, in words.
+static QString attachment_state_text(MessagingEngine& engine, const MessagingEngine::AttachmentView& a) {
+    auto number = [](size_t n) { return QString::number(static_cast<qulonglong>(n)); };
+    const QString expires = QDateTime::fromSecsSinceEpoch(a.expires_at).toString("d MMM");
+    uint64_t done = 0, total = 0;
+    const bool moving = engine.attachment_progress(a.file_id, done, total) && total > 0;
+    const QString percent = moving ? QString::number(static_cast<qulonglong>(done * 100 / total)) + "%" : QString();
+    switch (a.state) {
+        case HistoryStore::AttachUploading: return moving ? "uploading " + percent : QString("waiting to upload");
+        case HistoryStore::AttachDownloading: return moving ? "downloading " + percent : QString("downloading");
+        case HistoryStore::AttachAvailable:
+            if (a.outgoing) return number(a.redeemed) + " of " + number(a.recipients) + " have it, until " + expires;
+            return "click to download, until " + expires + (a.note.empty() ? QString() : "  (last try: " + qstr(a.note) + ")");
+        case HistoryStore::AttachTransferred: return a.outgoing ? QString("everyone has it") : "saved to " + qstr(a.saved_path);
+        case HistoryStore::AttachExpired: return QString("expired: it is no longer on the relay");
+        case HistoryStore::AttachWithdrawn: return a.outgoing ? QString("you withdrew it") : QString("the sender took it back");
+        case HistoryStore::AttachFailed: return "could not be sent: " + qstr(a.note);
+        default: return QString("can't be downloaded: it reached you without the key it needs");
+    }
+}
+
+// The line a chat shows for an attachment: what it is, how big, where it stands, and its caption.
+static QString attachment_line(MessagingEngine& engine, const MessagingEngine::AttachmentView& a, const std::string& caption, bool& moving) {
+    QString text = "[file] " + qstr(a.name) + " (" + human_size(a.size) + ")  -  " + attachment_state_text(engine, a);
+    if (!caption.empty()) text += "\n    " + qstr(caption);
+    moving |= a.state == HistoryStore::AttachUploading || a.state == HistoryStore::AttachDownloading;
+    return text;
+}
 
 // What a message to a group has achieved, in words that are true: how many of the members it has
 // reached at each stage. (Each member has their own state; see show_group_delivery.)
@@ -174,7 +218,10 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     input_ = new QLineEdit(this);
     input_->setPlaceholderText("Write a message…");
     send_button_ = new QPushButton("Send", this);
+    attach_button_ = new QPushButton("Attach…", this);
+    attach_button_->setToolTip("Send a file. What you have typed is sent with it as a caption.");
     input_row->addWidget(input_, 1);
+    input_row->addWidget(attach_button_);
     input_row->addWidget(send_button_);
     right->addLayout(input_row);
     body->addLayout(right, 1);
@@ -204,6 +251,7 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         invites_button_->setEnabled(false);
         input_->setEnabled(false);
         send_button_->setEnabled(false);
+        attach_button_->setEnabled(false);
         delivery_box_->setEnabled(false);
         read_box_->setEnabled(false);
         revoke_button_->setEnabled(false);
@@ -223,6 +271,15 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
     connect(revoke_button_, &QPushButton::clicked, this, [this] { revoke_access_for_current(); });
     connect(people_button_, &QPushButton::clicked, this, [this] { people_clicked(); });
     connect(send_button_, &QPushButton::clicked, this, [this] { send_current(); });
+    connect(attach_button_, &QPushButton::clicked, this, [this] { attach_file(); });
+    auto* progress_timer = new QTimer(this);  // while a file is moving, redraw now and then so its progress shows
+    connect(progress_timer, &QTimer::timeout, this, [this] {
+        if (!animating_) return;
+        const int keep = messages_->verticalScrollBar()->value();
+        render_messages(false);
+        messages_->verticalScrollBar()->setValue(keep);
+    });
+    progress_timer->start(700);
     connect(input_, &QLineEdit::returnPressed, this, [this] { send_current(); });
     connect(contacts_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* item, QListWidgetItem*) {
         if (!updating_ui_ && item) select_contact(item->data(Qt::UserRole).toString());
@@ -231,7 +288,13 @@ ChatWidget::ChatWidget(KeyStore& keys, const std::filesystem::path& history_path
         if (!updating_ui_ && item) select_group(item->data(Qt::UserRole).toString());
     });
     connect(messages_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
-        if (item && !current_group_.isEmpty()) show_group_delivery(item->data(Qt::UserRole).toString());
+        if (!item) return;
+        const QString attachment = item->data(Qt::UserRole + 1).toString();
+        if (!attachment.isEmpty()) {  // an attachment: what can be done with it
+            show_attachment(attachment);
+            return;
+        }
+        if (!current_group_.isEmpty()) show_group_delivery(item->data(Qt::UserRole).toString());
     });
     connect(delivery_box_, &QCheckBox::toggled, this, [this](bool) { apply_receipt_settings(); });
     connect(read_box_, &QCheckBox::toggled, this, [this](bool) { apply_receipt_settings(); });
@@ -368,6 +431,7 @@ void ChatWidget::render_messages(bool force_scroll) {
     }
     auto messages = engine_->messages(current_fp_.toStdString());
     messages_->clear();
+    animating_ = false;
     for (const auto& m : messages) {
         QString when = QDateTime::fromSecsSinceEpoch(m.sent_at).toString("d MMM HH:mm");
         QString who = m.outgoing ? QString("You") : header_label_->property("contact_name").toString();
@@ -377,10 +441,15 @@ void ChatWidget::render_messages(bool force_scroll) {
             messages_->addItem(gone);
             continue;
         }
-        QString text = "[" + when + "] " + who + ": " + qstr(m.text) + status_word(m.status, m.outgoing);
+        QString body = m.is_attachment ? attachment_line(*engine_, m.attachment, m.text, animating_) : qstr(m.text);
+        QString text = "[" + when + "] " + who + ": " + body + (m.is_attachment ? QString() : status_word(m.status, m.outgoing));
         if (m.gap) text += "\n    (a message before this one is missing)";
         auto* item = new QListWidgetItem(text);
         item->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
+        if (m.is_attachment) {
+            item->setData(Qt::UserRole + 1, qstr(m.attachment.file_id));  // so a click can offer what can be done with it
+            item->setToolTip("Click for what you can do with this file");
+        }
         messages_->addItem(item);
     }
     if (force_scroll || messages.size() != shown_messages_) messages_->scrollToBottom();
@@ -391,6 +460,7 @@ void ChatWidget::render_group_messages(bool force_scroll) {
     const std::string group = current_group_.toStdString();
     auto messages = engine_->group_messages(group);
     messages_->clear();
+    animating_ = false;
     // Who has received what is looked up for the newest messages of ours that not everyone has read yet.
     size_t budget = 50;
     std::vector<bool> detailed(messages.size(), false);
@@ -408,11 +478,15 @@ void ChatWidget::render_group_messages(bool force_scroll) {
         }
         QString status = status_word(m.status, m.outgoing);
         if (detailed[i]) status = group_status_word(engine_->group_delivery(group, m.message_id));
-        QString text = "[" + when + "] " + who + ": " + qstr(m.text) + status;
+        QString body = m.is_attachment ? attachment_line(*engine_, m.attachment, m.text, animating_) : qstr(m.text);
+        QString text = "[" + when + "] " + who + ": " + body + (m.is_attachment ? QString() : status);
         if (m.gap) text += "\n    (a message before this one is missing)";
         auto* item = new QListWidgetItem(text);
         item->setTextAlignment(m.outgoing ? Qt::AlignRight : Qt::AlignLeft);
-        if (m.outgoing) {
+        if (m.is_attachment) {
+            item->setData(Qt::UserRole + 1, qstr(m.attachment.file_id));
+            item->setToolTip("Click for what you can do with this file");
+        } else if (m.outgoing) {
             item->setData(Qt::UserRole, qstr(m.message_id));  // so a click can show who has it
             item->setToolTip("Click to see who has received this message");
         }
@@ -450,6 +524,7 @@ void ChatWidget::update_header() {
         input_->setEnabled(true);
         input_->setPlaceholderText("Write a message to the group…");
         send_button_->setEnabled(true);
+        attach_button_->setEnabled(true);
         bool delivery = true, read = true;
         engine_->group_receipts_enabled(id, &delivery, &read);
         updating_ui_ = true;
@@ -468,6 +543,7 @@ void ChatWidget::update_header() {
     delete_chat_button_->setEnabled(have);
     input_->setEnabled(have);
     send_button_->setEnabled(have);
+    attach_button_->setEnabled(have);
     if (!have) {
         header_label_->setText("Choose a contact or group");
         return;
@@ -1030,6 +1106,67 @@ void ChatWidget::request_delete_chat() {
     QMessageBox done(QMessageBox::Information, "Delete chat", "Everyone in the chat has been asked. You will be told when it is done.", QMessageBox::Ok, this);
     plain_box(done);
     done.exec();
+}
+
+// Choose a file to send in the chat on screen. What is typed in the message box goes with it as a caption. The file is
+// uploaded in the background; the message shows its progress and reaches the others only once the file is on the relay.
+void ChatWidget::attach_file() {
+    const bool group = !current_group_.isEmpty();
+    if (!group && current_fp_.isEmpty()) return;
+    const QString chosen = QFileDialog::getOpenFileName(this, "Choose a file to send", QString());
+    if (chosen.isEmpty()) return;
+    bool ok = false;
+    const int days = QInputDialog::getInt(this, "Keep it on the relay", "For how many days should the relay keep it for the others to download? (1 to 30)", 7, 1, 30, 1, &ok);
+    if (!ok) return;
+    const std::string caption = input_->text().trimmed().toStdString();
+    const auto path = std::filesystem::u8path(chosen.toStdString());
+    std::string error;
+    QGuiApplication::setOverrideCursor(Qt::WaitCursor);  // a very large file takes a moment to measure
+    const bool sent = group ? engine_->send_group_attachment(current_group_.toStdString(), path, caption, days, error)
+                            : engine_->send_attachment(current_fp_.toStdString(), path, caption, days, error);
+    QGuiApplication::restoreOverrideCursor();
+    if (!sent) {
+        QMessageBox::warning(this, "Attach a file", qstr(error));
+        return;
+    }
+    input_->clear();
+    refresh();
+}
+
+// What can be done with an attachment, depending on where it stands. Nothing is ever fetched or opened without being asked.
+void ChatWidget::show_attachment(const QString& file_id) {
+    auto a = engine_->attachment(file_id.toStdString());
+    if (!a) return;
+    QString text = qstr(a->name) + "\n" + human_size(a->size) + "\n\n" + attachment_state_text(*engine_, *a);
+    if (a->state == HistoryStore::AttachAvailable && !a->outgoing)
+        text += "\n\nIt is kept on the sender's relay, encrypted. Downloading uses it up for you: it is saved to the folder you choose, under a name that can't replace anything, "
+                "after it has been checked against what the sender signed. It is never opened for you.";
+    QMessageBox box(QMessageBox::Information, "Attachment", text, QMessageBox::NoButton, this);
+    plain_box(box);
+    QAbstractButton* download = nullptr;
+    QAbstractButton* copy = nullptr;
+    QAbstractButton* withdraw = nullptr;
+    if (!a->outgoing && a->state == HistoryStore::AttachAvailable) download = box.addButton("Download…", QMessageBox::AcceptRole);
+    if (!a->outgoing && a->state == HistoryStore::AttachTransferred && !a->saved_path.empty()) copy = box.addButton("Copy the file's location", QMessageBox::AcceptRole);
+    if (a->outgoing && (a->state == HistoryStore::AttachAvailable || a->state == HistoryStore::AttachUploading)) withdraw = box.addButton("Withdraw it", QMessageBox::DestructiveRole);
+    box.addButton("Close", QMessageBox::RejectRole);
+    box.exec();
+    QAbstractButton* clicked = box.clickedButton();
+    if (download && clicked == download) {
+        const QString start = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        const QString folder = QFileDialog::getExistingDirectory(this, "Save " + qstr(a->name) + " (" + human_size(a->size) + ") to", start);
+        if (folder.isEmpty()) return;
+        std::string error;
+        if (!engine_->download_attachment(file_id.toStdString(), std::filesystem::u8path(folder.toStdString()), error)) QMessageBox::warning(this, "Download", qstr(error));
+        refresh();
+    } else if (copy && clicked == copy) {
+        QGuiApplication::clipboard()->setText(qstr(a->saved_path));
+    } else if (withdraw && clicked == withdraw) {
+        if (QMessageBox::question(this, "Withdraw", "Take this file back? The relay deletes it, and anyone who hasn't downloaded it yet won't be able to.") != QMessageBox::Yes) return;
+        std::string error;
+        if (!engine_->withdraw_attachment(file_id.toStdString(), error)) QMessageBox::warning(this, "Withdraw", qstr(error));
+        refresh();
+    }
 }
 
 void ChatWidget::review_group_invites() {

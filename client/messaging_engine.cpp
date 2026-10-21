@@ -23,7 +23,26 @@ constexpr size_t INTRODUCED_PER_ENVELOPE = 6;
 constexpr int OUTBOX_KIND_MESSAGE = 0;
 constexpr int OUTBOX_KIND_RECEIPT = 1;
 constexpr int OUTBOX_KIND_GRANTS = 2;  // a job to make send tokens for group members, then Forward records to the creator
-constexpr int OUTBOX_KIND_ARCHIVE = 4;  // a record to add to a chat's archive (the item's contact_fp holds the chat's ID in hex)
+constexpr int OUTBOX_KIND_ATTACHMENT = 5;  // a message with a file: the record, then this recipient's file ID, key and token
+constexpr int OUTBOX_KIND_UPLOAD = 6;      // a file to upload (the item's contact_fp holds the file's ID in hex)
+constexpr int OUTBOX_KIND_ARCHIVE = 4;
+
+// One recipient's file ID, key and token, as queued next to the message record until the envelope is sealed.
+static std::vector<uint8_t> encode_grant(const std::vector<uint8_t>& file_id, const std::vector<uint8_t>& key, const std::vector<uint8_t>& token) {
+    std::vector<uint8_t> b;
+    write_blob(b, file_id);
+    write_blob(b, key);
+    write_blob(b, token);
+    return b;
+}
+static std::optional<chat::AttachmentGrant> decode_grant(const std::vector<uint8_t>& b) {
+    size_t off = 0;
+    auto id = read_blob(b.data(), b.size(), off, 16);
+    auto key = read_blob(b.data(), b.size(), off, 32);
+    auto token = read_blob(b.data(), b.size(), off, 32);
+    if (!id || !key || !token || id->size() != 16 || key->size() != 32 || token->size() != 32 || off != b.size()) return std::nullopt;
+    return chat::AttachmentGrant{std::move(*id), std::move(*key), std::move(*token)};
+}  // a record to add to a chat's archive (the item's contact_fp holds the chat's ID in hex)
 constexpr int OUTBOX_KIND_RELAY = 3;   // an already-sealed envelope to deposit as it is (the creator passing one on)
 constexpr size_t FORWARDS_PER_ENVELOPE = 4;  // each carries a sealed envelope of about 5 KB
 
@@ -57,6 +76,9 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     // has enough to do already.
     next_archive_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
     next_keyring_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.keyring_check_seconds));
+    next_deletion_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+    next_attachment_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+    history_->reset_downloading();  // nothing is being fetched after a restart
 
     my_fp_hex_ = keys_.own_fingerprint();
     auto fp = hex_to_bytes(my_fp_hex_);
@@ -65,6 +87,7 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
 }
 
 MessagingEngine::~MessagingEngine() {
+    stop_transfers();
     CryptoEngine::secure_wipe(kem_private_);
     CryptoEngine::secure_wipe(dsa_private_);
 }
@@ -407,12 +430,19 @@ std::vector<MessagingEngine::ChatMessage> MessagingEngine::messages(const std::s
             continue;
         }
         auto record = chat::parse_record(m.record);
-        if (!record || record->record.type != chat::RecordType::Text) continue;
+        if (!record || (record->record.type != chat::RecordType::Text && record->record.type != chat::RecordType::Attachment)) continue;
         ChatMessage cm;
         cm.row = m.row;
         cm.outgoing = m.outgoing;
         cm.sent_at = m.sent_at;
         cm.text.assign(record->record.payload.begin(), record->record.payload.end());
+        if (record->record.type == chat::RecordType::Attachment) {
+            auto info = chat::parse_attachment_payload(record->record.payload);
+            if (!info) continue;
+            cm.is_attachment = true;
+            cm.attachment = attachment_view(*info);
+            cm.text = info->caption;
+        }
         cm.status = m.status;
         cm.gap = m.gap;
         out.push_back(std::move(cm));
@@ -569,7 +599,9 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
 
     const int64_t now = unix_now();
     switch (sr.record.type) {
-        case chat::RecordType::Text: {
+        case chat::RecordType::Text:
+        case chat::RecordType::Attachment: {
+            if (sr.record.type == chat::RecordType::Attachment && !chat::parse_attachment_payload(sr.record.payload)) return false;
             history_->ensure_conversation(conv_id, contact.fingerprint, now);
             HistoryStore::Message m;
             m.conversation_id = conv_id;
@@ -584,6 +616,7 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
             if (!history_->add_message(m)) return false;  // a duplicate or replay
             if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));  // the archive may have what went missing
+            if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr);
             auto conv = history_->conversation_for(contact.fingerprint);
             if (conv && conv->send_delivery_receipts) enqueue_receipt(contact.fingerprint, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
             return true;
@@ -602,8 +635,6 @@ bool MessagingEngine::handle_record(const KeyStore::Contact& contact, const chat
             return receive_deletion_request(peer_from_contact(contact), sr);
         case chat::RecordType::DeleteAccept:
             return receive_deletion_accept(peer_from_contact(contact), sr);
-        case chat::RecordType::Attachment:  // the engine does not send or show attachments yet (the next step)
-            return false;
         case chat::RecordType::Checkpoint:  // these live only in an archive, never in an envelope
         case chat::RecordType::Conversation:
         case chat::RecordType::Forward:
@@ -632,6 +663,8 @@ static bool only_group_grants(const std::vector<chat::SignedRecord>& records) {
 bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
     auto inner = chat::open_envelope(envelope.envelope, kem_private_);
     if (!inner) return true;  // not for us, or damaged: nothing to keep, so let the relay delete it
+    envelope_grants_ = inner->grants;  // file keys and tokens for any attachments in it, for note_incoming_attachment
+    auto forget_grants = make_scope_exit([&] { envelope_grants_.clear(); });
 
     std::optional<IdentityBundle> bundle;
     if (!inner->sender_bundle.empty()) bundle = parse_identity_bundle(inner->sender_bundle);
@@ -947,7 +980,7 @@ std::vector<MessagingEngine::GroupMessage> MessagingEngine::group_messages(const
             continue;
         }
         auto record = chat::parse_record(m.record);
-        if (!record || record->record.type != chat::RecordType::Text) continue;
+        if (!record || (record->record.type != chat::RecordType::Text && record->record.type != chat::RecordType::Attachment)) continue;
         GroupMessage gm;
         gm.row = m.row;
         gm.message_id = bytes_to_hex(m.message_id);
@@ -956,6 +989,13 @@ std::vector<MessagingEngine::GroupMessage> MessagingEngine::group_messages(const
         if (!gm.outgoing) gm.sender_name = member_info(gm.sender_fp).name;
         gm.sent_at = m.sent_at;
         gm.text.assign(record->record.payload.begin(), record->record.payload.end());
+        if (record->record.type == chat::RecordType::Attachment) {
+            auto info = chat::parse_attachment_payload(record->record.payload);
+            if (!info) continue;
+            gm.is_attachment = true;
+            gm.attachment = attachment_view(*info);
+            gm.text = info->caption;
+        }
         gm.status = m.status;
         gm.gap = m.gap;
         out.push_back(std::move(gm));
@@ -1086,7 +1126,9 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
 
         const int64_t now = unix_now();
         switch (sr.record.type) {
-            case chat::RecordType::Text: {
+            case chat::RecordType::Text:
+            case chat::RecordType::Attachment: {
+                if (sr.record.type == chat::RecordType::Attachment && !chat::parse_attachment_payload(sr.record.payload)) return false;
                 HistoryStore::Message m;
                 m.conversation_id = conv_id;
                 m.message_id = sr.record.message_id;
@@ -1100,6 +1142,7 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 m.gap = !sr.record.own_prev.empty() && !history_->has_entry(conv_id, sr.record.own_prev);
                 if (!history_->add_message(m)) return false;  // a duplicate or replay
                 if (m.gap) archive_sync_now_.insert(bytes_to_hex(conv_id));
+                if (sr.record.type == chat::RecordType::Attachment) note_incoming_attachment(sr);
                 if (conv->send_delivery_receipts)
                     enqueue_receipt_in(conv_id, sr.record.recipients_hash, sender.fp, chat::ReceiptKind::Delivered, {m.message_id}, delayed_receipt);
                 return true;
@@ -1133,8 +1176,6 @@ bool MessagingEngine::handle_group_record(const Peer& sender, const chat::Signed
                 return receive_deletion_request(sender, sr);
             case chat::RecordType::DeleteAccept:
                 return receive_deletion_accept(sender, sr);
-            case chat::RecordType::Attachment:     // the engine does not send or show attachments yet (the next step)
-                return false;
             case chat::RecordType::Checkpoint:     // only ever found in an archive
             case chat::RecordType::Conversation:   // the group already exists: a replay changes nothing
                 return false;
@@ -2343,6 +2384,472 @@ void MessagingEngine::check_deletions() {
     }
 }
 
+// --- Attachments ---
+
+MessagingEngine::AttachmentView MessagingEngine::attachment_view(const chat::AttachmentInfo& info) {
+    AttachmentView v;
+    v.file_id = bytes_to_hex(info.file_id);
+    v.name = info.name;
+    v.size = info.size;
+    v.caption = info.caption;
+    v.expires_at = info.expires_at;
+    v.state = HistoryStore::AttachUnavailable;
+    if (auto a = history_->attachment(info.file_id)) {
+        v.state = a->state;
+        v.outgoing = a->outgoing;
+        v.recipients = a->recipients;
+        v.redeemed = a->redeemed;
+        v.saved_path = a->outgoing ? std::string() : a->path;
+        v.note = a->note;
+    }
+    // The relay's time may have run out since this was last looked at.
+    if ((v.state == HistoryStore::AttachAvailable || v.state == HistoryStore::AttachUploading) && unix_now() >= static_cast<int64_t>(info.expires_at)) v.state = HistoryStore::AttachExpired;
+    return v;
+}
+
+// An attachment arrives: remember how to fetch it. The key and our own token came in the same envelope; if they didn't
+// (it was read back from an archive, which never holds them), the file can't be fetched and is shown as such.
+void MessagingEngine::note_incoming_attachment(const chat::SignedRecord& sr) {
+    auto info = chat::parse_attachment_payload(sr.record.payload);
+    if (!info) return;
+    const int64_t now = unix_now();
+    HistoryStore::Attachment a;
+    a.file_id = info->file_id;
+    a.conversation_id = sr.record.conversation_id;
+    a.message_id = sr.record.message_id;
+    a.outgoing = false;
+    a.name = info->name;
+    a.size = info->size;
+    a.sha256 = info->sha256;
+    a.expires_at = static_cast<int64_t>(info->expires_at);
+    a.relay_address = info->relay_address;
+    a.relay_id = info->relay_id;
+    a.created_at = now;
+    a.state = HistoryStore::AttachUnavailable;
+    for (const auto& g : envelope_grants_)
+        if (g.file_id == info->file_id) {
+            a.key = g.key;
+            a.token = g.token;
+            a.state = HistoryStore::AttachAvailable;
+        }
+    if (!parse_server_address(info->relay_address)) a.state = HistoryStore::AttachUnavailable;
+    if (a.state == HistoryStore::AttachAvailable && a.expires_at <= now) a.state = HistoryStore::AttachExpired;
+    history_->add_attachment(a);
+}
+
+bool MessagingEngine::start_attachment_send(const Bytes& conversation_id, const std::vector<std::string>& recipients, const Bytes& recipients_hash,
+                                            const std::vector<Bytes>& seen, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) { error = "That isn't a file"; return false; }
+    const uint64_t size = fs::file_size(file, ec);
+    if (ec) { error = "That file could not be read"; return false; }
+    if (size > options_.max_attachment_bytes || size > attachment::MAX_PLAINTEXT_BYTES) {
+        error = "That file is too large (" + std::to_string(std::min<uint64_t>(options_.max_attachment_bytes, attachment::MAX_PLAINTEXT_BYTES) / (1024 * 1024)) + " MiB at most)";
+        return false;
+    }
+    if (days < 1 || days > 30) { error = "Choose how long to keep it: 1 to 30 days"; return false; }
+    if (recipients.empty() || recipients.size() > relay::MAX_FILE_TOKENS) { error = "There is no one to send it to"; return false; }
+    auto config = keys_.load_mailbox_config();
+    if (!config) { error = "Set up messaging first"; return false; }
+    auto fingerprint = attachment::fingerprint_file(file, error);  // reads the file once; the upload reads it again
+    if (!fingerprint) return false;
+
+    const int64_t now = unix_now();
+    chat::AttachmentInfo info;
+    info.file_id = CryptoEngine::random_bytes(relay::FILE_ID_BYTES);
+    info.name = attachment::sanitize_filename(file.filename().u8string());
+    info.size = fingerprint->size;
+    info.sha256 = fingerprint->sha256;
+    info.expires_at = static_cast<uint64_t>(now + static_cast<int64_t>(days) * 86400);
+    info.relay_address = format_server_address(ServerAddress{config->host, config->port});
+    info.relay_id = config->relay_id;
+    info.caption = caption;
+
+    chat::Record r;
+    r.conversation_id = conversation_id;
+    r.message_id = CryptoEngine::random_bytes(chat::ID_BYTES);
+    r.sender = my_fp_;
+    r.recipients_hash = recipients_hash;
+    r.sent_at = static_cast<uint64_t>(now);
+    r.type = chat::RecordType::Attachment;
+    r.own_prev = history_->last_entry_hash(conversation_id, true).value_or(Bytes());
+    r.seen = seen;
+    Bytes raw;
+    try {
+        r.payload = chat::attachment_payload(info);
+        raw = chat::sign_record(r, dsa_private_);
+    } catch (const std::exception& e) {
+        error = std::string("That can't be sent: ") + e.what();
+        return false;
+    }
+    auto parsed = chat::parse_record(raw);
+    if (!parsed) { error = "Could not sign the message"; return false; }
+
+    HistoryStore::Message m;
+    m.conversation_id = conversation_id;
+    m.message_id = r.message_id;
+    m.outgoing = true;
+    m.sent_at = now;
+    m.received_at = now;
+    m.status = HistoryStore::Queued;
+    m.entry_hash = parsed->entry_hash;
+    m.record = raw;
+
+    HistoryStore::Attachment a;
+    a.file_id = info.file_id;
+    a.conversation_id = conversation_id;
+    a.message_id = r.message_id;
+    a.outgoing = true;
+    a.name = info.name;
+    a.size = info.size;
+    a.sha256 = info.sha256;
+    a.expires_at = static_cast<int64_t>(info.expires_at);
+    a.relay_address = info.relay_address;
+    a.relay_id = info.relay_id;
+    a.state = HistoryStore::AttachUploading;
+    a.key = CryptoEngine::random_bytes(attachment::KEY_BYTES);
+    for (const auto& fp : recipients) a.recipient_tokens.emplace_back(fp, CryptoEngine::random_bytes(relay::FILE_TOKEN_BYTES));
+    a.path = fs::absolute(file, ec).string();
+    a.recipients = static_cast<uint32_t>(recipients.size());
+    a.created_at = now;
+
+    history_->add_message(m);
+    history_->add_attachment(a);
+    // Nothing goes to the recipients until the file is on the relay: the upload job does that when it succeeds.
+    history_->enqueue(bytes_to_hex(info.file_id), OUTBOX_KIND_UPLOAD, r.message_id, {raw}, now, now);
+    queue_archive_entry(conversation_id, raw, r.message_id);  // the record (never the key or tokens) is archived like any message
+    bump();
+    return true;
+}
+
+bool MessagingEngine::send_attachment(const std::string& contact_fp, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+    auto contact = keys_.find_contact_by_fingerprint(contact_fp);
+    if (!contact) { error = "That contact isn't in your list"; return false; }
+    if (!contact->kem_verified) { error = "Their encryption key isn't verified. Ask them for a new contact card."; return false; }
+    if (!contact->can_message()) { error = "You don't have their messaging address yet. Ask them for a new contact card."; return false; }
+    auto their_fp = hex_to_bytes(contact_fp);
+    if (!their_fp || their_fp->size() != 32) { error = "That contact isn't valid"; return false; }
+    auto conv = history_->ensure_conversation(chat::conversation_id_for(my_fp_, *their_fp), contact_fp, unix_now());
+    std::vector<Bytes> seen;
+    if (auto last_received = history_->last_entry_hash(conv.id, false)) seen.push_back(*last_received);
+    return start_attachment_send(conv.id, {contact_fp}, chat::recipients_hash_for({my_fp_, *their_fp}), seen, file, caption, days, error);
+}
+
+bool MessagingEngine::send_group_attachment(const std::string& group_id, const std::filesystem::path& file, const std::string& caption, int days, std::string& error) {
+    auto id = hex_to_bytes(group_id);
+    auto conv = id ? history_->conversation(*id) : std::nullopt;
+    if (!conv || conv->kind != HistoryStore::Group) { error = "That group isn't in your list"; return false; }
+    std::vector<Bytes> everyone = {my_fp_};
+    for (const auto& fp : conv->members) {
+        auto raw = hex_to_bytes(fp);
+        if (!raw) { error = "That group is damaged"; return false; }
+        everyone.push_back(std::move(*raw));
+    }
+    return start_attachment_send(conv->id, conv->members, chat::recipients_hash_for(everyone), latest_heads(conv->id, conv->members), file, caption, days, error);
+}
+
+// --- Transfers: one background thread for uploads and downloads, so a big file never holds up messages ---
+
+void MessagingEngine::queue_transfer(TransferJob job) {
+    std::lock_guard<std::mutex> lock(xfer_mutex_);
+    if (job.file_id.empty()) return;
+    const std::string key = std::string(job.kind == TransferJob::Upload ? "u:" : "d:") + bytes_to_hex(job.file_id);
+    if (!xfer_active_.insert(key).second) return;  // already queued or running
+    xfer_queue_.push_back(std::move(job));
+    if (!xfer_thread_.joinable()) xfer_thread_ = std::thread([this] { transfer_loop(); });
+    xfer_cv_.notify_one();
+}
+
+void MessagingEngine::transfer_loop() {
+    while (true) {
+        TransferJob job;
+        {
+            std::unique_lock<std::mutex> lock(xfer_mutex_);
+            xfer_cv_.wait(lock, [&] { return xfer_stop_ || !xfer_queue_.empty(); });
+            if (xfer_stop_) return;
+            job = std::move(xfer_queue_.front());
+            xfer_queue_.pop_front();
+        }
+        try {
+            if (job.kind == TransferJob::Upload) run_upload(job);
+            else run_download(job);
+        } catch (const std::exception& e) {
+            // Whatever went wrong must not end this thread: an upload is tried again from its queue entry, a download can be started again.
+            if (job.kind == TransferJob::Download) history_->set_attachment_state(job.file_id, HistoryStore::AttachAvailable, std::string("The download failed: ") + e.what());
+        }
+        {
+            std::lock_guard<std::mutex> lock(xfer_mutex_);
+            xfer_active_.erase(std::string(job.kind == TransferJob::Upload ? "u:" : "d:") + bytes_to_hex(job.file_id));
+            xfer_progress_.erase(bytes_to_hex(job.file_id));
+        }
+        bump();
+    }
+}
+
+void MessagingEngine::stop_transfers() {
+    xfer_cancel_ = true;
+    {
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_stop_ = true;
+    }
+    xfer_cv_.notify_all();
+    if (xfer_thread_.joinable()) xfer_thread_.join();
+}
+
+bool MessagingEngine::attachment_progress(const std::string& file_id, uint64_t& done, uint64_t& total) {
+    std::lock_guard<std::mutex> lock(xfer_mutex_);
+    auto it = xfer_progress_.find(file_id);
+    if (it == xfer_progress_.end()) return false;
+    done = it->second.first;
+    total = it->second.second;
+    return true;
+}
+
+void MessagingEngine::run_upload(const TransferJob& job) {
+    auto a = history_->attachment(job.file_id);
+    const int64_t now = unix_now();
+    auto finish_queue_entry = [&] { if (job.outbox_id) history_->outbox_done(job.outbox_id); };
+    auto retry_later = [&] { if (job.outbox_id) history_->outbox_failed(job.outbox_id, now + std::max(1, options_.retry_base_seconds) * 4); };
+    auto give_up = [&](const std::string& why) {
+        history_->set_attachment_state(job.file_id, HistoryStore::AttachFailed, why);
+        finish_queue_entry();
+        notify("An attachment could not be sent: " + why);
+    };
+    if (!a || !a->outgoing || a->state != HistoryStore::AttachUploading) { finish_queue_entry(); return; }  // withdrawn, or already done
+    if (a->expires_at <= now + 60) { give_up("it took too long to upload, and its time on the relay has run out"); return; }
+
+    // It must still be the file that was attached.
+    std::string err;
+    auto fingerprint = attachment::fingerprint_file(a->path, err);
+    if (!fingerprint) { give_up(err); return; }
+    if (fingerprint->size != a->size || fingerprint->sha256 != a->sha256) { give_up("the file changed after it was attached"); return; }
+
+    attachment::Encryptor encryptor(a->path, a->key, a->file_id, a->size);
+    relay::FileBegin begin;
+    begin.file_id = a->file_id;
+    begin.total_size = encryptor.plan().ciphertext_size;
+    begin.chunk_size = encryptor.plan().chunk_size;
+    begin.chunk_count = encryptor.plan().chunk_count;
+    begin.expires_at = static_cast<uint64_t>(a->expires_at);
+    for (const auto& [fp, token] : a->recipient_tokens) begin.token_hashes.push_back(CryptoEngine::sha256(token));
+
+    RelayClient client;
+    if (!connect_authenticated(client, err)) { retry_later(); return; }  // the relay is down: wait and try again
+    const std::string key = bytes_to_hex(job.file_id);
+    {
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_progress_[key] = {0, begin.total_size};
+    }
+    std::string source_error;
+    bool uploaded = client.upload_file(begin, [&](uint32_t index, Bytes& out) {
+        if (xfer_cancel_) return false;
+        if (!encryptor.chunk(index, out, source_error)) return false;
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_progress_[key].first = std::min<uint64_t>(begin.total_size, static_cast<uint64_t>(index + 1) * begin.chunk_size);
+        return true;
+    }, err);
+    if (!uploaded && err.find("already exists") != std::string::npos) {
+        // An earlier try got all the way there but its confirmation never reached us: if the file is complete, that will do.
+        RelayClient check;
+        relay::FileStatus status;
+        std::string e2;
+        if (connect_authenticated(check, e2) && check.file_status(a->file_id, status, e2) && status.ready) uploaded = true;
+    }
+    if (!uploaded) {
+        if (xfer_cancel_) return;  // shutting down: the queue entry stays, and it starts again next time
+        if (!source_error.empty()) { give_up(source_error); return; }
+        const bool permanent = err.find("larger than this relay allows") != std::string::npos || err.find("would go over this relay's limit") != std::string::npos ||
+                               err.find("expiry must be") != std::string::npos;
+        if (permanent) give_up(err);
+        else retry_later();
+        return;
+    }
+
+    // It is on the relay. If it was withdrawn while it uploaded, take it down again.
+    auto latest = history_->attachment(job.file_id);
+    if (!latest || latest->state != HistoryStore::AttachUploading) {
+        RelayClient c;
+        std::string e;
+        if (connect_authenticated(c, e)) c.cancel_file(job.file_id, e);
+        finish_queue_entry();
+        return;
+    }
+    // Now each recipient is told, in their own envelope: the record, and their own file key and token.
+    auto message = history_->find_message(a->conversation_id, a->message_id);
+    if (!message) { give_up("the message is gone"); return; }
+    for (const auto& [fp, token] : a->recipient_tokens)
+        history_->enqueue(fp, OUTBOX_KIND_ATTACHMENT, a->message_id, {message->record, encode_grant(a->file_id, a->key, token)}, now, now);
+    history_->set_attachment_state(job.file_id, HistoryStore::AttachAvailable, std::string());
+    history_->drop_attachment_secrets(job.file_id);  // the tokens are in the queued envelopes now, and nowhere else
+    finish_queue_entry();
+}
+
+std::optional<MessagingEngine::AttachmentView> MessagingEngine::attachment(const std::string& file_id) {
+    auto id = hex_to_bytes(file_id);
+    auto a = id ? history_->attachment(*id) : std::nullopt;
+    if (!a) return std::nullopt;
+    AttachmentView v;
+    v.file_id = file_id;
+    v.name = a->name;
+    v.size = a->size;
+    v.expires_at = a->expires_at;
+    v.state = a->state;
+    v.outgoing = a->outgoing;
+    v.recipients = a->recipients;
+    v.redeemed = a->redeemed;
+    v.saved_path = a->outgoing ? std::string() : a->path;
+    v.note = a->note;
+    if ((v.state == HistoryStore::AttachAvailable || v.state == HistoryStore::AttachUploading) && unix_now() >= a->expires_at) v.state = HistoryStore::AttachExpired;
+    return v;
+}
+
+bool MessagingEngine::download_attachment(const std::string& file_id, const std::filesystem::path& directory, std::string& error) {
+    auto id = hex_to_bytes(file_id);
+    auto a = id ? history_->attachment(*id) : std::nullopt;
+    if (!a || a->outgoing) { error = "That attachment isn't one you can download"; return false; }
+    switch (a->state) {
+        case HistoryStore::AttachAvailable: break;
+        case HistoryStore::AttachDownloading: error = "It is already being downloaded"; return false;
+        case HistoryStore::AttachTransferred: error = "You have already downloaded it"; return false;
+        case HistoryStore::AttachExpired: error = "It has expired: the relay no longer holds it"; return false;
+        case HistoryStore::AttachWithdrawn: error = "The sender took it back"; return false;
+        default: error = "It can't be downloaded: it reached you without the key it needs"; return false;
+    }
+    if (unix_now() >= a->expires_at) {
+        history_->set_attachment_state(*id, HistoryStore::AttachExpired, std::string());
+        error = "It has expired: the relay no longer holds it";
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_directory(directory, ec)) { error = "That folder doesn't exist"; return false; }
+    history_->set_attachment_state(*id, HistoryStore::AttachDownloading, std::string());
+    {
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_progress_[file_id] = {0, a->size};
+    }
+    queue_transfer({TransferJob::Download, *id, 0, directory.string()});
+    bump();
+    return true;
+}
+
+void MessagingEngine::run_download(const TransferJob& job) {
+    auto a = history_->attachment(job.file_id);
+    if (!a || a->outgoing || a->state != HistoryStore::AttachDownloading) return;
+    const std::string key = bytes_to_hex(job.file_id);
+    auto back = [&](const std::string& why) { history_->set_attachment_state(job.file_id, HistoryStore::AttachAvailable, why); };
+    std::string err;
+    auto address = parse_server_address(a->relay_address);
+    if (!address) { history_->set_attachment_state(job.file_id, HistoryStore::AttachUnavailable, "The relay's address isn't valid"); return; }
+
+    attachment::Decryptor decryptor(job.directory, a->name, a->key, a->file_id, a->size, a->sha256);
+    if (!decryptor.begin(true, err)) { back(err); return; }  // carries on from what an earlier attempt left
+    {
+        std::lock_guard<std::mutex> lock(xfer_mutex_);
+        xfer_progress_[key] = {std::min<uint64_t>(a->size, static_cast<uint64_t>(decryptor.next_chunk()) * attachment::CHUNK_PLAINTEXT_BYTES), a->size};
+    }
+    RelayClient client;
+    if (!client.connect(address->host, address->port, a->relay_id, options_.connect_timeout_seconds, err)) { back("Could not reach the relay: " + err); return; }
+
+    std::string sink_error;
+    relay::FileInfo info;
+    bool ok = true;
+    if (decryptor.next_chunk() < decryptor.chunk_count()) {
+        ok = client.download_file(a->file_id, a->token, decryptor.next_chunk(), info, [&](uint32_t index, const Bytes& chunk) {
+            if (xfer_cancel_) { sink_error = "interrupted"; return false; }
+            if (!decryptor.accept(index, chunk, sink_error)) return false;
+            std::lock_guard<std::mutex> lock(xfer_mutex_);
+            xfer_progress_[key].first = std::min<uint64_t>(a->size, static_cast<uint64_t>(index + 1) * attachment::CHUNK_PLAINTEXT_BYTES);
+            return true;
+        }, err);
+    }
+    if (!ok) {
+        if (xfer_cancel_) { back("The download was interrupted; start it again to carry on"); return; }
+        if (!sink_error.empty()) {  // what the relay sent didn't open or didn't fit: throw it away
+            decryptor.abort();
+            back("The file could not be received intact (" + sink_error + "); try again");
+            return;
+        }
+        // When the file is gone for good, the partial file it started is no use to anyone: remove it. (For anything a retry
+        // could fix, such as the relay being unreachable, it stays so the download can carry on from there.)
+        if (err.find("expired") != std::string::npos) { decryptor.abort(); history_->set_attachment_state(job.file_id, HistoryStore::AttachExpired, std::string()); }
+        else if (err.find("already downloaded") != std::string::npos) { decryptor.abort(); history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred, "It was already downloaded with this token, before"); }
+        else if (err.find("No such file") != std::string::npos) {  // gone: its time ran out, or the sender took it back (the relay says the same either way)
+            decryptor.abort();
+            history_->set_attachment_state(job.file_id, unix_now() >= a->expires_at ? HistoryStore::AttachExpired : HistoryStore::AttachWithdrawn, std::string());
+        } else back("Could not download it: " + err);  // the relay couldn't be reached, say: it can be tried again
+        return;
+    }
+
+    // Every chunk opened. Now the whole thing is checked against the fingerprint the sender signed, and only then saved.
+    std::filesystem::path saved;
+    if (!decryptor.finish(saved, err)) { back(err); return; }
+    // The file is safe and checked: only now is the one-time token used up.
+    std::string redeem_error;
+    if (!client.redeem_file(a->file_id, a->token, redeem_error)) {
+        RelayClient again;
+        std::string e;
+        if (again.connect(address->host, address->port, a->relay_id, options_.connect_timeout_seconds, e)) again.redeem_file(a->file_id, a->token, e);
+    }
+    history_->set_attachment_path(job.file_id, saved.string());
+    history_->set_attachment_state(job.file_id, HistoryStore::AttachTransferred, std::string());
+    notify("Saved " + a->name + " to " + saved.string());
+}
+
+bool MessagingEngine::withdraw_attachment(const std::string& file_id, std::string& error) {
+    auto id = hex_to_bytes(file_id);
+    auto a = id ? history_->attachment(*id) : std::nullopt;
+    if (!a || !a->outgoing) { error = "That isn't an attachment you sent"; return false; }
+    if (a->state == HistoryStore::AttachUploading) {
+        // Not on the relay yet (or only just): the upload job notices and takes down whatever got there.
+        history_->set_attachment_state(*id, HistoryStore::AttachWithdrawn, std::string());
+        bump();
+        return true;
+    }
+    if (a->state != HistoryStore::AttachAvailable) { error = "It is no longer on the relay"; return false; }
+    RelayClient client;
+    if (!connect_authenticated(client, error)) return false;
+    std::string cancel_error;
+    if (!client.cancel_file(*id, cancel_error) && cancel_error.find("isn't one of your files") == std::string::npos) {
+        error = cancel_error;
+        return false;
+    }
+    history_->set_attachment_state(*id, HistoryStore::AttachWithdrawn, std::string());
+    bump();
+    return true;
+}
+
+// Housekeeping: time runs out, and a sender finds out how many have fetched their file.
+void MessagingEngine::check_attachments() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_attachment_check_) return;
+    next_attachment_check_ = now + std::chrono::seconds(std::max(1, options_.archive_sync_seconds));
+    const int64_t wall = unix_now();
+    for (const auto& a : history_->attachments_in_state(HistoryStore::AttachAvailable)) {
+        if (wall >= a.expires_at) {
+            history_->set_attachment_state(a.file_id, HistoryStore::AttachExpired, std::string());
+            bump();
+            continue;
+        }
+        if (!a.outgoing) continue;
+        RelayClient client;
+        relay::FileStatus status;
+        std::string err;
+        if (!connect_authenticated(client, err)) continue;
+        if (client.file_status(a.file_id, status, err)) {
+            if (status.tokens_redeemed != a.redeemed) {
+                history_->set_attachment_redeemed(a.file_id, status.tokens_redeemed);
+                bump();
+            }
+        } else if (err.find("isn't one of your files") != std::string::npos) {
+            // Gone from the relay before its time, and we didn't withdraw it: every recipient has fetched it.
+            history_->set_attachment_redeemed(a.file_id, a.recipients);
+            history_->set_attachment_state(a.file_id, HistoryStore::AttachTransferred, std::string());
+            bump();
+        }
+    }
+}
+
 // --- Sending ---
 
 void MessagingEngine::flush_outbox() {
@@ -2352,6 +2859,12 @@ void MessagingEngine::flush_outbox() {
         // An entry for a chat's archive: added when the archive can be reached, whatever happens to the envelopes.
         if (item.kind == OUTBOX_KIND_ARCHIVE) {
             flush_archive_item(item, now);
+            continue;
+        }
+        // A file waiting to be uploaded: that is done on the transfer thread. Look again later, in case it fails.
+        if (item.kind == OUTBOX_KIND_UPLOAD) {
+            history_->outbox_failed(item.id, now + 30);
+            queue_transfer({TransferJob::Upload, hex_to_bytes(item.contact_fp).value_or(Bytes()), item.id, std::string()});
             continue;
         }
         // What is this item about? Tokens a member gave us for one group only work for that group's items.
@@ -2396,7 +2909,7 @@ void MessagingEngine::flush_outbox() {
             }
         }
         // Someone we know only from a group is not a contact: no first-message introduction for them.
-        const bool first_message = item.kind == OUTBOX_KIND_MESSAGE && peer->is_contact && !history_->bundle_sent(item.contact_fp);
+        const bool first_message = (item.kind == OUTBOX_KIND_MESSAGE || item.kind == OUTBOX_KIND_ATTACHMENT) && peer->is_contact && !history_->bundle_sent(item.contact_fp);
 
         // First message to someone: give them a token for writing back, and introduce ourselves.
         if (first_message) {
@@ -2430,7 +2943,9 @@ void MessagingEngine::flush_outbox() {
         chat::Inner inner;
         for (const auto& raw : records) {
             if (chat::parse_record(raw)) inner.records.push_back(raw);
-            else inner.introduced.push_back(raw);
+            else if (item.kind == OUTBOX_KIND_ATTACHMENT) {
+                if (auto grant = decode_grant(raw)) inner.grants.push_back(std::move(*grant));  // this recipient's file key and token
+            } else inner.introduced.push_back(raw);
         }
         try {
             if (first_message) inner.sender_bundle = own_bundle_raw();
@@ -2459,7 +2974,7 @@ void MessagingEngine::flush_outbox() {
 
         history_->outbox_done(item.id);
         if (first_message) history_->set_bundle_sent(item.contact_fp);
-        if (item.kind == OUTBOX_KIND_MESSAGE) {
+        if (item.kind == OUTBOX_KIND_MESSAGE || item.kind == OUTBOX_KIND_ATTACHMENT) {
             if (auto conv = history_->conversation_of_outgoing(item.message_id))
                 history_->raise_delivery(*conv, item.message_id, item.contact_fp, HistoryStore::Sent);
             {
@@ -2553,6 +3068,7 @@ void MessagingEngine::pump(int wait_ms) {
         ensure_archives();
         sync_archives();
         check_deletions();
+        check_attachments();
         maintain_keyring();
     }
 }

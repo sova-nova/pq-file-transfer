@@ -44,6 +44,8 @@ private:
     void create_group_dialog();
     void make_relay_invite();
     void restore_history();
+    void attach_file();
+    void show_attachment(const QString& file_id);
     void review_deletions();
     void request_delete_chat();
     void review_group_invites();
@@ -77,6 +79,8 @@ private:
     QPushButton* new_group_button_ = nullptr;
     QPushButton* relay_invite_button_ = nullptr;
     QPushButton* restore_button_ = nullptr;
+    QPushButton* attach_button_ = nullptr;   // choose a file to send in the chat on screen
+    bool animating_ = false;                 // an upload or download is under way: redraw now and then to show its progress
     QPushButton* deletions_button_ = nullptr;     // requests from others to delete a chat or messages
     QPushButton* delete_chat_button_ = nullptr;   // ask everyone to delete the chat on screen
     QPushButton* invites_button_ = nullptr;

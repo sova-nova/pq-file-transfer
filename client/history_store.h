@@ -201,6 +201,49 @@ public:
     // The first message stored for a conversation (a group's creation record, for its creator), if any.
     std::optional<Message> first_message(const Bytes& conversation_id);
 
+    // --- Attachments (M5) ---
+    // Where each attachment stands, on this device: what the chat can show (a file, its size, its state) and what is
+    // needed to fetch it. The file key and download token are encrypted like everything else here.
+    enum AttachmentState : int {
+        AttachUploading = 0,    // ours: being uploaded to the relay (waiting and retrying until it is there)
+        AttachAvailable = 1,    // on the relay, waiting to be fetched
+        AttachTransferred = 2,  // fetched: by us (incoming) or by everyone it was for (outgoing)
+        AttachExpired = 3,      // the relay's time for it ran out
+        AttachWithdrawn = 4,    // the sender took it back
+        AttachUnavailable = 5,  // arrived without a key or token (for instance read back from an archive): can't be fetched
+        AttachFailed = 6,       // ours: it could not be uploaded, for a reason that retrying won't fix
+        AttachDownloading = 7,  // being fetched now
+    };
+    struct Attachment {
+        Bytes file_id;
+        Bytes conversation_id;
+        Bytes message_id;
+        bool outgoing = false;
+        std::string name;
+        uint64_t size = 0;
+        Bytes sha256;
+        int64_t expires_at = 0;
+        std::string relay_address;
+        Bytes relay_id;
+        int state = AttachUnavailable;
+        Bytes key;    // incoming: the file key; outgoing: the key it was sealed with, until every recipient has been told
+        Bytes token;  // incoming: our own one-time download token
+        std::vector<std::pair<std::string, Bytes>> recipient_tokens;  // outgoing: each recipient's token, until they have been told
+        std::string path;   // outgoing: the file being sent; incoming: where it was saved
+        std::string note;   // why it failed, or how the last attempt went
+        uint32_t recipients = 0;  // outgoing: how many people it is for
+        uint32_t redeemed = 0;    // outgoing: how many have fetched it
+        int64_t created_at = 0;
+    };
+    bool add_attachment(const Attachment& a);  // false if that file is already known
+    std::optional<Attachment> attachment(const Bytes& file_id);
+    std::vector<Attachment> attachments_in_state(int state);
+    void set_attachment_state(const Bytes& file_id, int state, const std::string& note);
+    void set_attachment_path(const Bytes& file_id, const std::string& path);
+    void set_attachment_redeemed(const Bytes& file_id, uint32_t redeemed);
+    void drop_attachment_secrets(const Bytes& file_id);  // once every recipient has what they need
+    void reset_downloading();  // after a restart nothing is being fetched
+
     // --- Deleting by agreement ---
     enum DeletionState : int { DeletionPending = 0, DeletionAccepted = 1, DeletionDeclined = 2, DeletionDone = 3, DeletionExpired = 4 };
     struct Deletion {

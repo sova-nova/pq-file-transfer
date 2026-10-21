@@ -50,7 +50,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 8;
+constexpr int64_t SCHEMA_VERSION = 9;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -123,6 +123,13 @@ const char SCHEMA_REST[] =
     "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',"
     "  checkpoint_at INTEGER NOT NULL DEFAULT 0, activity INTEGER NOT NULL DEFAULT 0,"
     "  checkpoint_seen INTEGER NOT NULL DEFAULT 0, warning TEXT NOT NULL DEFAULT '');"
+    // Added in version 9: attachments.
+    "CREATE TABLE IF NOT EXISTS attachments("
+    "  file_id BLOB PRIMARY KEY, conv_id BLOB NOT NULL, message_id BLOB NOT NULL, outgoing INTEGER NOT NULL,"
+    "  name TEXT NOT NULL, size INTEGER NOT NULL, sha256 BLOB NOT NULL, expires_at INTEGER NOT NULL,"
+    "  relay_address TEXT NOT NULL, relay_id BLOB NOT NULL, state INTEGER NOT NULL, secrets BLOB NOT NULL,"
+    "  path TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', recipients INTEGER NOT NULL DEFAULT 0,"
+    "  redeemed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);"
     // Added in version 8: deleting by agreement.
     "CREATE TABLE IF NOT EXISTS deletions("
     "  op_id BLOB PRIMARY KEY, conv_id BLOB NOT NULL, scope INTEGER NOT NULL, expires_at INTEGER NOT NULL,"
@@ -195,13 +202,13 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
             exec(db_, "ALTER TABLE archives ADD COLUMN warning TEXT NOT NULL DEFAULT ''");
         }
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=8");
+        exec(db_, "PRAGMA user_version=9");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=8");
+        exec(db_, "PRAGMA user_version=9");
         tx.commit();
     }
     } catch (...) {
@@ -242,7 +249,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=8");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=9");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -852,6 +859,116 @@ void HistoryStore::set_archive_head(const Bytes& conversation_id, uint64_t numbe
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt(db_, "UPDATE archives SET head_number = ?, head_hash = ? WHERE conv_id = ? AND head_number < ?")
         .i64(1, static_cast<int64_t>(number)).blob(2, hash).blob(3, conversation_id).i64(4, static_cast<int64_t>(number)).step();
+}
+
+// --- Attachments ---
+
+static Bytes attachment_secrets_aad(const Bytes& file_id) { return aad_of("pq-suite v3 history attachment secrets", file_id, Bytes()); }
+
+bool HistoryStore::add_attachment(const Attachment& a) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Bytes secrets;
+    if (!a.key.empty() || !a.token.empty() || !a.recipient_tokens.empty()) {
+        write_blob(secrets, a.key);
+        write_blob(secrets, a.token);
+        write_u32(secrets, static_cast<uint32_t>(a.recipient_tokens.size()));
+        for (const auto& [fp, token] : a.recipient_tokens) {
+            write_string(secrets, fp);
+            write_blob(secrets, token);
+        }
+        secrets = seal(secrets, attachment_secrets_aad(a.file_id));
+    }
+    Stmt(db_, "INSERT OR IGNORE INTO attachments(file_id, conv_id, message_id, outgoing, name, size, sha256, expires_at, relay_address, relay_id, state, secrets, path, note, recipients, redeemed, created_at) "
+              "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .blob(1, a.file_id).blob(2, a.conversation_id).blob(3, a.message_id).i64(4, a.outgoing ? 1 : 0).text(5, a.name).i64(6, static_cast<int64_t>(a.size))
+        .blob(7, a.sha256).i64(8, a.expires_at).text(9, a.relay_address).blob(10, a.relay_id).i64(11, a.state).blob(12, secrets).text(13, a.path).text(14, a.note)
+        .i64(15, a.recipients).i64(16, a.redeemed).i64(17, a.created_at).step();
+    return sqlite3_changes(db_) > 0;
+}
+
+static const char ATTACHMENT_COLUMNS[] =
+    "file_id, conv_id, message_id, outgoing, name, size, sha256, expires_at, relay_address, relay_id, state, secrets, path, note, recipients, redeemed, created_at";
+
+static HistoryStore::Attachment read_attachment(Stmt& s, const std::function<std::optional<Bytes>(const Bytes&, const Bytes&)>& unseal_fn) {
+    HistoryStore::Attachment a;
+    a.file_id = s.column_blob(0);
+    a.conversation_id = s.column_blob(1);
+    a.message_id = s.column_blob(2);
+    a.outgoing = s.column_i64(3) != 0;
+    a.name = s.column_text(4);
+    a.size = static_cast<uint64_t>(s.column_i64(5));
+    a.sha256 = s.column_blob(6);
+    a.expires_at = s.column_i64(7);
+    a.relay_address = s.column_text(8);
+    a.relay_id = s.column_blob(9);
+    a.state = static_cast<int>(s.column_i64(10));
+    Bytes sealed = s.column_blob(11);
+    if (!sealed.empty()) {
+        if (auto plain = unseal_fn(sealed, attachment_secrets_aad(a.file_id))) {
+            size_t off = 0;
+            auto key = read_blob(plain->data(), plain->size(), off, 64);
+            auto token = read_blob(plain->data(), plain->size(), off, 64);
+            auto n = read_u32(plain->data(), plain->size(), off);
+            if (key && token && n) {
+                a.key = std::move(*key);
+                a.token = std::move(*token);
+                for (uint32_t i = 0; i < *n && i < 64; i++) {
+                    auto fp = read_string(plain->data(), plain->size(), off, 128);
+                    auto t = read_blob(plain->data(), plain->size(), off, 64);
+                    if (!fp || !t) break;
+                    a.recipient_tokens.emplace_back(std::move(*fp), std::move(*t));
+                }
+            }
+        }
+    }
+    a.path = s.column_text(12);
+    a.note = s.column_text(13);
+    a.recipients = static_cast<uint32_t>(s.column_i64(14));
+    a.redeemed = static_cast<uint32_t>(s.column_i64(15));
+    a.created_at = s.column_i64(16);
+    return a;
+}
+
+std::optional<HistoryStore::Attachment> HistoryStore::attachment(const Bytes& file_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + ATTACHMENT_COLUMNS + " FROM attachments WHERE file_id = ?").c_str());
+    s.blob(1, file_id);
+    if (!s.step()) return std::nullopt;
+    return read_attachment(s, [this](const Bytes& c, const Bytes& aad) { return unseal(c, aad); });
+}
+
+std::vector<HistoryStore::Attachment> HistoryStore::attachments_in_state(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, (std::string("SELECT ") + ATTACHMENT_COLUMNS + " FROM attachments WHERE state = ? ORDER BY created_at, rowid").c_str());
+    s.i64(1, state);
+    std::vector<Attachment> out;
+    while (s.step()) out.push_back(read_attachment(s, [this](const Bytes& c, const Bytes& aad) { return unseal(c, aad); }));
+    return out;
+}
+
+void HistoryStore::set_attachment_state(const Bytes& file_id, int state, const std::string& note) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE attachments SET state = ?, note = ? WHERE file_id = ?").i64(1, state).text(2, note).blob(3, file_id).step();
+}
+
+void HistoryStore::set_attachment_path(const Bytes& file_id, const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE attachments SET path = ? WHERE file_id = ?").text(1, path).blob(2, file_id).step();
+}
+
+void HistoryStore::set_attachment_redeemed(const Bytes& file_id, uint32_t redeemed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE attachments SET redeemed = ? WHERE file_id = ?").i64(1, redeemed).blob(2, file_id).step();
+}
+
+void HistoryStore::drop_attachment_secrets(const Bytes& file_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE attachments SET secrets = x'' WHERE file_id = ?").blob(1, file_id).step();
+}
+
+void HistoryStore::reset_downloading() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "UPDATE attachments SET state = 1 WHERE state = 7").step();
 }
 
 // --- Deleting by agreement ---
