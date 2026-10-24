@@ -50,7 +50,7 @@ std::optional<std::vector<Bytes>> unpack(const Bytes& in) {
 
 namespace {
 
-constexpr int64_t SCHEMA_VERSION = 9;
+constexpr int64_t SCHEMA_VERSION = 10;
 
 // The conversations table at version 2. The unique index lets each contact have one direct
 // conversation, while any number of groups can share members.
@@ -123,6 +123,8 @@ const char SCHEMA_REST[] =
     "  created_at INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '',"
     "  checkpoint_at INTEGER NOT NULL DEFAULT 0, activity INTEGER NOT NULL DEFAULT 0,"
     "  checkpoint_seen INTEGER NOT NULL DEFAULT 0, warning TEXT NOT NULL DEFAULT '');"
+    // Added in version 10: contacts that have had one-time prekeys (M6).
+    "CREATE TABLE IF NOT EXISTS peer_prekeys(fp TEXT PRIMARY KEY, since INTEGER NOT NULL);"
     // Added in version 9: attachments.
     "CREATE TABLE IF NOT EXISTS attachments("
     "  file_id BLOB PRIMARY KEY, conv_id BLOB NOT NULL, message_id BLOB NOT NULL, outgoing INTEGER NOT NULL,"
@@ -202,13 +204,13 @@ HistoryStore::HistoryStore(const std::filesystem::path& db_path, const Bytes& hi
             exec(db_, "ALTER TABLE archives ADD COLUMN warning TEXT NOT NULL DEFAULT ''");
         }
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=9");
+        exec(db_, "PRAGMA user_version=10");
         tx.commit();
     } else if (!has_conversations) {
         Transaction tx(db_);
         exec(db_, CONVERSATIONS_V2);
         exec(db_, SCHEMA_REST);
-        exec(db_, "PRAGMA user_version=9");
+        exec(db_, "PRAGMA user_version=10");
         tx.commit();
     }
     } catch (...) {
@@ -249,7 +251,7 @@ void HistoryStore::migrate_v1_to_v2(const std::filesystem::path& db_path) {
             exec(db_, SCHEMA_REST);
             // Every existing conversation is a direct one: its member is the contact.
             exec(db_, "INSERT INTO conversation_members(conv_id, member_fp, idx) SELECT id, contact_fp, 0 FROM conversations WHERE kind = 1");
-            exec(db_, "PRAGMA user_version=9");  // SCHEMA_REST already holds the newer tables
+            exec(db_, "PRAGMA user_version=10");  // SCHEMA_REST already holds the newer tables
             tx.commit();
         }
         Stmt check(db_, "PRAGMA foreign_key_check");
@@ -859,6 +861,20 @@ void HistoryStore::set_archive_head(const Bytes& conversation_id, uint64_t numbe
     std::lock_guard<std::mutex> lock(mutex_);
     Stmt(db_, "UPDATE archives SET head_number = ?, head_hash = ? WHERE conv_id = ? AND head_number < ?")
         .i64(1, static_cast<int64_t>(number)).blob(2, hash).blob(3, conversation_id).i64(4, static_cast<int64_t>(number)).step();
+}
+
+// --- Prekeys ---
+
+void HistoryStore::note_peer_prekeys(const std::string& fingerprint, int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "INSERT OR IGNORE INTO peer_prekeys(fp, since) VALUES(?, ?)").text(1, fingerprint).i64(2, now).step();
+}
+
+bool HistoryStore::peer_had_prekeys(const std::string& fingerprint) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt s(db_, "SELECT 1 FROM peer_prekeys WHERE fp = ?");
+    s.text(1, fingerprint);
+    return s.step();
 }
 
 // --- Attachments ---

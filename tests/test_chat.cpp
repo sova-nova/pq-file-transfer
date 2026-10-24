@@ -3,6 +3,10 @@
 #include "crypto_engine.h"
 #include "envelope.h"
 #include "messaging_engine.h"
+#include "prekey.h"
+#include "prekey_vault.h"
+#include "envelope.h"
+#include <sqlite3.h>
 #include "message_record.h"
 #include "protocol.h"
 #include "relay_client.h"
@@ -54,7 +58,7 @@ struct Server {
             if (log >= 0) { dup2(log, 1); dup2(log, 2); }
             std::string p = std::to_string(port), s = storage.string();
             execl(SERVER_BIN.c_str(), SERVER_BIN.c_str(), "--port", p.c_str(), "--bind", "127.0.0.1", "--storage", s.c_str(),
-                  "--sweep-seconds", "1", "--rate-limit", "100000", static_cast<char*>(nullptr));
+                  "--sweep-seconds", "1", "--rate-limit", "100000", "--prekey-takes-per-hour", "100000", static_cast<char*>(nullptr));
             _exit(127);
         }
         for (int i = 0; i < 100; i++) {
@@ -83,6 +87,8 @@ struct Server {
 
 static MessagingEngine::Options test_options() {
     MessagingEngine::Options o;
+    o.prekey_check_seconds = 1;           // tests don't wait a minute for the pool
+    o.last_resort_rotate_seconds = 5;     // nor a week for a new last-resort prekey
     o.receipt_delay_max_seconds = 0;
     o.reconnect_min_seconds = 1;
     o.reconnect_max_seconds = 2;
@@ -542,6 +548,182 @@ int main(int argc, char** argv) {
         bool explained = false;
         for (auto& c : bob.engine->chats()) if (c.contact_name == "Fiona" || c.contact_name == "Ollie") explained |= !c.can_send && !c.cannot_send_reason.empty();
         CHECK(explained, "the chat list says why, in words");
+    }
+
+    std::cout << "11b. One-time prekeys on the relay\n";
+    {
+        // (Messages in the sections before used some of Alice's prekeys, as they should: the counts here are relative.)
+        CHECK(wait_for([&] { auto i = alice.engine->prekey_info(); return i.relay_matches && i.relay_one_time >= 30 && i.relay_last_resort && i.pending_upload == 0; }, 30000),
+              "Alice's app keeps a pool of one-time prekeys and a last-resort one on her relay");
+        auto before = alice.engine->prekey_info();
+        CHECK(before.local_one_time >= before.relay_one_time && before.local_last_resort == 1, "and keeps their private halves");
+        auto contact = bob.keys->find_contact_by_fingerprint(alice.fp);
+        auto address = contact ? parse_server_address(contact->relay_address) : std::nullopt;
+        RelayClient c;
+        std::string e;
+        const int to_take = static_cast<int>(before.relay_one_time) - 25;  // leave 25: below the point where the app tops up
+        int good = 0;
+        if (address && c.connect(address->host, address->port, contact->relay_id, 5, e)) {
+            for (int i = 0; i < to_take; i++) {
+                relay::PrekeyData d;
+                if (!c.take_prekey(contact->mailbox_id, contact->send_token, d, e)) break;
+                auto p = prekey::decode(d.blob);
+                if (p && !d.last_resort && prekey::verify(*p, contact->pub_dsa)) good++;
+            }
+        }
+        CHECK(good == to_take, "Bob takes all but 25 with his send token for Alice's mailbox (" + std::to_string(to_take) + "), and each is signed by Alice's identity key");
+        // (The app reports the relay's count as of its last check, so wait for the top-up itself.)
+        CHECK(wait_for([&] { auto i = alice.engine->prekey_info(); return i.relay_matches && i.relay_one_time == 100 && i.local_one_time >= before.local_one_time + 75 && i.pending_upload == 0; }, 30000),
+              "Alice's app notices her pool is low and tops it back up to 100");
+        {
+            auto i = alice.engine->prekey_info();
+            CHECK(i.local_one_time - i.relay_one_time == (before.local_one_time - before.relay_one_time) + static_cast<size_t>(to_take),
+                  "it keeps the private halves of the ones that were taken, for the envelopes they will be used for");
+        }
+        CHECK(wait_for([&] { auto i = alice.engine->prekey_info(); return i.local_retired >= 1 && i.relay_last_resort && i.local_last_resort == 1; }, 30000),
+              "a new last-resort prekey replaces the old one on schedule (every 5 seconds here), and the old one is kept for envelopes on their way");
+        const std::string old_generation = alice.engine->prekey_info().generation;
+        const fs::path store = alice.engine->prekey_store_path();
+        alice.engine.reset();
+        CHECK(fs::exists(store), "(her prekey store is a file next to her history)");
+        fs::remove(store);
+        restart_engine(alice);
+        CHECK(wait_for([&] { auto i = alice.engine->prekey_info(); return i.relay_matches && i.generation != old_generation && i.relay_one_time == 100 && i.relay_last_resort; }, 30000),
+              "with the store gone (as after a restore), the app replaces the whole pool on the relay with a new set");
+        CHECK(alice.engine->prekey_info().local_one_time == 100, "and holds only the new set's private halves");
+    }
+
+    std::cout << "11c. Forward secrecy, end to end\n";
+    {
+        std::string err;
+        auto texts = [&](User& u, const std::string& from) { std::vector<std::string> t; for (auto& m : u.engine->messages(from)) t.push_back(m.text); return t; };
+        auto has_text = [&](User& u, const std::string& from, const std::string& text) { for (auto& t : texts(u, from)) if (t == text) return true; return false; };
+        // 1. An ordinary message uses one of the recipient's one-time prekeys, which is deleted once the message is stored.
+        wait_for([&] { auto i = bob.engine->prekey_info(); return i.relay_matches && i.pending_upload == 0; }, 30000);
+        const size_t before = bob.engine->prekey_info().local_one_time;
+        CHECK(alice.engine->send_text(bob.fp, "sealed to a one-time key", err) && wait_for([&] { return has_text(bob, alice.fp, "sealed to a one-time key"); }, 30000), "Alice sends Bob a message, and he gets it");
+        CHECK(wait_for([&] { return bob.engine->prekey_info().local_one_time == before - 1; }, 10000), "it was sealed to one of Bob's one-time prekeys, whose private half is now deleted");
+
+        // 2. The proof: an envelope captured on the relay can't be opened afterwards, even with every key Bob still has.
+        const fs::path bob_store = bob.engine->prekey_store_path();
+        bob.engine.reset();
+        CHECK(alice.engine->send_text(bob.fp, "captured on the relay", err), "with Bob's app closed, Alice sends another");
+        Bytes captured;
+        const fs::path relay_db = ROOT / "relay-data/s/v3/relay.db";
+        as(bob);
+        const Bytes bob_kem = bob.keys->load_private_kem();
+        const Bytes vault_key = bob.keys->derive_local_key("prekey vault key");
+        const Bytes bob_mailbox = alice.keys->find_contact_by_fingerprint(bob.fp)->mailbox_id;
+        wait_for([&] {  // the envelope holding that message, among those waiting for Bob (as an eavesdropper on the relay would take it)
+            sqlite3* db = nullptr;
+            if (sqlite3_open_v2(relay_db.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) return false;
+            sqlite3_stmt* st = nullptr;
+            sqlite3_prepare_v2(db, "SELECT envelope FROM envelopes WHERE mailbox_id = ?", -1, &st, nullptr);
+            sqlite3_bind_blob(st, 1, bob_mailbox.data(), static_cast<int>(bob_mailbox.size()), SQLITE_TRANSIENT);
+            std::vector<Bytes> waiting;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const auto* b = static_cast<const uint8_t*>(sqlite3_column_blob(st, 0));
+                waiting.emplace_back(b, b + sqlite3_column_bytes(st, 0));
+            }
+            sqlite3_finalize(st);
+            sqlite3_close(db);
+            PrekeyVault store(bob_store, vault_key);
+            for (const auto& env : waiting) {
+                auto inner = chat::open_envelope(env, bob_kem, [&](const Bytes& id) { return store.find(id); });
+                if (!inner) continue;
+                for (const auto& raw : inner->records)
+                    if (auto r = chat::parse_record(raw); r && std::string(r->record.payload.begin(), r->record.payload.end()) == "captured on the relay") captured = env;
+            }
+            return !captured.empty();
+        }, 20000);
+        CHECK(chat::envelope_prekey_id(captured).has_value() && !chat::open_envelope(captured, bob_kem), "(an envelope is taken off the relay, as an eavesdropper would): Bob's long-term key alone can't open it");
+        {
+            PrekeyVault store(bob_store, vault_key);
+            CHECK(chat::open_envelope(captured, bob_kem, [&](const Bytes& id) { return store.find(id); }).has_value(), "with his one-time prekey (still held) it opens");
+        }
+        restart_engine(bob);
+        CHECK(wait_for([&] { return has_text(bob, alice.fp, "captured on the relay"); }, 30000), "Bob's app comes back and receives the message");
+        run_for(1500);
+        bob.engine.reset();
+        {
+            PrekeyVault store(bob_store, vault_key);
+            CHECK(!chat::open_envelope(captured, bob_kem, [&](const Bytes& id) { return store.find(id); }), "and now the captured envelope can't be opened at all, with every key Bob has: forward secrecy");
+        }
+        restart_engine(bob);
+
+        // 3. With Bob's one-time prekeys all taken, a message still goes, sealed to his last-resort prekey (which is kept).
+        auto contact = alice.keys->find_contact_by_fingerprint(bob.fp);
+        auto address = contact ? parse_server_address(contact->relay_address) : std::nullopt;
+        RelayClient c;
+        int drained = 0;
+        if (address && c.connect(address->host, address->port, contact->relay_id, 5, err)) {
+            relay::PrekeyData d;
+            while (drained < 500 && c.take_prekey(contact->mailbox_id, contact->send_token, d, err) && !d.last_resort) drained++;
+        }
+        CHECK(drained > 0, "(Bob's one-time prekeys are all taken: " + std::to_string(drained) + ")");
+        CHECK(alice.engine->send_text(bob.fp, "to the last-resort key", err) && wait_for([&] { return has_text(bob, alice.fp, "to the last-resort key"); }, 30000) && bob.engine->prekey_info().local_last_resort == 1,
+              "a message still gets through, sealed to his last-resort prekey, which he keeps");
+
+        // 4. Losing the store (as after a restore): what was sealed to the old keys is lost, and Bob is told; new messages work.
+        bob.engine.reset();
+        CHECK(alice.engine->send_text(bob.fp, "sent to the old keys", err), "with Bob's app closed, Alice sends a message");
+        wait_for([&] { return alice.engine->messages(bob.fp).back().status >= HistoryStore::Sent; }, 20000);
+        fs::remove(bob_store);
+        restart_engine(bob);
+        CHECK(wait_for([&] { for (auto& n : bob.engine->take_notices()) if (n.find("could not be read") != std::string::npos) return true; return false; }, 30000),
+              "Bob's store is gone (as after a restore): the message sealed to his old keys can't be read, and he is told");
+        CHECK(!has_text(bob, alice.fp, "sent to the old keys"), "(it is not shown)");
+        CHECK(wait_for([&] { auto i = bob.engine->prekey_info(); return i.relay_matches && i.relay_one_time > 0; }, 30000), "his app puts a new set of prekeys on the relay");
+        CHECK(alice.engine->send_text(bob.fp, "after the new keys", err) && wait_for([&] { return has_text(bob, alice.fp, "after the new keys"); }, 30000), "and messages work again");
+
+        // 5. A relay that hands out a prekey that isn't Bob's: Alice's app notices, and sends without forward secrecy instead of to the wrong key.
+        auto mallory_identity = CryptoEngine::generate_sig_keypair();
+        const Bytes forged = prekey::encode(prekey::generate(mallory_identity.private_key, false, 1).prekey);
+        {
+            sqlite3* db = nullptr;
+            sqlite3_open_v2(relay_db.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr);
+            sqlite3_stmt* st = nullptr;
+            sqlite3_prepare_v2(db, "UPDATE prekeys SET blob = ? WHERE last_resort = 0", -1, &st, nullptr);
+            sqlite3_bind_blob(st, 1, forged.data(), static_cast<int>(forged.size()), SQLITE_TRANSIENT);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+            sqlite3_close(db);
+        }
+        alice.engine->take_notices();
+        const size_t held = bob.engine->prekey_info().local_one_time;
+        CHECK(alice.engine->send_text(bob.fp, "past a forged key", err) && wait_for([&] { return has_text(bob, alice.fp, "past a forged key"); }, 30000), "the relay hands Alice a forged prekey: the message is still delivered");
+        bool warned = false;
+        for (auto& n : alice.engine->take_notices()) warned |= n.find("isn't theirs") != std::string::npos;
+        CHECK(warned && bob.engine->prekey_info().local_one_time == held, "but sealed to Bob's long-term key, not the forged one, and Alice is told");
+
+        // 6. A relay that suddenly says Bob has no prekeys at all: the message still goes, and Alice, who has sealed to his prekeys before, is told.
+        bob.engine.reset();
+        {
+            sqlite3* db = nullptr;
+            sqlite3_open_v2(relay_db.string().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr);
+            sqlite3_stmt* st = nullptr;
+            sqlite3_prepare_v2(db, "DELETE FROM prekeys WHERE mailbox_id = ?", -1, &st, nullptr);
+            sqlite3_bind_blob(st, 1, bob_mailbox.data(), static_cast<int>(bob_mailbox.size()), SQLITE_TRANSIENT);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+            sqlite3_close(db);
+        }
+        alice.engine->take_notices();
+        CHECK(alice.engine->send_text(bob.fp, "after the pool vanished", err), "(Bob's relay drops all his prekeys, and Alice sends a message)");
+        CHECK(wait_for([&] { for (auto& n : alice.engine->take_notices()) if (n.find("no one-time keys any more") != std::string::npos) return true; return false; }, 20000),
+              "Alice's app has sealed to Bob's prekeys before, so a relay suddenly saying he has none stands out: she is told");
+        restart_engine(bob);
+        CHECK(wait_for([&] { return has_text(bob, alice.fp, "after the pool vanished"); }, 30000), "the message is still delivered (without forward secrecy)");
+        CHECK(wait_for([&] { auto i = bob.engine->prekey_info(); return i.relay_matches && i.relay_one_time > 0 && i.relay_last_resort; }, 30000), "and Bob's app puts prekeys back");
+
+        // 7. A replay: the envelope captured earlier, which Bob has already handled, is deposited again.
+        const size_t shown = texts(bob, alice.fp).size();
+        RelayClient again;
+        std::string rerr;
+        CHECK(address && again.connect(address->host, address->port, contact->relay_id, 5, rerr) && again.deposit(contact->mailbox_id, contact->send_token, captured, 3600, nullptr, rerr),
+              "an envelope Bob has already handled is put in his mailbox again (" + rerr + ")");
+        run_for(4000);
+        CHECK(texts(bob, alice.fp).size() == shown, "it can't be opened (its one-time key is gone) and changes nothing: replays are harmless");
     }
 
     std::cout << "12. Locked keys\n";

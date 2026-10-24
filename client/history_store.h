@@ -201,6 +201,10 @@ public:
     // The first message stored for a conversation (a group's creation record, for its creator), if any.
     std::optional<Message> first_message(const Bytes& conversation_id);
 
+    // --- Prekeys (M6): which contacts have had one-time prekeys, so a relay suddenly claiming they have none can be noticed ---
+    void note_peer_prekeys(const std::string& fingerprint, int64_t now);
+    bool peer_had_prekeys(const std::string& fingerprint);
+
     // --- Attachments (M5) ---
     // Where each attachment stands, on this device: what the chat can show (a file, its size, its state) and what is
     // needed to fetch it. The file key and download token are encrypted like everything else here.

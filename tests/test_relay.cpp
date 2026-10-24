@@ -828,14 +828,19 @@ static void test_real_relay() {
         CHECK(take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 1) && !got.last_resort, "someone with a send token for the mailbox takes one, without signing in");
         CHECK(take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 2) && take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 3), "each is handed out once, oldest first");
         CHECK(take(owner->id, owner->token, got, e) && got.last_resort && got.blob == Bytes(4600, 9), "then the last-resort one");
-        CHECK(!take(owner->id, owner->token, got, e) && has(e, "Too many prekeys taken"), "a token can only take so many an hour (4 here), so one contact can't drain the pool: " + e);
+        CHECK(put(*owner, false, gen, {one(5, false)}, &st, e), "(the owner adds one more one-time prekey)");
+        CHECK(take(owner->id, owner->token, got, e) && got.last_resort && got.blob == Bytes(4600, 9), "over its allowance (4 an hour here) a token only gets the last-resort prekey, so one contact can't drain the pool");
+        {
+            RelayClient c;
+            CHECK(sign_in(c, pk, ppin, *owner, e) && c.prekey_status(st, e) && st.one_time == 1, "(the one-time prekey is still there)");
+        }
         std::string wrong, unknown;
         CHECK(!take(owner->id, CryptoEngine::random_bytes(32), got, wrong) && has(wrong, "Unknown mailbox or token") && !take(CryptoEngine::random_bytes(16), owner->token, got, unknown) && unknown == wrong,
               "a wrong token, or a mailbox that doesn't exist, gets the same answer");
         CHECK(take(owner->id, neighbour->token, got, e) == false && has(e, "Unknown"), "(a token for another mailbox doesn't work for this one)");
         {
             RelayClient c;
-            CHECK(sign_in(c, pk, ppin, *owner, e) && c.prekey_status(st, e) && st.one_time == 0 && st.last_resort, "the owner can see how many are left (none, plus the last-resort one)");
+            CHECK(sign_in(c, pk, ppin, *owner, e) && c.prekey_status(st, e) && st.one_time == 1 && st.last_resort, "the owner can see how many are left");
         }
         std::string gen_err;
         CHECK(!put(*owner, false, CryptoEngine::random_bytes(16), {one(4, false)}, nullptr, gen_err) && has(gen_err, "replace them"), "adding to the pool under another generation is refused: " + gen_err);

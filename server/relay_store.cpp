@@ -397,7 +397,16 @@ RelayStore::PrekeyTakeResult RelayStore::take_prekey(const Bytes& mailbox_id, co
         c.blob(1, token_hash).i64(2, hour);
         if (c.step()) taken = c.column_i64(0);
     }
-    if (taken >= static_cast<int64_t>(per_hour)) return PrekeyTakeResult::RateLimited;
+    if (taken >= static_cast<int64_t>(per_hour)) {
+        // Over this token's allowance: the one-time pool is left alone (so a contact can't drain it), but the message isn't held
+        // up either: it gets the last-resort prekey, which is reused anyway.
+        Stmt l(db_, "SELECT blob FROM prekeys WHERE mailbox_id = ? AND last_resort = 1");
+        l.blob(1, mailbox_id);
+        if (!l.step()) return PrekeyTakeResult::RateLimited;
+        blob = l.column_blob(0);
+        last_resort = true;
+        return PrekeyTakeResult::Ok;
+    }
     Stmt(db_, "INSERT INTO prekey_takes(token_hash, hour, count) VALUES(?, ?, 1) ON CONFLICT(token_hash, hour) DO UPDATE SET count = count + 1")
         .blob(1, token_hash).i64(2, hour).step();
     {

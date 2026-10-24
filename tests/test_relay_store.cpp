@@ -311,7 +311,7 @@ int main() {
         CHECK(blob == id(5, 100) && s.prekey_status(owner).one_time == 0, "they come out oldest first, each once");
         CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && last && blob == id(9, 100) && s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && last && s.prekey_status(owner).last_resort,
               "with none left, the last-resort prekey is handed out, and kept");
-        CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::RateLimited, "a token may take only so many an hour (7 here)");
+        CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && last && blob == id(9, 100), "over its allowance (7 an hour here) a token only gets the last-resort prekey: the one-time pool is safe, and the message isn't held up");
         CHECK(s.take_prekey(owner, tok2, 3600 * 10, 7, blob, last) == T::Ok && s.take_prekey(owner, tok, 3600 * 11, 7, blob, last) == T::Ok, "another token has its own allowance, and the next hour the first one is allowed again");
         s.sweep_prekey_takes(3600 * 12);
         CHECK(s.take_prekey(owner, tok, 3600 * 12, 1, blob, last) == T::Ok, "(old hours are forgotten)");
@@ -322,6 +322,8 @@ int main() {
         CHECK(st.one_time == 1 && st.last_resort && st.generation == g2 && s.take_prekey(owner, tok2, 3600 * 14, 7, blob, last) == T::Ok && blob == id(30, 100), "only the new prekeys are left");
         CHECK(s.put_prekeys(owner, true, g1, {}, 1005, 6) == P::Ok && s.prekey_status(owner).one_time == 0 && !s.prekey_status(owner).last_resort, "replacing with none clears the pool");
         CHECK(s.take_prekey(owner, tok2, 3600 * 15, 7, blob, last) == T::Empty, "and then there is nothing to take");
+        for (int i = 0; i < 7; i++) s.take_prekey(owner, tok, 3600 * 16, 7, blob, last);
+        CHECK(s.take_prekey(owner, tok, 3600 * 16, 7, blob, last) == T::RateLimited, "over the allowance with no last-resort prekey there is nothing to give");
         s.put_prekeys(other, false, g1, {entry(40, false)}, 1006, 6);
         { RelayStore again(path); CHECK(again.prekey_status(other).one_time == 1, "prekeys survive a restart"); }
         CHECK(s.delete_mailbox(other) && s.prekey_status(other).one_time == 0 && s.prekey_status(other).generation.empty(), "removing a mailbox removes its prekeys and generation");

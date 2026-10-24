@@ -3,6 +3,7 @@
 #include "crypto_engine.h"
 #include "envelope.h"
 #include "messaging_engine.h"
+#include "prekey_vault.h"
 #include "message_record.h"
 #include "protocol.h"
 #include "relay_client.h"
@@ -783,13 +784,18 @@ int main(int argc, char** argv) {
         const Bytes alice_kem = alice.keys->load_private_kem();
         as(gina);
         const Bytes gina_kem = gina.keys->load_private_kem();
+        // e2's app is closed, so open her envelopes as it would: her long-term key and her store of one-time keys (M6).
+        const fs::path gina_store_path = gina.history().parent_path() / (gina.history().stem().string() + "-prekeys.db");
+        const Bytes gina_store_key = gina.keys->derive_local_key("prekey vault key");
         auto classify = [&](int& alice_can_open, int& gina_can_open, int& grants_from_frank, int& archive_grants, size_t& total) {
+            PrekeyVault gina_store(gina_store_path, gina_store_key);
+            const chat::PrekeyLookup gina_lookup = [&](const Bytes& id) { return gina_store.find(id); };
             auto envelopes = mailbox_envelopes(gina);
             total = envelopes.size();
             alice_can_open = gina_can_open = grants_from_frank = archive_grants = 0;
             for (auto& env : envelopes) {
                 if (chat::open_envelope(env, alice_kem)) alice_can_open++;
-                if (auto inner = chat::open_envelope(env, gina_kem)) {
+                if (auto inner = chat::open_envelope(env, gina_kem, gina_lookup)) {
                     gina_can_open++;
                     for (auto& raw : inner->records)
                         if (auto sr = chat::parse_record(raw)) {

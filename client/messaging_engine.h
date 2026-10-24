@@ -17,6 +17,7 @@
 
 #include "archive.h"
 #include "attachment.h"
+#include "prekey_vault.h"
 #include "envelope.h"
 #include "history_store.h"
 #include "identity_bundle.h"
@@ -58,6 +59,13 @@ public:
         int archive_checkpoint_max_age_seconds = 24 * 3600;
         int keyring_check_seconds = 60;  // how often to see whether the keyring on the relay needs updating
         uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;  // the largest file this app will try to send (a relay may allow less)
+        // Prekeys (M6).
+        int prekey_check_seconds = 60;                     // how often to see whether the relay's pool needs topping up
+        size_t prekey_pool_target = 100;                   // one-time prekeys to keep on the relay
+        size_t prekey_low_water = 30;                      // top up when fewer than this are left
+        int64_t last_resort_rotate_seconds = 7 * 86400;    // a new last-resort prekey each week
+        int64_t retired_last_resort_keep_seconds = 14 * 86400;  // an old one is kept this long for envelopes still on their way
+        int64_t unused_prekey_keep_seconds = 45 * 86400;   // a one-time prekey nobody has used is deleted after this
         int attachment_status_fast_seconds = 4;   // how often to ask the relay who has fetched a file sent in the last 15 minutes
         int attachment_status_slow_seconds = 60;  // ...and for older ones
     };
@@ -356,6 +364,18 @@ public:
     // Bytes done and in all, for an upload or download under way. False if nothing is.
     bool attachment_progress(const std::string& file_id, uint64_t& done, uint64_t& total);
 
+    // --- Prekeys (M6) ---
+    // Where this device's pool of one-time prekeys stands, here and (as of the last check) on the relay.
+    struct PrekeyInfo {
+        size_t local_one_time = 0, local_last_resort = 0, local_retired = 0, pending_upload = 0;
+        uint32_t relay_one_time = 0;
+        bool relay_last_resort = false;
+        bool relay_matches = false;  // the relay's pool is this device's (same generation)
+        std::string generation;      // hex
+    };
+    PrekeyInfo prekey_info();
+    std::filesystem::path prekey_store_path() const { return prekey_store_path_; }
+
     // --- Restoring after a reinstall (M4) ---
     // The keyring is what a reinstalled app needs, beyond the keys folder, to find and open its chats'
     // archives. It is encrypted so the relay can't read it and kept in a slot of the user's own mailbox;
@@ -477,6 +497,13 @@ private:
     bool xfer_stop_ = false;
     std::atomic<bool> xfer_cancel_{false};
     std::chrono::steady_clock::time_point next_attachment_check_{};
+    void maintain_prekeys();
+    std::unique_ptr<PrekeyVault> prekeys_;
+    Bytes last_used_prekey_;  // the one-time prekey the envelope just handled was sealed to, to delete once it is stored
+    std::filesystem::path prekey_store_path_;
+    std::chrono::steady_clock::time_point next_prekey_check_{};
+    relay::PrekeyStatus relay_prekeys_;  // as of the last check
+    std::mutex prekey_info_mutex_;
     keyring::Contents build_keyring();
     bool store_keyring(const Bytes& plaintext, std::string& error);
     void maintain_keyring();

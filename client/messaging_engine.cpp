@@ -72,6 +72,13 @@ MessagingEngine::MessagingEngine(KeyStore& keys, const fs::path& history_path, c
     auto wipe = make_scope_exit([&] { CryptoEngine::secure_wipe(history_key); });
     if (history_key.empty()) throw std::runtime_error("Your keys could not be loaded");
     history_ = std::make_unique<HistoryStore>(history_path, history_key);
+    // The private halves of this device's prekeys, in their own store next to the history, never in any backup.
+    {
+        Bytes vault_key = keys_.derive_local_key("prekey vault key");
+        auto wipe_vault_key = make_scope_exit([&] { CryptoEngine::secure_wipe(vault_key); });
+        prekey_store_path_ = history_path.parent_path() / (history_path.stem().string() + "-prekeys.db");
+        prekeys_ = std::make_unique<PrekeyVault>(prekey_store_path_, vault_key);
+    }
     // The first look for chats that need an archive comes one interval after start, not at once: starting up
     // has enough to do already.
     next_archive_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, options_.archive_check_seconds));
@@ -664,8 +671,19 @@ static bool only_group_grants(const std::vector<chat::SignedRecord>& records) {
 }
 
 bool MessagingEngine::process_envelope(const relay::StoredEnvelope& envelope) {
-    auto inner = chat::open_envelope(envelope.envelope, kem_private_);
-    if (!inner) return true;  // not for us, or damaged: nothing to keep, so let the relay delete it
+    last_used_prekey_.clear();
+    Bytes used_prekey;
+    auto inner = chat::open_envelope(envelope.envelope, kem_private_, [this](const Bytes& id) { return prekeys_->find(id); }, &used_prekey);
+    if (!inner) {
+        // Sealed to a one-time prekey this device no longer has (as after a restore): it can never be read. Say so, once.
+        if (auto named = chat::envelope_prekey_id(envelope.envelope); named && !prekeys_->find(*named)) {
+            bool first_time;
+            { std::lock_guard<std::mutex> lock(mutex_); first_time = told_about_.insert("lost-prekey").second; }
+            if (first_time) notify("A message could not be read: it was sealed to a one-time key this device no longer has (as after a restore).");
+        }
+        return true;  // not for us, or damaged, or unreadable: nothing to keep, so let the relay delete it
+    }
+    last_used_prekey_ = used_prekey;
     envelope_grants_ = inner->grants;  // file keys and tokens for any attachments in it, for note_incoming_attachment
     auto forget_grants = make_scope_exit([&] { envelope_grants_.clear(); });
 
@@ -2394,6 +2412,77 @@ void MessagingEngine::check_deletions() {
     }
 }
 
+// --- Prekeys ---
+
+// Keeps this device's pool of one-time prekeys on its relay: the first set at setup, topped up when it runs low, a new
+// last-resort prekey each week, and the whole pool replaced if the relay's set isn't this device's (after a restore, the
+// private halves of the old set are gone, so every envelope sealed to them would be unreadable).
+void MessagingEngine::maintain_prekeys() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_prekey_check_) return;
+    next_prekey_check_ = now + std::chrono::seconds(std::max(1, options_.prekey_check_seconds));
+    if (!keys_.load_mailbox_config()) return;
+    RelayClient client;
+    std::string err;
+    relay::PrekeyStatus status;
+    if (!connect_authenticated(client, err) || !client.prekey_status(status, err)) return;  // try again next time
+    const int64_t wall = unix_now();
+    Bytes generation = prekeys_->generation();
+    const bool replace = generation.empty() || status.generation != generation;
+    if (replace) {
+        const bool had_a_pool = !generation.empty() || !status.generation.empty();
+        generation = CryptoEngine::random_bytes(relay::PREKEY_GENERATION_BYTES);
+        prekeys_->start_generation(generation);
+        for (size_t i = 0; i < options_.prekey_pool_target; i++) prekeys_->add(prekey::generate(dsa_private_, false, static_cast<uint64_t>(wall)), wall);
+        prekeys_->add(prekey::generate(dsa_private_, true, static_cast<uint64_t>(wall)), wall);
+        if (had_a_pool)
+            notify("This device's one-time keys on the relay were replaced (as after a restore). Any messages sent to the old ones while that happened can't be read.");
+    } else {
+        if (status.one_time < options_.prekey_low_water && prekeys_->counts().pending == 0)
+            for (size_t i = status.one_time; i < options_.prekey_pool_target; i++) prekeys_->add(prekey::generate(dsa_private_, false, static_cast<uint64_t>(wall)), wall);
+        auto last = prekeys_->current_last_resort_created();
+        const bool need_last_resort = !status.last_resort || !last || wall - *last >= options_.last_resort_rotate_seconds;
+        bool pending_last_resort = false;
+        for (const auto& p : prekeys_->not_uploaded()) pending_last_resort |= p.last_resort;
+        if (need_last_resort && !pending_last_resort) prekeys_->add(prekey::generate(dsa_private_, true, static_cast<uint64_t>(wall)), wall);
+    }
+    // Upload whatever the relay doesn't have yet, a message's worth at a time (the first replaces the pool when replacing).
+    auto pending = prekeys_->not_uploaded();
+    bool first = true;
+    for (size_t at = 0; at < pending.size(); at += relay::MAX_PREKEYS_PER_PUT) {
+        relay::PrekeyPut put;
+        put.replace = replace && first;
+        put.generation = generation;
+        for (size_t i = at; i < std::min(pending.size(), at + relay::MAX_PREKEYS_PER_PUT); i++)
+            put.prekeys.push_back({pending[i].id, pending[i].last_resort, prekey::encode(pending[i])});
+        if (!client.put_prekeys(put, &status, err)) break;  // the rest go next time
+        for (const auto& p : put.prekeys) {
+            prekeys_->mark_uploaded(p.id);
+            if (p.last_resort) prekeys_->retire_last_resort_except(p.id, wall);  // the relay now hands out this one; keep the old one a while
+        }
+        first = false;
+    }
+    prekeys_->forget_old(wall - options_.retired_last_resort_keep_seconds, wall - options_.unused_prekey_keep_seconds);
+    std::lock_guard<std::mutex> lock(prekey_info_mutex_);
+    relay_prekeys_ = status;
+}
+
+MessagingEngine::PrekeyInfo MessagingEngine::prekey_info() {
+    PrekeyInfo info;
+    auto c = prekeys_->counts();
+    info.local_one_time = c.one_time;
+    info.local_last_resort = c.last_resort;
+    info.local_retired = c.retired;
+    info.pending_upload = c.pending;
+    const Bytes generation = prekeys_->generation();
+    info.generation = bytes_to_hex(generation);
+    std::lock_guard<std::mutex> lock(prekey_info_mutex_);
+    info.relay_one_time = relay_prekeys_.one_time;
+    info.relay_last_resort = relay_prekeys_.last_resort;
+    info.relay_matches = !generation.empty() && relay_prekeys_.generation == generation;
+    return info;
+}
+
 // --- Attachments ---
 
 MessagingEngine::AttachmentView MessagingEngine::attachment_view(const chat::AttachmentInfo& info) {
@@ -2858,7 +2947,7 @@ void MessagingEngine::check_attachments() {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_attachment_check_) return;
     const int64_t wall = unix_now();
-    bool recent = false;
+    bool recent = false, any_outgoing = false;
     bool tried = false, connected = false;
     RelayClient client;
     for (const auto& a : history_->attachments_in_state(HistoryStore::AttachAvailable)) {
@@ -2868,6 +2957,7 @@ void MessagingEngine::check_attachments() {
             continue;
         }
         if (!a.outgoing) continue;
+        any_outgoing = true;
         if (wall - a.created_at < 900) recent = true;
         if (!tried) {
             tried = true;
@@ -2891,7 +2981,10 @@ void MessagingEngine::check_attachments() {
             connected = false;  // the connection may be gone: try again next time
         }
     }
-    next_attachment_check_ = now + std::chrono::seconds(std::max(1, recent ? options_.attachment_status_fast_seconds : options_.attachment_status_slow_seconds));
+    // With nothing of ours waiting, a look is only a local query, so look again soon: a file sent in the meantime is then checked
+    // within seconds rather than a slow interval later. Only files that have waited a while are checked less often.
+    const bool fast = recent || !any_outgoing;
+    next_attachment_check_ = now + std::chrono::seconds(std::max(1, fast ? options_.attachment_status_fast_seconds : options_.attachment_status_slow_seconds));
 }
 
 // --- Sending ---
@@ -2993,14 +3086,46 @@ void MessagingEngine::flush_outbox() {
         }
         try {
             if (first_message) inner.sender_bundle = own_bundle_raw();
-            Bytes envelope = chat::seal_envelope(inner, peer->pub_kem);
 
             auto address = parse_server_address(peer->relay_address);
             if (!address) throw std::runtime_error("Their relay address is not valid");
             RelayClient depositor;
             std::string err;
-            if (!depositor.connect(address->host, address->port, peer->relay_id, options_.connect_timeout_seconds, err) ||
-                !depositor.deposit(peer->mailbox_id, peer->send_token, envelope, options_.envelope_ttl_seconds, nullptr, err)) {
+            bool ok = depositor.connect(address->host, address->port, peer->relay_id, options_.connect_timeout_seconds, err);
+            if (ok) {
+                // One of their one-time prekeys, taken on the same connection and checked against their identity key: the envelope
+                // is then sealed so that it can't be opened once they have deleted it. If their relay has none (or doesn't know about
+                // prekeys), it is sealed as before, to their long-term key only.
+                std::optional<prekey::Prekey> one_time;
+                relay::PrekeyData taken;
+                std::string take_error;
+                if (depositor.take_prekey(peer->mailbox_id, peer->send_token, taken, take_error)) {
+                    auto p = prekey::decode(taken.blob);
+                    if (p && prekey::verify(*p, peer->pub_dsa)) {
+                        one_time = std::move(*p);
+                        history_->note_peer_prekeys(item.contact_fp, now);  // so a relay later claiming they have none stands out
+                    } else {
+                        bool first_time;
+                        { std::lock_guard<std::mutex> lock(mutex_); first_time = told_about_.insert("bad-prekey:" + item.contact_fp).second; }
+                        if (first_time) notify(peer->name + "'s relay handed out a one-time key that isn't theirs, so messages to them are sent without forward secrecy.");
+                    }
+                }
+                else if (take_error.find("has no prekeys") != std::string::npos && history_->peer_had_prekeys(item.contact_fp)) {
+                    // They have had prekeys before, and now their relay says there are none at all (not even a last-resort one). That
+                    // can happen briefly after they reinstall, but it is also exactly what a relay would say to strip forward secrecy.
+                    bool first_time;
+                    { std::lock_guard<std::mutex> lock(mutex_); first_time = told_about_.insert("no-prekeys:" + item.contact_fp).second; }
+                    if (first_time)
+                        notify(peer->name + "'s relay says they have no one-time keys any more, so messages to them are sent without forward secrecy. "
+                                            "Their relay may be misbehaving, or they may have just reinstalled.");
+                }
+                ok = depositor.connected();
+                if (ok) {
+                    Bytes envelope = chat::seal_envelope(inner, peer->pub_kem, one_time ? &*one_time : nullptr);
+                    ok = depositor.deposit(peer->mailbox_id, peer->send_token, envelope, options_.envelope_ttl_seconds, nullptr, err);
+                }
+            }
+            if (!ok) {
                 if (err.find("Unknown mailbox or token") != std::string::npos) {
                     const std::string key = "dead-token:" + item.contact_fp;
                     bool first_time;
@@ -3079,7 +3204,12 @@ void MessagingEngine::pump(int wait_ms) {
     for (int handled = 0; handled < 32; handled++) {
         if (event.kind == RelayClient::Event::Kind::Envelope) {
             try {
-                if (process_envelope(event.envelope)) to_ack.push_back(event.envelope.id);
+                if (process_envelope(event.envelope)) {
+                    to_ack.push_back(event.envelope.id);
+                    // Handled and stored: the one-time prekey it was sealed to is deleted now, for good (forward secrecy).
+                    // A last-resort one is kept: it is reused.
+                    if (!last_used_prekey_.empty()) prekeys_->erase_one_time(last_used_prekey_);
+                }
             } catch (const std::exception& e) {
                 notify(std::string("Could not process a message: ") + e.what());  // not acknowledged, so it is retried
             }
@@ -3114,5 +3244,6 @@ void MessagingEngine::pump(int wait_ms) {
         check_deletions();
         check_attachments();
         maintain_keyring();
+        maintain_prekeys();
     }
 }

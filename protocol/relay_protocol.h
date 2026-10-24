@@ -23,7 +23,7 @@ constexpr size_t HASH_BYTES = 32;         // SHA-256: token hashes, relay IDs, i
 constexpr size_t INVITE_BYTES = 16;
 constexpr size_t ENVELOPE_ID_BYTES = 16;
 
-constexpr size_t MAX_ENVELOPE_BYTES = 64 * 1024 + 2048;  // 64 KiB padded record plus headers
+constexpr size_t MAX_ENVELOPE_BYTES = 64 * 1024 + 4096;  // 64 KiB padded record plus headers (a version 2 header, with a one-time prekey, is about 2.3 KB)
 constexpr uint32_t MIN_TTL_SECONDS = 1;
 constexpr uint32_t MAX_TTL_SECONDS = 30u * 24 * 3600;    // nothing is held longer than 30 days
 constexpr size_t MAX_ACK_IDS = 256;

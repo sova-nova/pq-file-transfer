@@ -1,6 +1,8 @@
 // Tests for the encrypted local history store.
 #include "crypto_engine.h"
 #include "history_store.h"
+#include "prekey.h"
+#include "prekey_vault.h"
 
 #include <sqlite3.h>
 
@@ -326,7 +328,7 @@ int main() {
 
         {
             HistoryStore h(v1, key);
-            CHECK(raw_int(v1, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
+            CHECK(raw_int(v1, "PRAGMA user_version") == 10, "opening it upgrades it to the current version (10)");
             fs::path backup = fs::path(v1.string() + ".before-v2");
             CHECK(fs::exists(backup) && raw_int(backup, "PRAGMA user_version") == 1 && raw_int(backup, "SELECT COUNT(*) FROM conversations") == 2,
                   "the old file is kept next to it, unchanged, before anything is rewritten");
@@ -366,13 +368,13 @@ int main() {
         int64_t backup_size = size_of(fs::path(v1.string() + ".before-v2"));
         {
             HistoryStore again(v1, key);
-            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 9, "opening it again changes nothing");
+            CHECK(again.messages(conv_a, 100).size() == 4 && raw_int(v1, "PRAGMA user_version") == 10, "opening it again changes nothing");
         }
         CHECK(backup_size > 0 && size_of(fs::path(v1.string() + ".before-v2")) == backup_size, "...and the saved old copy is not overwritten");
 
         fs::path fresh = dir / "fresh.db";
         { HistoryStore f(fresh, key); }
-        CHECK(raw_int(fresh, "PRAGMA user_version") == 9 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
+        CHECK(raw_int(fresh, "PRAGMA user_version") == 10 && !fs::exists(fs::path(fresh.string() + ".before-v2")), "a brand-new history starts at the current version, with nothing to back up");
 
         fs::path future = dir / "future.db";
         { HistoryStore f(future, key); }
@@ -506,11 +508,11 @@ int main() {
             h.add_message(msg(id(0x61), 1, true, 200, "still here", HistoryStore::Sent));
         }
         // Make it exactly what version 2 left: no invitation or introduced-member tables.
-        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; DROP TABLE deletions; DROP TABLE deletion_accepts; DROP TABLE archive_messages; DROP TABLE archive_redacted; DROP TABLE attachments; PRAGMA user_version=2;");
+        raw_exec(v2, "DROP TABLE group_invites; DROP TABLE introduced_members; DROP TABLE member_tokens; DROP TABLE verified_people; DROP TABLE archives; DROP TABLE archive_chain; DROP TABLE deletions; DROP TABLE deletion_accepts; DROP TABLE archive_messages; DROP TABLE archive_redacted; DROP TABLE attachments; DROP TABLE peer_prekeys; PRAGMA user_version=2;");
         CHECK(raw_int(v2, "PRAGMA user_version") == 2 && raw_int(v2, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'group_invites'") == 0, "(setup) the fixture really is a version 2 database");
         {
             HistoryStore h(v2, key);
-            CHECK(raw_int(v2, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
+            CHECK(raw_int(v2, "PRAGMA user_version") == 10, "opening it upgrades it to the current version (10)");
             auto g = h.conversation(id(0x61));
             CHECK(g && g->title == "Kept through the upgrade" && g->members.size() == 3 && h.messages(id(0x61), 10).size() == 1 && h.messages(id(0x61), 10)[0].record == text("still here"),
                   "the groups and messages it held are untouched");
@@ -779,6 +781,92 @@ int main() {
         CHECK(!h.has_archive(archive) && !h.archive_message_number(archive, id(5)) && !h.archive_hash(archive, 7) && !h.archive_redacted(archive, 7), "forgetting a chat's archive removes its keys, its checked chain and its message map");
     }
 
+    std::cout << "Contacts that have had prekeys\n";
+    {
+        HistoryStore h(dir / "peer-prekeys.db", key);
+        CHECK(!h.peer_had_prekeys(fp_a), "nobody has had prekeys to begin with");
+        h.note_peer_prekeys(fp_a, 100);
+        h.note_peer_prekeys(fp_a, 200);
+        CHECK(h.peer_had_prekeys(fp_a) && !h.peer_had_prekeys(fp_b), "a contact sealed to once is remembered, and only that one");
+        HistoryStore again(dir / "peer-prekeys.db", key);
+        CHECK(again.peer_had_prekeys(fp_a), "and it survives a restart");
+    }
+
+    std::cout << "The prekey store\n";
+    {
+        const fs::path vp = dir / "vault.db";
+        const Bytes vkey = id(0x33, 32), gen1 = id(0x41, 16), gen2 = id(0x42, 16);
+        auto identity = CryptoEngine::generate_sig_keypair();
+        auto g1 = prekey::generate(identity.private_key, false, 100), g2 = prekey::generate(identity.private_key, false, 100), lr = prekey::generate(identity.private_key, true, 100);
+        {
+            PrekeyVault v(vp, vkey);
+            CHECK(v.generation().empty() && v.counts().one_time == 0 && !v.current_last_resort_created(), "a new store is empty, with no generation");
+            v.start_generation(gen1);
+            v.add(g1, 100);
+            v.add(g2, 100);
+            v.add(lr, 100);
+            auto c = v.counts();
+            CHECK(v.generation() == gen1 && c.one_time == 2 && c.last_resort == 1 && c.pending == 3, "it holds two one-time prekeys and a last-resort one, all waiting to be uploaded");
+            auto up = v.not_uploaded();
+            bool all_verify = up.size() == 3 && up.back().last_resort;
+            for (const auto& p : up) all_verify &= prekey::verify(p, identity.public_key);
+            CHECK(all_verify, "it hands back their signed public halves for uploading (the last-resort one last)");
+            auto found = v.find(g1.prekey.id);
+            CHECK(found && found->kem_private == g1.secret.kem_private && found->x25519_private == g1.secret.x25519_private, "a private half is found by the prekey's ID");
+            for (const auto& p : up) v.mark_uploaded(p.id);
+            CHECK(v.counts().pending == 0 && v.not_uploaded().empty() && v.current_last_resort_created() == std::optional<int64_t>(100), "once uploaded, nothing is waiting, and the current last-resort one is known");
+        }
+        // Secure deletion: the sealed private half's bytes are nowhere in the file afterwards.
+        Bytes sealed;
+        {
+            sqlite3* raw = nullptr;
+            sqlite3_open_v2(vp.string().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr);
+            sqlite3_stmt* st = nullptr;
+            sqlite3_prepare_v2(raw, "SELECT sealed FROM prekeys WHERE id = ?", -1, &st, nullptr);
+            sqlite3_bind_blob(st, 1, g1.prekey.id.data(), static_cast<int>(g1.prekey.id.size()), SQLITE_TRANSIENT);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const auto* b = static_cast<const uint8_t*>(sqlite3_column_blob(st, 0));
+                sealed.assign(b, b + sqlite3_column_bytes(st, 0));
+            }
+            sqlite3_finalize(st);
+            sqlite3_close(raw);
+        }
+        const std::string slice(sealed.begin() + 100, sealed.begin() + std::min<size_t>(sealed.size(), 164));
+        CHECK(sealed.size() > 2000 && file_contains(vp, slice) && !file_contains(vp, std::string(g1.secret.kem_private.begin(), g1.secret.kem_private.begin() + 64)),
+              "(the private half is on disk only sealed: its own bytes are not in the file)");
+        {
+            PrekeyVault v(vp, vkey);
+            CHECK(v.erase(g1.prekey.id) && !v.find(g1.prekey.id) && !v.erase(g1.prekey.id), "a used prekey is deleted, once");
+        }
+        CHECK(!file_contains(vp, slice) && !file_contains(fs::path(vp.string() + "-journal"), slice) && !file_contains(fs::path(vp.string() + "-wal"), slice),
+              "and its sealed bytes are gone from the file: overwritten, not just unlinked (and no journal keeps a copy)");
+        {
+            PrekeyVault wrong(vp, id(0x34, 32));
+            CHECK(!wrong.find(g2.prekey.id), "with a different key, nothing can be read from the store");
+        }
+        {
+            PrekeyVault v(vp, vkey);
+            CHECK(v.find(g2.prekey.id) && v.generation() == gen1, "the rest survives being reopened");
+            auto lr2 = prekey::generate(identity.private_key, true, 200);
+            v.add(lr2, 200);
+            v.mark_uploaded(lr2.prekey.id);
+            v.retire_last_resort_except(lr2.prekey.id, 200);
+            auto c = v.counts();
+            CHECK(c.last_resort == 1 && c.retired == 1 && v.current_last_resort_created() == std::optional<int64_t>(200) && v.find(lr.prekey.id), "a new last-resort prekey retires the old one, which is kept for envelopes on their way");
+            CHECK(v.forget_old(300, 50) == 1 && !v.find(lr.prekey.id) && v.find(g2.prekey.id), "a retired one past its time is forgotten; a one-time one isn't, until it is old enough");
+            CHECK(v.forget_old(0, 150) == 1 && !v.find(g2.prekey.id), "an unused one-time prekey older than any envelope could be is forgotten");
+            v.add(g1, 300);
+            v.start_generation(gen2);
+            CHECK(v.generation() == gen2 && v.counts().one_time == 0 && v.counts().last_resort == 0 && !v.find(g1.prekey.id), "starting a new generation forgets every prekey");
+        }
+        const fs::path damaged = dir / "damaged-vault.db";
+        { std::ofstream f(damaged, std::ios::binary); f << std::string(5000, 'x'); }
+        {
+            PrekeyVault v(damaged, vkey);
+            CHECK(v.generation().empty() && v.counts().one_time == 0, "a damaged store is started afresh (the app then replaces the pool on the relay)");
+        }
+    }
+
     std::cout << "Attachments\n";
     {
         const std::string key_marker = "FILE-KEY-MARKER-0123456789ABCDEF", token_marker = "DOWNLOAD-TOKEN-MARKER-0123456789A";
@@ -869,7 +957,7 @@ int main() {
         CHECK(raw_int(v6, "PRAGMA user_version") == 6 && raw_int(v6, "SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name = 'warning'") == 0, "(setup) the fixture really is a version 6 database");
         {
             HistoryStore h(v6, key);
-            CHECK(raw_int(v6, "PRAGMA user_version") == 9, "opening it upgrades it to the current version (9)");
+            CHECK(raw_int(v6, "PRAGMA user_version") == 10, "opening it upgrades it to the current version (10)");
             auto a = h.archive(conv);
             CHECK(a && a->relay_address == "10.0.0.248:9000" && a->role == HistoryStore::ArchiveCreator && a->state == HistoryStore::ArchiveJoined && a->archive_key == id(0x11, 32) &&
                       a->head_number == 9 && a->head_hash == id(0x99, 32) && a->created_at == 1234,

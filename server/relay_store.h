@@ -111,7 +111,7 @@ public:
                                 uint32_t max_one_time);
     enum class PrekeyTakeResult { Ok, Empty, RateLimited };
     // Hands out the oldest one-time prekey and removes it; if there are none, the last-resort one (kept). Counts against the
-    // token's allowance for the hour, `per_hour`.
+    // token's allowance for the hour, `per_hour`; over it, only the last-resort one is handed out (RateLimited if there is none).
     PrekeyTakeResult take_prekey(const Bytes& mailbox_id, const Bytes& token_hash, int64_t now, uint32_t per_hour, Bytes& blob, bool& last_resort);
     struct PrekeyPoolStatus {
         uint32_t one_time = 0;
