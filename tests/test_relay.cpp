@@ -794,6 +794,66 @@ static void test_real_relay() {
         keyring.stop();
     }
 
+    std::cout << "12g. Prekeys\n";
+    {
+        const int pbase = 55000 + static_cast<int>(getpid() % 400) * 2;
+        Server pk{pbase, ROOT / "relay-prekeys", {"--max-prekeys", "5", "--prekey-takes-per-hour", "4"}};
+        if (!pk.start()) { std::cout << "FAIL could not start the prekey relay\n"; failures++; return; }
+        auto pinvite = pk.invite();
+        const Bytes ppin = pinvite->relay_id;
+        auto owner = make_box(pk, ppin);
+        auto neighbour = make_box(pk, ppin);
+        if (!owner || !neighbour) { std::cout << "FAIL setup\n"; failures++; return; }
+        std::string e;
+        auto put = [&](const Box& who, bool replace, const Bytes& gen, std::vector<relay::PrekeyEntry> entries, relay::PrekeyStatus* st, std::string& err) {
+            RelayClient c;
+            relay::PrekeyPut p{replace, gen, std::move(entries)};
+            return sign_in(c, pk, ppin, who, err) && c.put_prekeys(p, st, err);
+        };
+        auto take = [&](const Bytes& mailbox, const Bytes& token, relay::PrekeyData& out, std::string& err) {
+            RelayClient c;
+            return connect_to(c, pk, ppin, err) && c.take_prekey(mailbox, token, out, err);
+        };
+        const Bytes gen = CryptoEngine::random_bytes(16);
+        auto one = [](uint8_t n, bool last) { return relay::PrekeyEntry{Bytes(16, n), last, Bytes(4600, n)}; };
+        relay::PrekeyStatus st;
+        {
+            RelayClient anon;
+            connect_to(anon, pk, ppin, e);
+            CHECK(!anon.put_prekeys(relay::PrekeyPut{false, gen, {one(1, false)}}, nullptr, e) && has(e, "Sign in"), "putting prekeys needs a mailbox sign-in: " + e);
+        }
+        CHECK(put(*owner, false, gen, {one(1, false), one(2, false), one(3, false), one(9, true)}, &st, e) && st.one_time == 3 && st.last_resort && st.generation == gen,
+              "the owner puts three one-time prekeys and a last-resort one, and is told what the relay holds (" + e + ")");
+        relay::PrekeyData got;
+        CHECK(take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 1) && !got.last_resort, "someone with a send token for the mailbox takes one, without signing in");
+        CHECK(take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 2) && take(owner->id, owner->token, got, e) && got.blob == Bytes(4600, 3), "each is handed out once, oldest first");
+        CHECK(take(owner->id, owner->token, got, e) && got.last_resort && got.blob == Bytes(4600, 9), "then the last-resort one");
+        CHECK(!take(owner->id, owner->token, got, e) && has(e, "Too many prekeys taken"), "a token can only take so many an hour (4 here), so one contact can't drain the pool: " + e);
+        std::string wrong, unknown;
+        CHECK(!take(owner->id, CryptoEngine::random_bytes(32), got, wrong) && has(wrong, "Unknown mailbox or token") && !take(CryptoEngine::random_bytes(16), owner->token, got, unknown) && unknown == wrong,
+              "a wrong token, or a mailbox that doesn't exist, gets the same answer");
+        CHECK(take(owner->id, neighbour->token, got, e) == false && has(e, "Unknown"), "(a token for another mailbox doesn't work for this one)");
+        {
+            RelayClient c;
+            CHECK(sign_in(c, pk, ppin, *owner, e) && c.prekey_status(st, e) && st.one_time == 0 && st.last_resort, "the owner can see how many are left (none, plus the last-resort one)");
+        }
+        std::string gen_err;
+        CHECK(!put(*owner, false, CryptoEngine::random_bytes(16), {one(4, false)}, nullptr, gen_err) && has(gen_err, "replace them"), "adding to the pool under another generation is refused: " + gen_err);
+        std::string many;
+        CHECK(!put(*owner, false, gen, {one(10, false), one(11, false), one(12, false), one(13, false), one(14, false), one(15, false)}, nullptr, many) && has(many, "at most 5"), "more than the relay keeps is refused: " + many);
+        const Bytes gen2 = CryptoEngine::random_bytes(16);
+        CHECK(put(*owner, true, gen2, {one(20, false), one(21, true)}, &st, e) && st.one_time == 1 && st.generation == gen2, "after a restore the owner replaces the whole pool");
+        CHECK(put(*neighbour, false, gen, {one(30, false)}, &st, e) && st.one_time == 1, "(another mailbox has its own pool)");
+        CHECK(take(neighbour->id, neighbour->token, got, e) && got.blob == Bytes(4600, 30), "and it hands out its own prekeys, not the owner's");
+        pk.stop();
+        CHECK(pk.start(), "(the relay restarts)");
+        {
+            RelayClient c;
+            CHECK(sign_in(c, pk, ppin, *owner, e) && c.prekey_status(st, e) && st.one_time == 1 && st.last_resort && st.generation == gen2, "the pool survives a restart");
+        }
+        pk.stop();
+    }
+
     std::cout << "12f. Attachments\n";
     {
         const int fbase = 56000 + static_cast<int>(getpid() % 2000) * 2;

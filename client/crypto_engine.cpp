@@ -388,3 +388,34 @@ std::string CryptoEngine::format_fingerprint(const std::string& fp) {
     }
     return out;
 }
+
+CryptoEngine::X25519KeyPair CryptoEngine::generate_x25519() {
+    X25519KeyPair kp;
+    kp.private_key = random_bytes(32);
+    EVP_PKEY* key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, kp.private_key.data(), kp.private_key.size());
+    if (!key) throw std::runtime_error("Could not make an X25519 key");
+    size_t length = 32;
+    kp.public_key.resize(32);
+    const bool ok = EVP_PKEY_get_raw_public_key(key, kp.public_key.data(), &length) == 1 && length == 32;
+    EVP_PKEY_free(key);
+    if (!ok) throw std::runtime_error("Could not make an X25519 key");
+    return kp;
+}
+
+std::vector<uint8_t> CryptoEngine::x25519_shared(const std::vector<uint8_t>& private_key, const std::vector<uint8_t>& peer_public_key) {
+    if (private_key.size() != 32 || peer_public_key.size() != 32) throw std::runtime_error("An X25519 key has the wrong size");
+    EVP_PKEY* mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, private_key.data(), private_key.size());
+    EVP_PKEY* theirs = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer_public_key.data(), peer_public_key.size());
+    EVP_PKEY_CTX* ctx = (mine && theirs) ? EVP_PKEY_CTX_new(mine, nullptr) : nullptr;
+    std::vector<uint8_t> out(32);
+    size_t length = out.size();
+    const bool ok = ctx && EVP_PKEY_derive_init(ctx) == 1 && EVP_PKEY_derive_set_peer(ctx, theirs) == 1 && EVP_PKEY_derive(ctx, out.data(), &length) == 1 && length == 32;
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(mine);
+    EVP_PKEY_free(theirs);
+    if (!ok) throw std::runtime_error("X25519 failed");
+    uint8_t any = 0;
+    for (uint8_t b : out) any |= b;
+    if (any == 0) throw std::runtime_error("X25519 produced no secret: the public key is not valid");
+    return out;
+}

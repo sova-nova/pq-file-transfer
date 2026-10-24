@@ -319,6 +319,33 @@ bool RelayClient::cancel_invite(const std::vector<uint8_t>& invite_hash, std::st
            read_reply(MessageType::RELAY_INVITE_CANCEL_OK, nullptr, error);
 }
 
+bool RelayClient::put_prekeys(const relay::PrekeyPut& put, relay::PrekeyStatus* status, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::PREKEY_PUT, relay::encode(put), error) || !read_reply(MessageType::PREKEY_PUT_OK, &payload, error)) return false;
+    auto decoded = relay::decode_prekey_status(payload);
+    if (!decoded) { error = "The relay sent an invalid answer"; close(); return false; }
+    if (status) *status = *decoded;
+    return true;
+}
+
+bool RelayClient::prekey_status(relay::PrekeyStatus& status, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::PREKEY_STATUS, {}, error) || !read_reply(MessageType::PREKEY_STATUS_OK, &payload, error)) return false;
+    auto decoded = relay::decode_prekey_status(payload);
+    if (!decoded) { error = "The relay sent an invalid answer"; close(); return false; }
+    status = *decoded;
+    return true;
+}
+
+bool RelayClient::take_prekey(const std::vector<uint8_t>& mailbox_id, const std::vector<uint8_t>& send_token, relay::PrekeyData& prekey, std::string& error) {
+    std::vector<uint8_t> payload;
+    if (!send_request(MessageType::PREKEY_TAKE, relay::encode(relay::PrekeyTake{mailbox_id, send_token}), error) || !read_reply(MessageType::PREKEY_DATA, &payload, error)) return false;
+    auto decoded = relay::decode_prekey_data(payload);
+    if (!decoded) { error = "The relay sent an invalid answer"; close(); return false; }
+    prekey = *decoded;
+    return true;
+}
+
 bool RelayClient::upload_file(const relay::FileBegin& begin, const FileChunkSource& source, std::string& error) {
     if (!send_request(MessageType::FILE_UPLOAD_BEGIN, relay::encode(begin), error) || !read_reply(MessageType::FILE_UPLOAD_OK, nullptr, error)) return false;
     for (uint32_t i = 0; i < begin.chunk_count; i++) {

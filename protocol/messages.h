@@ -86,6 +86,13 @@ enum class MessageType : uint8_t {
     ARCHIVE_FETCH      = 0x49,  // member → relay: send entries from a number onwards
     ARCHIVE_ENTRY      = 0x4A,  // relay → member: one entry
     ARCHIVE_FETCH_END  = 0x4B,  // relay → member: that was all; here is the head
+    // --- Prekeys (M6): one-time keys a sender takes to give an envelope forward secrecy ---
+    PREKEY_PUT         = 0x70,  // mailbox owner → relay: add prekeys (or replace them all)
+    PREKEY_PUT_OK      = 0x71,  // relay → owner: how many are there now
+    PREKEY_TAKE        = 0x72,  // anyone with a send token for a mailbox → relay: give me one of its prekeys
+    PREKEY_DATA        = 0x73,  // relay → taker: one prekey (removed from the pool, unless it is the last-resort one)
+    PREKEY_STATUS      = 0x74,  // owner → relay: how many are left?
+    PREKEY_STATUS_OK   = 0x75,
     // --- Attachments (M5): an encrypted file parked on the sender's relay, fetched once by each recipient ---
     FILE_UPLOAD_BEGIN  = 0x60,  // mailbox owner → relay: a file is coming (size, chunking, expiry, one token hash per recipient)
     FILE_UPLOAD_OK     = 0x61,

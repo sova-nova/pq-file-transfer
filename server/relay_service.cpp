@@ -196,6 +196,7 @@ size_t RelayService::sweep_once() {
     rate_.prune(unix_now());
     // Files that have expired, and uploads that were never finished; then any bytes with no record at all
     // (their mailbox was removed, or the relay stopped part way through).
+    store_->sweep_prekey_takes(unix_now());
     size_t files = 0;
     for (const auto& id : store_->sweep_files(unix_now(), unix_now() - limits_.abandoned_upload_seconds)) {
         remove_file_bytes(id);
@@ -563,6 +564,52 @@ void RelayService::handle_session(socket_t sock, const Bytes& hello_payload, con
                     auto info = store_->archive_info(archive_id, now);
                     if (!info) { send_error(sock, "Unknown archive"); break; }
                     if (!send_message(sock, MessageType::ARCHIVE_FETCH_END, encode(ArchiveHead{info->head.number, info->head.hash}))) return;
+                    break;
+                }
+
+                case MessageType::PREKEY_PUT: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto m = decode_prekey_put(msg->payload);
+                    if (!m) { send_error(sock, "Malformed prekey request"); return; }
+                    std::vector<RelayStore::PrekeyEntryIn> entries;
+                    for (auto& p : m->prekeys) entries.push_back({p.id, p.last_resort, p.blob});
+                    switch (store_->put_prekeys(*mailbox, m->replace, m->generation, entries, now, limits_.max_prekeys)) {
+                        case RelayStore::PrekeyPutResult::Ok: {
+                            auto st = store_->prekey_status(*mailbox);
+                            if (!send_message(sock, MessageType::PREKEY_PUT_OK, encode(PrekeyStatus{st.one_time, st.last_resort, st.generation}))) return;
+                            break;
+                        }
+                        case RelayStore::PrekeyPutResult::WrongGeneration: send_error(sock, "The relay holds a different set of prekeys for you: replace them"); break;
+                        case RelayStore::PrekeyPutResult::TooMany: send_error(sock, "Too many prekeys (this relay keeps at most " + std::to_string(limits_.max_prekeys) + ")"); break;
+                        case RelayStore::PrekeyPutResult::Duplicate: send_error(sock, "That prekey is already there"); break;
+                        default: send_error(sock, "Unknown mailbox"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::PREKEY_TAKE: {
+                    // Needs a send token for the mailbox, like a deposit, and the same answer for "no such mailbox" and "wrong token".
+                    auto m = decode_prekey_take(msg->payload);
+                    if (!m) { send_error(sock, "Malformed prekey request"); return; }
+                    if (!rate_.allow("dep-ip:" + peer_ip, limits_.rate_limit_per_minute, now)) { send_error(sock, "Too many requests, slow down"); break; }
+                    Bytes token_hash = CryptoEngine::sha256(m->send_token);
+                    if (!store_->token_valid(m->mailbox_id, token_hash)) { send_error(sock, "Unknown mailbox or token"); break; }
+                    Bytes blob;
+                    bool last_resort = false;
+                    switch (store_->take_prekey(m->mailbox_id, token_hash, now, limits_.prekey_takes_per_hour, blob, last_resort)) {
+                        case RelayStore::PrekeyTakeResult::Ok:
+                            if (!send_message(sock, MessageType::PREKEY_DATA, encode(PrekeyData{last_resort, blob}))) return;
+                            break;
+                        case RelayStore::PrekeyTakeResult::RateLimited: send_error(sock, "Too many prekeys taken with this token; try again later"); break;
+                        default: send_error(sock, "That mailbox has no prekeys"); break;
+                    }
+                    break;
+                }
+
+                case MessageType::PREKEY_STATUS: {
+                    if (!mailbox) { send_error(sock, "Sign in first"); break; }
+                    auto st = store_->prekey_status(*mailbox);
+                    if (!send_message(sock, MessageType::PREKEY_STATUS_OK, encode(PrekeyStatus{st.one_time, st.last_resort, st.generation}))) return;
                     break;
                 }
 

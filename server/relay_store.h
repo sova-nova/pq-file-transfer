@@ -97,6 +97,30 @@ public:
     size_t ack(const Bytes& mailbox_id, const std::vector<Bytes>& envelope_ids);
     size_t envelope_count(const Bytes& mailbox_id);
 
+    // --- Prekeys: each mailbox's signed one-time keys (opaque here), with an hourly allowance per send token ---
+    enum class PrekeyPutResult { Ok, WrongGeneration, TooMany, Duplicate, NoSuchMailbox };
+    struct PrekeyEntryIn {
+        Bytes id;
+        bool last_resort = false;
+        Bytes blob;
+    };
+    // Adds prekeys, or with `replace` throws away the mailbox's pool first and starts a new generation. Without `replace`
+    // they are added only if the relay's generation is the owner's (or there is none yet). A new last-resort prekey replaces
+    // the old one. All or nothing: a batch that would take the one-time pool over `max_one_time` is refused whole.
+    PrekeyPutResult put_prekeys(const Bytes& mailbox_id, bool replace, const Bytes& generation, const std::vector<PrekeyEntryIn>& prekeys, int64_t now,
+                                uint32_t max_one_time);
+    enum class PrekeyTakeResult { Ok, Empty, RateLimited };
+    // Hands out the oldest one-time prekey and removes it; if there are none, the last-resort one (kept). Counts against the
+    // token's allowance for the hour, `per_hour`.
+    PrekeyTakeResult take_prekey(const Bytes& mailbox_id, const Bytes& token_hash, int64_t now, uint32_t per_hour, Bytes& blob, bool& last_resort);
+    struct PrekeyPoolStatus {
+        uint32_t one_time = 0;
+        bool last_resort = false;
+        Bytes generation;
+    };
+    PrekeyPoolStatus prekey_status(const Bytes& mailbox_id);
+    void sweep_prekey_takes(int64_t now);  // forgets allowances for hours that are over
+
     // --- Attachments: encrypted files, fetched once by each recipient. The bytes live on disk; this holds
     // who may fetch them and when they go. ---
     struct FileMeta {

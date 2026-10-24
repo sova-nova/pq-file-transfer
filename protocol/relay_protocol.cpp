@@ -176,6 +176,38 @@ std::vector<uint8_t> encode(const KeyringChunk& m) {
     return b;
 }
 
+std::vector<uint8_t> encode(const PrekeyPut& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.replace ? 1 : 0);
+    write_blob(b, m.generation);
+    write_u32(b, static_cast<uint32_t>(m.prekeys.size()));
+    for (const auto& p : m.prekeys) {
+        write_blob(b, p.id);
+        write_u32(b, p.last_resort ? 1 : 0);
+        write_blob(b, p.blob);
+    }
+    return b;
+}
+std::vector<uint8_t> encode(const PrekeyTake& m) {
+    std::vector<uint8_t> b;
+    write_blob(b, m.mailbox_id);
+    write_blob(b, m.send_token);
+    return b;
+}
+std::vector<uint8_t> encode(const PrekeyData& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.last_resort ? 1 : 0);
+    write_blob(b, m.blob);
+    return b;
+}
+std::vector<uint8_t> encode(const PrekeyStatus& m) {
+    std::vector<uint8_t> b;
+    write_u32(b, m.one_time);
+    write_u32(b, m.last_resort ? 1 : 0);
+    write_blob(b, m.generation);
+    return b;
+}
+
 std::vector<uint8_t> encode(const FileBegin& m) {
     std::vector<uint8_t> b;
     write_blob(b, m.file_id);
@@ -470,6 +502,51 @@ std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>& in)
     const uint64_t expected_size = c.index + 1 < c.count ? KEYRING_CHUNK_BYTES : c.total_size - static_cast<uint64_t>(KEYRING_CHUNK_BYTES) * (c.count - 1);
     if (c.data.size() != expected_size) return std::nullopt;
     return c;
+}
+
+std::optional<PrekeyPut> decode_prekey_put(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto replace = read_u32(in.data(), in.size(), off);
+    auto generation = fixed_blob(in, off, PREKEY_GENERATION_BYTES);
+    auto count = read_u32(in.data(), in.size(), off);
+    if (!replace || *replace > 1 || !generation || !count || *count > MAX_PREKEYS_PER_PUT) return std::nullopt;
+    PrekeyPut m;
+    m.replace = *replace == 1;
+    m.generation = std::move(*generation);
+    int last_resorts = 0;
+    for (uint32_t i = 0; i < *count; i++) {
+        auto id = fixed_blob(in, off, PREKEY_ID_BYTES);
+        auto flag = read_u32(in.data(), in.size(), off);
+        auto blob = read_blob(in.data(), in.size(), off, MAX_PREKEY_BYTES);
+        if (!id || !flag || *flag > 1 || !blob || blob->empty()) return std::nullopt;
+        for (const auto& other : m.prekeys) if (other.id == *id) return std::nullopt;
+        if (*flag == 1 && ++last_resorts > 1) return std::nullopt;
+        m.prekeys.push_back({std::move(*id), *flag == 1, std::move(*blob)});
+    }
+    if (!at_end(in, off)) return std::nullopt;
+    return m;
+}
+std::optional<PrekeyTake> decode_prekey_take(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto mailbox = fixed_blob(in, off, MAILBOX_ID_BYTES);
+    auto token = fixed_blob(in, off, SEND_TOKEN_BYTES);
+    if (!mailbox || !token || !at_end(in, off)) return std::nullopt;
+    return PrekeyTake{std::move(*mailbox), std::move(*token)};
+}
+std::optional<PrekeyData> decode_prekey_data(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto flag = read_u32(in.data(), in.size(), off);
+    auto blob = read_blob(in.data(), in.size(), off, MAX_PREKEY_BYTES);
+    if (!flag || *flag > 1 || !blob || blob->empty() || !at_end(in, off)) return std::nullopt;
+    return PrekeyData{*flag == 1, std::move(*blob)};
+}
+std::optional<PrekeyStatus> decode_prekey_status(const std::vector<uint8_t>& in) {
+    size_t off = 0;
+    auto one_time = read_u32(in.data(), in.size(), off);
+    auto flag = read_u32(in.data(), in.size(), off);
+    auto generation = read_blob(in.data(), in.size(), off, PREKEY_GENERATION_BYTES);
+    if (!one_time || !flag || *flag > 1 || !generation || (!generation->empty() && generation->size() != PREKEY_GENERATION_BYTES) || !at_end(in, off)) return std::nullopt;
+    return PrekeyStatus{*one_time, *flag == 1, std::move(*generation)};
 }
 
 std::optional<FileBegin> decode_file_begin(const std::vector<uint8_t>& in) {

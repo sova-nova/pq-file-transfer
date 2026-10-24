@@ -50,7 +50,7 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - Code is compiled with `-Wall -Wextra -Wpedantic -Werror` against a fake liboqs and a small SQLite header shim, and the full suites run against those.
 - The Qt code (`chat_widget`, `main_window`) is only type-checked against a hand-written stub of the Qt classes. That catches typos and API mismatches in our own code, not Qt misuse.
 - **The first CI run is the real test** for the GUI, CMake, Windows and the real liboqs. If it fails, paste the compiler error.
-- Test totals at last run: **1,846 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 280, history 233, relay_protocol 172, relay_store 165, e2e 48, relay 228, chat 88, relay_setup 30, group 358). The group suite takes about twelve minutes. If a run is interrupted, check for a stray `pq-server` process (`pkill -x pq-server`) before the next: it can hold a port and make an unrelated suite fail once. The group suite takes about nine minutes. Run the suites one at a time: they pick ports from a shared range, and two at once can collide. The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
+- Test totals at last run: **1,927 checks, 0 failed** (sharing 117, keys 69, contacts 58, chat_formats 306, history 233, relay_protocol 190, relay_store 186, e2e 48, relay 244, chat 88, relay_setup 30, group 358; the group suite was last run before M6). The group suite takes about twelve minutes. If a run is interrupted, check for a stray `pq-server` process (`pkill -x pq-server`) before the next: it can hold a port and make an unrelated suite fail once. The group suite takes about nine minutes. Run the suites one at a time: they pick ports from a shared range, and two at once can collide. The group suite runs up to 18 real engines and takes a few minutes. The relay limits mailbox registrations to 10 per minute per address (hard-coded, separate from `--rate-limit`), so tests with many people wait out that window. Linux and macOS only for the process-spawning ones. `ctest --test-dir build --output-on-failure`.
 
 ## Operational facts and gotchas
 
@@ -76,6 +76,45 @@ The assistant's sandbox has **no Qt, no CMake, no real liboqs and no SQLite head
 - macOS build in CI; Windows code signing (SmartScreen warning).
 - **M3 groups** is complete (see "M3: decisions and build order" below). Next is **M4 archive and restore**, which removes the "history only on this device" limit; groups already keep their conversation as signed, hash-chained records, which is what the archive will store.
 - Known limits of M3 worth knowing: membership is fixed at creation (changing a group means making a new one linked to the old); if a group's creator is offline, members who aren't each other's contacts stay "setting up" until it returns; there is no forward secrecy or archive yet (M6, M4); the relay allows 10 mailbox registrations per minute per address.
+
+## M6: prekeys and forward secrecy (in progress; steps 1 and 2 of 5 done)
+
+Envelopes so far were sealed to the recipient's long-term ML-KEM key, so anyone who later got that key could open every envelope they had captured. M6 adds one-time prekeys (the design's stage B) and an X25519 hybrid, so an envelope can't be opened once its prekey's private half has been deleted, even with every long-term key.
+
+Decisions, settled with the maintainer:
+
+| # | Decision |
+|---|---|
+| 1 | **X25519 lives inside each prekey**, not in the identity bundle (a bundle is only sent with a first message, so existing contacts would never learn a new key in it; prekeys are fetched fresh for every envelope). Changed from the design. |
+| 2 | An envelope's key combines **three secrets**: the recipient's long-term ML-KEM key, the prekey's ML-KEM key, and an X25519 exchange with the prekey's X25519 key. |
+| 3 | A pool of about 100 signed prekeys on the recipient's own relay, topped up when fewer than 30 remain; the relay holds at most 200 per mailbox. |
+| 4 | When the pool is empty, a reusable **last-resort** prekey, rotated weekly (as strong as before plus X25519, but it is reused). |
+| 5 | All message envelopes use this, not only Private chats. Every client and relay must be updated together. |
+| 6 | The sender takes a prekey from the recipient's relay on the same connection it deposits on. Each prekey is signed by the recipient's identity key, so a relay can't swap in its own. |
+| 7 | Draining protection: a limit per send token, by default 60 takes an hour (a relay flag). |
+| 8 | Private halves live in a separate small store with secure deletion (overwrite, then remove), and are deleted only after the message has been safely stored, so a crash can't lose it. |
+| 9 | Private prekeys are **never** in the keyring or any backup. After a restore the app replaces the relay's pool with fresh prekeys. Messages sent with the old pool while a device is being restored can't be opened and are lost (any forward-secure design has this). |
+| 10 | No new screens; a notice if the pool had to be replaced. |
+
+**Limits to expect:** forward secrecy protects envelopes, **not archives** (a chat's archive on the relay is encrypted under a key every member holds, so someone who later steals one member's device could read that chat's archive); stage C (the ratchet, for recovery after a compromise) is not included.
+
+Build order: 1. crypto and formats (**done**); 2. relay prekey storage, put and take, limits (**done**); 3. the client's private-prekey store, replenishment, replacing the pool after a restore; 4. the engine: take, seal, open, delete after storing, fallbacks; 5. end-to-end and hostile tests (drained pool, a relay swapping a prekey, replay, a restore).
+
+**Step 2 as built** (`RelayStore`, `RelayService`, `RelayClient`; messages 0x70 to 0x75; relay schema 8, new tables only):
+
+- **Put** (mailbox sign-in, `PREKEY_PUT`): up to 12 prekeys a message (each about 4.6 KB), each an ID, a last-resort mark and the signed prekey as an opaque blob (the relay doesn't check signatures: the sender does, with the owner's identity key). A pool has a random **generation**: prekeys are added only while the relay's generation is the owner's (or there is none yet); `replace` throws the pool away and starts a new generation, which is how the app will recover after a restore. A new last-resort prekey replaces the old one. A batch that would take the one-time pool over the limit, or that repeats a prekey already there, is refused whole. The reply says what the relay now holds.
+- **Take** (no sign-in, `PREKEY_TAKE`): needs a valid send token for the mailbox, exactly as a deposit does, with the same answer for an unknown mailbox and a wrong token. It hands out the **oldest one-time prekey and removes it**, so each goes to one sender only; when none are left, the **last-resort** one, which is kept. Each send token may take a limited number an hour, counted in the relay's database (so it survives a restart), so one contact can't drain a pool.
+- **Status** (owner, `PREKEY_STATUS`): one-time prekeys left, whether there is a last-resort one, and the generation.
+- **Limits:** `--max-prekeys` (default 200 one-time prekeys a mailbox), `--prekey-takes-per-hour` (default 60 per send token). Removing a mailbox removes its pool; old hourly counts are swept.
+- **Verified:** wire-format tests with hostile inputs; store tests (ordering, one-time removal, last resort kept and replaced, generations, all-or-nothing batches, the hourly allowance per token, restart, removal with the mailbox); relay tests over the real protocol (sign-in needed to put; take with a send token and no sign-in; oldest first, then the last-resort one; the hourly limit; a wrong token, an unknown mailbox and another mailbox's token all refused alike; generation mismatch; the cap; replacing; pools kept apart per mailbox; restart). Two mutation checks (a taken one-time prekey not removed; the hourly allowance ignored) were caught.
+
+**Step 1 as built** (`client/prekey.{h,cpp}`, `CryptoEngine`, `envelope`):
+
+- **X25519** in `CryptoEngine` (`generate_x25519`, `x25519_shared`, through OpenSSL), checked against the RFC 7748 test vector; a key that forces an all-zero secret, or one of the wrong size, is refused.
+- **Prekeys** (`prekey::Prekey`): an ID, an ML-KEM public key, an X25519 public key, a last-resort mark, a date, and a signature by the owner's identity key over all of it (`prekey::generate`, `verify`, strict `encode` / `decode`). The private half (`prekey::Secret`) is separate, with its own encoding for the store in step 3. Changing anything in a prekey breaks its signature.
+- **Envelope version 2** (`seal_envelope(inner, key, &prekey)`, `open_envelope(envelope, key, lookup, &used_id)`): the header holds the long-term ML-KEM ciphertext, the prekey's ID, an ML-KEM ciphertext to the prekey, the sender's one-time X25519 public key and the nonce; the AES key is HKDF over all **three** shared secrets with the whole header as salt, and the header is also the authenticated data, so none of it can be changed. The sender wipes its one-time X25519 private key, so it can't reopen the envelope either. A version 2 envelope can only be opened if `lookup` finds the prekey's private half: delete that and it is gone for good. Version 1 envelopes (no prekey) are still produced and read, for a recipient with no prekeys yet and for envelopes already in flight. `envelope_prekey_id` says which prekey an envelope names without opening it; a prekey adds about 1.2 KB.
+- **Verified** (26 new checks): the standard X25519 answer; prekey signing and strict parsing; round trips; the long-term key alone, or the prekey alone, or the wrong half of the prekey (ML-KEM or X25519) cannot open an envelope; deleting the prekey makes it unopenable; a bit flipped anywhere, every truncation, trailing bytes, an unknown version, and an all-zero X25519 key are refused; a malformed prekey can't be sealed to. Two mutation checks (each new secret removed from the key derivation in turn) were caught.
+- **Not yet:** nothing uses prekeys; the relay and the engine still produce and read version 1 only.
 
 ## Planned GUI work (not scheduled yet)
 

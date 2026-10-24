@@ -73,6 +73,13 @@ public:
     // Needs sign-in. Cancels one of your unused invites, named by the hash the list gave.
     bool cancel_invite(const std::vector<uint8_t>& invite_hash, std::string& error);
 
+    // --- Prekeys (see relay_protocol.h) ---
+    // Needs a mailbox sign-in. On success `status` (if given) says what the relay now holds.
+    bool put_prekeys(const relay::PrekeyPut& put, relay::PrekeyStatus* status, std::string& error);
+    bool prekey_status(relay::PrekeyStatus& status, std::string& error);
+    // Needs no sign-in, only a send token for the mailbox. The prekey must still be checked against its owner's identity key.
+    bool take_prekey(const std::vector<uint8_t>& mailbox_id, const std::vector<uint8_t>& send_token, relay::PrekeyData& prekey, std::string& error);
+
     // --- Attachments (see relay_protocol.h). Chunks are passed one at a time, so a file is never held whole in memory. ---
     // Gives chunk `index` (of ciphertext); false stops the transfer.
     using FileChunkSource = std::function<bool(uint32_t index, std::vector<uint8_t>& chunk)>;

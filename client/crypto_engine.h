@@ -51,6 +51,16 @@ public:
     static KEMKeyPair generate_kem_keypair();
     static SigKeyPair generate_sig_keypair();
 
+    // X25519 (RFC 7748), used alongside ML-KEM so that nothing rests on one algorithm.
+    struct X25519KeyPair {
+        std::vector<uint8_t> public_key;
+        std::vector<uint8_t> private_key;
+    };
+    static X25519KeyPair generate_x25519();
+    // The shared secret between our private key and their public key. Throws if either has the wrong size or the result is
+    // the all-zero value that a low-order public key forces.
+    static std::vector<uint8_t> x25519_shared(const std::vector<uint8_t>& private_key, const std::vector<uint8_t>& peer_public_key);
+
     static EncapResult encapsulate(const std::vector<uint8_t>& public_key);
     static std::vector<uint8_t> decapsulate(const std::vector<uint8_t>& ciphertext,
                                             const std::vector<uint8_t>& private_key);

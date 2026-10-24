@@ -209,7 +209,7 @@ int main() {
         long long version = sqlite3_column_int64(st, 0);
         sqlite3_finalize(st);
         sqlite3_close(check);
-        CHECK(version == 7, "the schema version is now 7");
+        CHECK(version == 8, "the schema version is now 8");
         auto ms = migrated.members();
         CHECK(ms.size() == 1 && ms[0].invited_by.empty() && ms[0].envelopes == 2, "a mailbox from the first release shows as an operator invite, with its queued envelopes");
         CHECK(migrated.add_member_invite(box, id(0x71, 32), 10000, 20000, 2, 3) == RelayStore::IssueResult::Ok, "and it can vouch for a friend straight away");
@@ -281,6 +281,51 @@ int main() {
 
     }
 
+
+    std::cout << "Prekeys\n";
+    {
+        fs::path path = dir / "prekeys.db";
+        using P = RelayStore::PrekeyPutResult;
+        using T = RelayStore::PrekeyTakeResult;
+        const Bytes owner = id(1), other = id(2), g1 = id(0x61, 16), g2 = id(0x62, 16), tok = id(0x71, 32), tok2 = id(0x72, 32);
+        auto entry = [](uint8_t n, bool last) { return RelayStore::PrekeyEntryIn{id(n, 16), last, id(n, 100)}; };
+        RelayStore s(path);
+        s.add_invite(id(0xE1, 32), 99999);
+        s.add_invite(id(0xE2, 32), 99999);
+        s.register_mailbox(id(0xE1, 32), owner, id(0x55, 64), id(0xAA, 32), 1000, 10);
+        s.register_mailbox(id(0xE2, 32), other, id(0x55, 64), id(0xAB, 32), 1000, 10);
+        auto st = s.prekey_status(owner);
+        CHECK(st.one_time == 0 && !st.last_resort && st.generation.empty(), "a mailbox starts with no prekeys and no generation");
+        CHECK(s.put_prekeys(id(99), false, g1, {entry(1, false)}, 1000, 6) == P::NoSuchMailbox, "only a mailbox can hold prekeys");
+        CHECK(s.put_prekeys(owner, false, g1, {entry(1, false), entry(2, false), entry(3, false), entry(9, true)}, 1000, 6) == P::Ok, "the owner puts three one-time prekeys and a last-resort one");
+        st = s.prekey_status(owner);
+        CHECK(st.one_time == 3 && st.last_resort && st.generation == g1, "they are counted, and the pool has the owner's generation");
+        CHECK(s.put_prekeys(owner, false, g1, {entry(4, false), entry(5, false)}, 1001, 6) == P::Ok && s.prekey_status(owner).one_time == 5, "more can be added to the same generation");
+        CHECK(s.put_prekeys(owner, false, g2, {entry(6, false)}, 1002, 6) == P::WrongGeneration && s.prekey_status(owner).one_time == 5, "adding to a pool of another generation is refused: the owner must replace it");
+        CHECK(s.put_prekeys(owner, false, g1, {entry(1, false)}, 1002, 6) == P::Duplicate && s.prekey_status(owner).one_time == 5, "a batch with a prekey that is already there is refused whole");
+        CHECK(s.put_prekeys(owner, false, g1, {entry(6, false), entry(7, false)}, 1002, 6) == P::TooMany && s.prekey_status(owner).one_time == 5, "a batch that would go over the limit (6 here) is refused whole");
+        Bytes blob;
+        bool last = true;
+        CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && blob == id(1, 100) && !last && s.prekey_status(owner).one_time == 4, "a take hands out the oldest one-time prekey and removes it");
+        for (int i = 0; i < 4; i++) s.take_prekey(owner, tok, 3600 * 10, 7, blob, last);
+        CHECK(blob == id(5, 100) && s.prekey_status(owner).one_time == 0, "they come out oldest first, each once");
+        CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && last && blob == id(9, 100) && s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::Ok && last && s.prekey_status(owner).last_resort,
+              "with none left, the last-resort prekey is handed out, and kept");
+        CHECK(s.take_prekey(owner, tok, 3600 * 10, 7, blob, last) == T::RateLimited, "a token may take only so many an hour (7 here)");
+        CHECK(s.take_prekey(owner, tok2, 3600 * 10, 7, blob, last) == T::Ok && s.take_prekey(owner, tok, 3600 * 11, 7, blob, last) == T::Ok, "another token has its own allowance, and the next hour the first one is allowed again");
+        s.sweep_prekey_takes(3600 * 12);
+        CHECK(s.take_prekey(owner, tok, 3600 * 12, 1, blob, last) == T::Ok, "(old hours are forgotten)");
+        CHECK(s.put_prekeys(owner, false, g1, {entry(20, true)}, 1003, 6) == P::Ok && s.take_prekey(owner, tok2, 3600 * 13, 7, blob, last) == T::Ok && blob == id(20, 100) && s.prekey_status(owner).last_resort,
+              "a new last-resort prekey replaces the old one");
+        CHECK(s.put_prekeys(owner, true, g2, {entry(30, false), entry(31, true)}, 1004, 6) == P::Ok, "after a restore the owner replaces the whole pool with a new generation");
+        st = s.prekey_status(owner);
+        CHECK(st.one_time == 1 && st.last_resort && st.generation == g2 && s.take_prekey(owner, tok2, 3600 * 14, 7, blob, last) == T::Ok && blob == id(30, 100), "only the new prekeys are left");
+        CHECK(s.put_prekeys(owner, true, g1, {}, 1005, 6) == P::Ok && s.prekey_status(owner).one_time == 0 && !s.prekey_status(owner).last_resort, "replacing with none clears the pool");
+        CHECK(s.take_prekey(owner, tok2, 3600 * 15, 7, blob, last) == T::Empty, "and then there is nothing to take");
+        s.put_prekeys(other, false, g1, {entry(40, false)}, 1006, 6);
+        { RelayStore again(path); CHECK(again.prekey_status(other).one_time == 1, "prekeys survive a restart"); }
+        CHECK(s.delete_mailbox(other) && s.prekey_status(other).one_time == 0 && s.prekey_status(other).generation.empty(), "removing a mailbox removes its prekeys and generation");
+    }
 
     std::cout << "Attachments\n";
     {

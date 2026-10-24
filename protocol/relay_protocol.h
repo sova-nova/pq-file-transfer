@@ -234,6 +234,43 @@ struct FileStatus {
     bool ready = false;             // fully uploaded
 };
 
+// --- Prekeys ---
+//
+// The relay holds each mailbox's prekeys as opaque signed blobs (the sender checks the signature, with the owner's identity
+// key, which the relay doesn't need). A take hands out the oldest one-time prekey and forgets it; when there are none left,
+// the mailbox's one last-resort prekey, which is kept. A take needs a valid send token for the mailbox, like a deposit, and
+// each token may only take so many an hour, so one contact can't drain the pool. A pool has a random generation: the owner
+// adds to it only while the relay's generation is still theirs, and replaces it whole after a restore (when its private
+// halves are gone).
+constexpr size_t PREKEY_ID_BYTES = 16;
+constexpr size_t PREKEY_GENERATION_BYTES = 16;
+constexpr size_t MAX_PREKEY_BYTES = 8192;     // one encoded, signed prekey
+constexpr size_t MAX_PREKEYS_PER_PUT = 12;    // so a put fits in one relay message
+
+struct PrekeyEntry {
+    std::vector<uint8_t> id;  // PREKEY_ID_BYTES, the prekey's own ID
+    bool last_resort = false;
+    std::vector<uint8_t> blob;  // the encoded, signed prekey (1 to MAX_PREKEY_BYTES)
+};
+struct PrekeyPut {
+    bool replace = false;              // throw away everything the relay holds for this mailbox first
+    std::vector<uint8_t> generation;   // PREKEY_GENERATION_BYTES
+    std::vector<PrekeyEntry> prekeys;  // 0 to MAX_PREKEYS_PER_PUT, IDs all different, at most one last-resort
+};
+struct PrekeyTake {
+    std::vector<uint8_t> mailbox_id;
+    std::vector<uint8_t> send_token;   // the secret itself, as for a deposit
+};
+struct PrekeyData {
+    bool last_resort = false;
+    std::vector<uint8_t> blob;
+};
+struct PrekeyStatus {
+    uint32_t one_time = 0;             // one-time prekeys left
+    bool last_resort = false;          // whether there is a last-resort one
+    std::vector<uint8_t> generation;   // empty if the mailbox has never had any
+};
+
 // --- Encoding. decode_* validate every length and reject trailing bytes. ---
 
 std::vector<uint8_t> encode(const Hello&);
@@ -254,6 +291,10 @@ std::vector<uint8_t> encode(const ArchiveFetch&);
 std::vector<uint8_t> encode(const ArchiveEntry&);
 std::vector<uint8_t> encode(const KeyringChunk&);
 std::vector<uint8_t> encode(const ArchiveDelete&);
+std::vector<uint8_t> encode(const PrekeyPut&);
+std::vector<uint8_t> encode(const PrekeyTake&);
+std::vector<uint8_t> encode(const PrekeyData&);
+std::vector<uint8_t> encode(const PrekeyStatus&);
 std::vector<uint8_t> encode(const FileBegin&);
 std::vector<uint8_t> encode(const FileChunk&);
 std::vector<uint8_t> encode(const FileDownload&);
@@ -285,6 +326,10 @@ std::optional<KeyringChunk> decode_keyring_chunk(const std::vector<uint8_t>&);
 std::optional<ArchiveDelete> decode_archive_delete(const std::vector<uint8_t>&);
 // A begin is valid only if its numbers fit together: the chunk count is what the total and chunk size
 // need, chunks are neither tiny nor over a message's worth, and every recipient's token hash is different.
+std::optional<PrekeyPut> decode_prekey_put(const std::vector<uint8_t>&);
+std::optional<PrekeyTake> decode_prekey_take(const std::vector<uint8_t>&);
+std::optional<PrekeyData> decode_prekey_data(const std::vector<uint8_t>&);
+std::optional<PrekeyStatus> decode_prekey_status(const std::vector<uint8_t>&);
 std::optional<FileBegin> decode_file_begin(const std::vector<uint8_t>&);
 std::optional<FileChunk> decode_file_chunk(const std::vector<uint8_t>&);
 std::optional<FileDownload> decode_file_download(const std::vector<uint8_t>&);

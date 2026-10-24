@@ -273,6 +273,42 @@ int main() {
               "what each member signs covers the relay, the chat, the scope, the operation, the expiry and the entries in order");
     }
 
+    std::cout << "Prekey payloads\n";
+    {
+        PrekeyPut put;
+        put.replace = true;
+        put.generation = fill(9, PREKEY_GENERATION_BYTES);
+        put.prekeys = {{fill(1, 16), false, fill(2, 4600)}, {fill(3, 16), true, fill(4, 4600)}};
+        auto pe = encode(put);
+        auto back = decode_prekey_put(pe);
+        CHECK(back && back->replace && back->generation == put.generation && back->prekeys.size() == 2 && back->prekeys[1].last_resort && back->prekeys[0].blob == put.prekeys[0].blob, "a prekey upload round trips");
+        check_framing("prekey put", pe, decode_prekey_put);
+        fuzz("prekey put", pe, decode_prekey_put);
+        auto bad = [&](const std::function<void(PrekeyPut&)>& f) { PrekeyPut x = put; f(x); return !decode_prekey_put(encode(x)); };
+        CHECK(bad([&](PrekeyPut& x) { x.prekeys[1].id = x.prekeys[0].id; }) && bad([&](PrekeyPut& x) { x.prekeys[0].last_resort = true; }) && bad([&](PrekeyPut& x) { x.prekeys[0].blob.clear(); }) &&
+                  bad([&](PrekeyPut& x) { x.prekeys[0].blob = fill(1, MAX_PREKEY_BYTES + 1); }) && bad([&](PrekeyPut& x) { x.generation.pop_back(); }) && bad([&](PrekeyPut& x) { x.prekeys[0].id.pop_back(); }) &&
+                  bad([&](PrekeyPut& x) { x.prekeys.assign(MAX_PREKEYS_PER_PUT + 1, x.prekeys[0]); for (size_t i = 0; i < x.prekeys.size(); i++) x.prekeys[i].id = fill(static_cast<uint8_t>(i + 20), 16); }),
+              "two prekeys with one ID, two last-resort ones, an empty or oversized prekey, a short generation or ID, or more than 12 in one upload are rejected");
+        PrekeyPut clear;
+        clear.replace = true;
+        clear.generation = fill(9, PREKEY_GENERATION_BYTES);
+        CHECK(decode_prekey_put(encode(clear)) && decode_prekey_put(encode(clear))->prekeys.empty(), "an upload of none (to clear the pool) is allowed");
+        auto te = encode(PrekeyTake{fill(1, MAILBOX_ID_BYTES), fill(2, SEND_TOKEN_BYTES)});
+        CHECK(decode_prekey_take(te) && !decode_prekey_take(encode(PrekeyTake{fill(1, MAILBOX_ID_BYTES - 1), fill(2, SEND_TOKEN_BYTES)})) && !decode_prekey_take(encode(PrekeyTake{fill(1, MAILBOX_ID_BYTES), fill(2, 31)})),
+              "a take round trips, and needs a full mailbox ID and send token");
+        check_framing("prekey take", te, decode_prekey_take);
+        fuzz("prekey take", te, decode_prekey_take);
+        auto de = encode(PrekeyData{true, fill(3, 4600)});
+        CHECK(decode_prekey_data(de) && decode_prekey_data(de)->last_resort && !decode_prekey_data(encode(PrekeyData{false, Bytes()})), "a prekey handed out round trips, and can't be empty");
+        check_framing("prekey data", de, decode_prekey_data);
+        fuzz("prekey data", de, decode_prekey_data);
+        auto se = encode(PrekeyStatus{57, true, fill(9, 16)});
+        CHECK(decode_prekey_status(se) && decode_prekey_status(se)->one_time == 57 && decode_prekey_status(encode(PrekeyStatus{0, false, Bytes()})) && !decode_prekey_status(encode(PrekeyStatus{0, false, fill(9, 15)})),
+              "a status round trips, with a full generation or none at all");
+        check_framing("prekey status", se, decode_prekey_status);
+        fuzz("prekey status", se, decode_prekey_status);
+    }
+
     std::cout << "Attachment payloads\n";
     {
         auto begin = [&](uint64_t total, uint32_t chunk, uint32_t count, size_t tokens) {

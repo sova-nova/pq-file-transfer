@@ -1,6 +1,7 @@
 // Tests for signed message records and sealed envelopes.
 #include "archive.h"
 #include "attachment.h"
+#include "prekey.h"
 #include "crypto_engine.h"
 #include "keyring.h"
 #include "envelope.h"
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <set>
 #include <iostream>
 #include <string>
@@ -1160,6 +1162,132 @@ int main() {
         Bytes version4 = encoded; version4[3] = 4;
         CHECK(prefixes && !decode_inner(trailing) && !decode_inner(version4), "every truncation, trailing bytes and a version this build doesn't know are rejected");
         (void)dup;
+    }
+
+    std::cout << "X25519\n";
+    {
+        auto unhex = [](const std::string& h) { return *hex_to_bytes(h); };
+        // RFC 7748, section 6.1
+        const Bytes a_priv = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"), a_pub = unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        const Bytes b_priv = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"), b_pub = unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        const Bytes shared = unhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+        CHECK(CryptoEngine::x25519_shared(a_priv, b_pub) == shared && CryptoEngine::x25519_shared(b_priv, a_pub) == shared, "X25519 gives the standard test answer, from both sides (RFC 7748)");
+        auto k1 = CryptoEngine::generate_x25519(), k2 = CryptoEngine::generate_x25519();
+        CHECK(k1.public_key.size() == 32 && k1.private_key.size() == 32 && k1.public_key != k2.public_key && CryptoEngine::x25519_shared(k1.private_key, k2.public_key) == CryptoEngine::x25519_shared(k2.private_key, k1.public_key),
+              "made keys are different, and any two agree on a secret");
+        CHECK(throws([&] { CryptoEngine::x25519_shared(k1.private_key, Bytes(32, 0)); }) && throws([&] { CryptoEngine::x25519_shared(k1.private_key, Bytes(31, 1)); }) && throws([&] { CryptoEngine::x25519_shared(Bytes(31, 1), k2.public_key); }),
+              "a public key that forces an all-zero secret, or a key of the wrong size, is refused");
+    }
+
+    std::cout << "Prekeys\n";
+    {
+        auto identity = CryptoEngine::generate_sig_keypair();
+        auto other_identity = CryptoEngine::generate_sig_keypair();
+        auto g = prekey::generate(identity.private_key, false, 1700000000);
+        CHECK(g.prekey.id.size() == 16 && g.prekey.kem_public.size() == CryptoEngine::kem_public_key_size() && g.prekey.x25519_public.size() == 32 && !g.prekey.last_resort && g.prekey.created_at == 1700000000 &&
+                  g.secret.kem_private.size() == CryptoEngine::kem_secret_key_size() && g.secret.x25519_private.size() == 32,
+              "a prekey has an ID, an ML-KEM key and an X25519 key, and its private halves are kept apart");
+        CHECK(prekey::verify(g.prekey, identity.public_key) && !prekey::verify(g.prekey, other_identity.public_key), "it verifies under its owner's identity key and nobody else's");
+        auto g2 = prekey::generate(identity.private_key, true, 5);
+        CHECK(g2.prekey.last_resort && prekey::verify(g2.prekey, identity.public_key) && g2.prekey.id != g.prekey.id && g2.prekey.kem_public != g.prekey.kem_public, "a last-resort prekey is marked, and different");
+        auto altered = [&](const std::function<void(prekey::Prekey&)>& f) { prekey::Prekey x = g.prekey; f(x); return prekey::verify(x, identity.public_key); };
+        CHECK(!altered([](prekey::Prekey& x) { x.id[0] ^= 1; }) && !altered([](prekey::Prekey& x) { x.kem_public[100] ^= 1; }) && !altered([](prekey::Prekey& x) { x.x25519_public[5] ^= 1; }) &&
+                  !altered([](prekey::Prekey& x) { x.last_resort = true; }) && !altered([](prekey::Prekey& x) { x.created_at++; }) && !altered([](prekey::Prekey& x) { x.signature[10] ^= 1; }) &&
+                  !altered([](prekey::Prekey& x) { x.signature.clear(); }) && !altered([](prekey::Prekey& x) { x.kem_public.pop_back(); }) && !altered([](prekey::Prekey& x) { x.x25519_public.push_back(0); }),
+              "changing anything in it (ID, either key, the last-resort mark, its date, the signature) breaks the signature: a relay can't alter or make up a prekey");
+        const Bytes e = prekey::encode(g.prekey);
+        auto back = prekey::decode(e);
+        CHECK(back && back->id == g.prekey.id && back->kem_public == g.prekey.kem_public && back->x25519_public == g.prekey.x25519_public && back->signature == g.prekey.signature && back->created_at == 1700000000 && prekey::verify(*back, identity.public_key),
+              "a prekey round trips through its encoding and still verifies");
+        bool prefixes = true;
+        for (size_t n = 0; n < e.size(); n += 37)
+            if (prekey::decode(Bytes(e.begin(), e.begin() + static_cast<std::ptrdiff_t>(n)))) prefixes = false;
+        Bytes trailing = e; trailing.push_back(0);
+        Bytes bad_flag = e;
+        const size_t flag_at = e.size() - g.prekey.signature.size() - 4 - 8 - 1;  // the byte before the date, which is before the signature
+        bad_flag[flag_at] = 2;
+        CHECK(prefixes && !prekey::decode(trailing) && !prekey::decode(bad_flag) && !prekey::decode(Bytes()) && !prekey::decode(Bytes(5000, 7)), "every truncation, trailing bytes, a last-resort mark that isn't 0 or 1, and rubbish are rejected");
+        prekey::Prekey short_id = g.prekey;
+        short_id.id.pop_back();
+        CHECK(throws([&] { prekey::encode(short_id); }), "a malformed prekey can't be encoded");
+        auto sec = prekey::decode_secret(prekey::encode_secret(g.secret));
+        CHECK(sec && sec->kem_private == g.secret.kem_private && sec->x25519_private == g.secret.x25519_private && !prekey::decode_secret(Bytes(10, 1)) && !prekey::decode_secret(Bytes()), "the private half round trips, and rubbish isn't accepted");
+        Bytes sec_trailing = prekey::encode_secret(g.secret);
+        sec_trailing.push_back(1);
+        CHECK(!prekey::decode_secret(sec_trailing), "(nor trailing bytes)");
+    }
+
+    std::cout << "Envelopes with a one-time prekey\n";
+    {
+        auto identity = CryptoEngine::generate_sig_keypair();
+        auto pk = prekey::generate(identity.private_key, false, 1700000000);
+        auto other = prekey::generate(identity.private_key, false, 1700000001);
+        std::map<Bytes, prekey::Secret> vault;
+        vault[pk.prekey.id] = pk.secret;
+        vault[other.prekey.id] = other.secret;
+        chat::PrekeyLookup lookup = [&](const Bytes& id) -> std::optional<prekey::Secret> { auto it = vault.find(id); if (it == vault.end()) return std::nullopt; return it->second; };
+
+        Inner in;
+        in.records = {CryptoEngine::random_bytes(300)};
+        in.grants = {{CryptoEngine::random_bytes(16), CryptoEngine::random_bytes(32), CryptoEngine::random_bytes(32)}};
+        const Bytes v1 = seal_envelope(in, bob.kem.public_key);
+        const Bytes v2 = seal_envelope(in, bob.kem.public_key, &pk.prekey);
+        CHECK(!envelope_prekey_id(v1) && envelope_prekey_id(v2) && *envelope_prekey_id(v2) == pk.prekey.id, "a version 2 envelope names its prekey, and a version 1 doesn't");
+        Bytes used;
+        auto opened = open_envelope(v2, bob.kem.private_key, lookup, &used);
+        CHECK(opened && opened->records == in.records && opened->grants.size() == 1 && opened->grants[0].key == in.grants[0].key && used == pk.prekey.id, "with the prekey's private half it opens, intact, and says which prekey it used");
+        auto old_way = open_envelope(v1, bob.kem.private_key);
+        Bytes none_used;
+        CHECK(old_way && old_way->records == in.records && open_envelope(v1, bob.kem.private_key, lookup, &none_used) && none_used.empty(), "a version 1 envelope still opens, with no prekey involved");
+        CHECK(v2.size() > v1.size() + 1000 && v2.size() < v1.size() + 1600, "a prekey adds about 1.2 KB to an envelope");
+        CHECK(seal_envelope(in, bob.kem.public_key, &pk.prekey) != v2, "sealing the same message again to the same prekey gives a different envelope (a fresh one-time X25519 key each time)");
+
+        // Forward secrecy: the long-term key alone is not enough.
+        CHECK(!open_envelope(v2, bob.kem.private_key, nullptr) && !open_envelope(v2, bob.kem.private_key), "with the long-term key but no way to find the prekey, it can't be opened");
+        vault.erase(pk.prekey.id);
+        CHECK(!open_envelope(v2, bob.kem.private_key, lookup), "once the prekey's private half is deleted, an envelope sealed to it can't be opened, long-term key or no: forward secrecy");
+        CHECK(open_envelope(seal_envelope(in, bob.kem.public_key, &other.prekey), bob.kem.private_key, lookup), "(a different prekey, still held, still works)");
+        vault[pk.prekey.id] = pk.secret;
+        // Each of the three secrets is needed.
+        CHECK(!open_envelope(v2, mallory.kem.private_key, lookup), "the prekey without the long-term key isn't enough either");
+        auto wrong_kem = [&](const Bytes&) -> std::optional<prekey::Secret> { return prekey::Secret{other.secret.kem_private, pk.secret.x25519_private}; };
+        auto wrong_x = [&](const Bytes&) -> std::optional<prekey::Secret> { return prekey::Secret{pk.secret.kem_private, other.secret.x25519_private}; };
+        auto wrong_both = [&](const Bytes&) -> std::optional<prekey::Secret> { return other.secret; };
+        CHECK(!open_envelope(v2, bob.kem.private_key, wrong_kem) && !open_envelope(v2, bob.kem.private_key, wrong_x) && !open_envelope(v2, bob.kem.private_key, wrong_both),
+              "with the wrong ML-KEM half of the prekey, or the wrong X25519 half, it can't be opened: both are needed, as well as the long-term key");
+
+        // Tampering: any change to the header or the body is caught.
+        int accepted = 0, tried = 0;
+        for (size_t i = 0; i < v2.size(); i += 17) {
+            Bytes bad = v2;
+            bad[i] ^= 1;
+            tried++;
+            if (open_envelope(bad, bob.kem.private_key, lookup)) accepted++;
+        }
+        CHECK(accepted == 0 && tried > 100, "changing a bit anywhere (the version, the ciphertexts, the prekey's ID, the sender's X25519 key, the nonce, the body) means it won't open");
+        Bytes zero_x = v2;
+        const size_t eph_at = v2.size() - 1 - 0;  // placeholder, replaced below
+        (void)eph_at;
+        size_t off = 0;
+        read_u32(v2.data(), v2.size(), off);
+        read_blob(v2.data(), v2.size(), off, 4096);
+        read_blob(v2.data(), v2.size(), off, 16);
+        read_blob(v2.data(), v2.size(), off, 4096);
+        read_u32(v2.data(), v2.size(), off);  // the length of the X25519 key
+        for (size_t i = 0; i < 32; i++) zero_x[off + i] = 0;
+        CHECK(!open_envelope(zero_x, bob.kem.private_key, lookup), "a sender's X25519 key that forces an all-zero secret is refused");
+        bool prefixes = true;
+        for (size_t n = 0; n < v2.size(); n += 97)
+            if (open_envelope(Bytes(v2.begin(), v2.begin() + static_cast<std::ptrdiff_t>(n)), bob.kem.private_key, lookup)) prefixes = false;
+        Bytes trailing = v2; trailing.push_back(0);
+        Bytes version3 = v2; version3[3] = 3;
+        CHECK(prefixes && !open_envelope(trailing, bob.kem.private_key, lookup) && !open_envelope(version3, bob.kem.private_key, lookup) && !envelope_prekey_id(Bytes(v2.begin(), v2.begin() + 10)),
+              "every truncation, trailing bytes and an unknown version are refused");
+        prekey::Prekey bad_prekey = pk.prekey;
+        bad_prekey.id.pop_back();
+        prekey::Prekey bad_x = pk.prekey;
+        bad_x.x25519_public.pop_back();
+        CHECK(throws([&] { seal_envelope(in, bob.kem.public_key, &bad_prekey); }) && throws([&] { seal_envelope(in, bob.kem.public_key, &bad_x); }), "a malformed prekey can't be sealed to");
     }
 
     std::cout << "The inside of an envelope: versions and hostile input\n";

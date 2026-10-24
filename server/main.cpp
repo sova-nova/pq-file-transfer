@@ -497,6 +497,8 @@ static void print_usage(const char* prog) {
               << "  --max-archives N            chat archives the relay will hold (default 1000)\n"
               << "  --archive-quota-mib N       encrypted bytes allowed per chat archive (default 512)\n"
               << "  --keyring-max-kib N         largest keyring one mailbox may store (default 4096)\n"
+              << "  --max-prekeys N             one-time prekeys one mailbox may keep (default 200)\n"
+              << "  --prekey-takes-per-hour N   prekeys one send token may take in an hour (default 60)\n"
               << "  --max-attachment-mib N      largest single attachment (default 1024)\n"
               << "  --attachment-quota-mib N    all of one mailbox's stored attachments together (default 4096)\n"
               << "  --attachment-max-days N     how long an attachment may be kept for (default 30)\n"
@@ -574,6 +576,10 @@ int main(int argc, char* argv[]) {
                 with_invitees = true;
             } else if (arg == "--max-archives" && has_value) {
                 limits.max_archives = std::stoull(argv[++i]);
+            } else if (arg == "--max-prekeys" && has_value) {
+                limits.max_prekeys = static_cast<uint32_t>(std::stoul(argv[++i]));
+            } else if (arg == "--prekey-takes-per-hour" && has_value) {
+                limits.prekey_takes_per_hour = static_cast<uint32_t>(std::stoul(argv[++i]));
             } else if (arg == "--max-attachment-mib" && has_value) {
                 limits.max_attachment_bytes = std::stoull(argv[++i]) * 1024 * 1024;
             } else if (arg == "--attachment-quota-mib" && has_value) {

@@ -50,6 +50,13 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
          "  token_hash BLOB);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_mailbox ON envelopes(mailbox_id, seq);"
          "CREATE INDEX IF NOT EXISTS envelopes_by_expiry ON envelopes(expires_at);"
+         // Version 8: prekeys (opaque signed blobs), each mailbox's pool generation, and takes counted per token per hour.
+         "CREATE TABLE IF NOT EXISTS prekey_pools("
+         "  mailbox_id BLOB PRIMARY KEY REFERENCES mailboxes(id) ON DELETE CASCADE, generation BLOB NOT NULL);"
+         "CREATE TABLE IF NOT EXISTS prekeys("
+         "  mailbox_id BLOB NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE, id BLOB NOT NULL, blob BLOB NOT NULL,"
+         "  last_resort INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(mailbox_id, id));"
+         "CREATE TABLE IF NOT EXISTS prekey_takes(token_hash BLOB NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(token_hash, hour));"
          // Version 7: attachments. A file's record and its recipients' token hashes (the bytes are on disk).
          "CREATE TABLE IF NOT EXISTS files("
          "  id BLOB PRIMARY KEY,"
@@ -108,7 +115,7 @@ RelayStore::RelayStore(const std::filesystem::path& db_path) {
         exec(db_, "ALTER TABLE mailboxes ADD COLUMN invited_by BLOB");
     }
     if (version == 4 || version == 5) exec(db_, "ALTER TABLE archive_entries ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0");
-    if (version < 7) exec(db_, "PRAGMA user_version=7");
+    if (version < 8) exec(db_, "PRAGMA user_version=8");
 }
 
 RelayStore::~RelayStore() { sqlite3_close(db_); }
@@ -335,6 +342,111 @@ size_t RelayStore::envelope_count(const Bytes& mailbox_id) {
 }
 
 // --- Chat archives ---
+
+RelayStore::PrekeyPutResult RelayStore::put_prekeys(const Bytes& mailbox_id, bool replace, const Bytes& generation, const std::vector<PrekeyEntryIn>& prekeys,
+                                                     int64_t now, uint32_t max_one_time) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    {
+        Stmt m(db_, "SELECT 1 FROM mailboxes WHERE id = ?");
+        m.blob(1, mailbox_id);
+        if (!m.step()) return PrekeyPutResult::NoSuchMailbox;
+    }
+    std::optional<Bytes> current;
+    {
+        Stmt g(db_, "SELECT generation FROM prekey_pools WHERE mailbox_id = ?");
+        g.blob(1, mailbox_id);
+        if (g.step()) current = g.column_blob(0);
+    }
+    if (replace) {
+        Stmt(db_, "DELETE FROM prekeys WHERE mailbox_id = ?").blob(1, mailbox_id).step();
+    } else if (current && *current != generation) {
+        return PrekeyPutResult::WrongGeneration;
+    }
+    Stmt(db_, "INSERT INTO prekey_pools(mailbox_id, generation) VALUES(?, ?) ON CONFLICT(mailbox_id) DO UPDATE SET generation = excluded.generation")
+        .blob(1, mailbox_id).blob(2, generation).step();
+    int64_t one_time = 0;
+    {
+        Stmt c(db_, "SELECT COUNT(*) FROM prekeys WHERE mailbox_id = ? AND last_resort = 0");
+        c.blob(1, mailbox_id);
+        if (c.step()) one_time = c.column_i64(0);
+    }
+    for (const auto& p : prekeys) if (!p.last_resort) one_time++;
+    if (one_time > static_cast<int64_t>(max_one_time)) return PrekeyPutResult::TooMany;
+    for (const auto& p : prekeys) {
+        Stmt e(db_, "SELECT 1 FROM prekeys WHERE mailbox_id = ? AND id = ?");
+        e.blob(1, mailbox_id).blob(2, p.id);
+        if (e.step()) return PrekeyPutResult::Duplicate;
+    }
+    for (const auto& p : prekeys) {
+        if (p.last_resort) Stmt(db_, "DELETE FROM prekeys WHERE mailbox_id = ? AND last_resort = 1").blob(1, mailbox_id).step();
+        Stmt(db_, "INSERT INTO prekeys(mailbox_id, id, blob, last_resort, created_at) VALUES(?, ?, ?, ?, ?)")
+            .blob(1, mailbox_id).blob(2, p.id).blob(3, p.blob).i64(4, p.last_resort ? 1 : 0).i64(5, now).step();
+    }
+    tx.commit();
+    return PrekeyPutResult::Ok;
+}
+
+RelayStore::PrekeyTakeResult RelayStore::take_prekey(const Bytes& mailbox_id, const Bytes& token_hash, int64_t now, uint32_t per_hour, Bytes& blob, bool& last_resort) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Transaction tx(db_);
+    const int64_t hour = now / 3600;
+    int64_t taken = 0;
+    {
+        Stmt c(db_, "SELECT count FROM prekey_takes WHERE token_hash = ? AND hour = ?");
+        c.blob(1, token_hash).i64(2, hour);
+        if (c.step()) taken = c.column_i64(0);
+    }
+    if (taken >= static_cast<int64_t>(per_hour)) return PrekeyTakeResult::RateLimited;
+    Stmt(db_, "INSERT INTO prekey_takes(token_hash, hour, count) VALUES(?, ?, 1) ON CONFLICT(token_hash, hour) DO UPDATE SET count = count + 1")
+        .blob(1, token_hash).i64(2, hour).step();
+    {
+        Stmt o(db_, "SELECT id, blob FROM prekeys WHERE mailbox_id = ? AND last_resort = 0 ORDER BY created_at, rowid LIMIT 1");
+        o.blob(1, mailbox_id);
+        if (o.step()) {
+            const Bytes id = o.column_blob(0);
+            blob = o.column_blob(1);
+            last_resort = false;
+            Stmt(db_, "DELETE FROM prekeys WHERE mailbox_id = ? AND id = ?").blob(1, mailbox_id).blob(2, id).step();  // a one-time key goes to one sender only
+            tx.commit();
+            return PrekeyTakeResult::Ok;
+        }
+    }
+    {
+        Stmt l(db_, "SELECT blob FROM prekeys WHERE mailbox_id = ? AND last_resort = 1");
+        l.blob(1, mailbox_id);
+        if (l.step()) {
+            blob = l.column_blob(0);
+            last_resort = true;
+            tx.commit();
+            return PrekeyTakeResult::Ok;
+        }
+    }
+    tx.commit();
+    return PrekeyTakeResult::Empty;
+}
+
+RelayStore::PrekeyPoolStatus RelayStore::prekey_status(const Bytes& mailbox_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    PrekeyPoolStatus st;
+    {
+        Stmt c(db_, "SELECT COALESCE(SUM(last_resort = 0), 0), COALESCE(SUM(last_resort = 1), 0) FROM prekeys WHERE mailbox_id = ?");
+        c.blob(1, mailbox_id);
+        if (c.step()) {
+            st.one_time = static_cast<uint32_t>(c.column_i64(0));
+            st.last_resort = c.column_i64(1) > 0;
+        }
+    }
+    Stmt g(db_, "SELECT generation FROM prekey_pools WHERE mailbox_id = ?");
+    g.blob(1, mailbox_id);
+    if (g.step()) st.generation = g.column_blob(0);
+    return st;
+}
+
+void RelayStore::sweep_prekey_takes(int64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stmt(db_, "DELETE FROM prekey_takes WHERE hour < ?").i64(1, now / 3600).step();
+}
 
 RelayStore::BeginFileResult RelayStore::begin_file(const Bytes& owner, const Bytes& file_id, uint64_t total_size, uint32_t chunk_size, uint32_t chunk_count,
                                                    int64_t expires_at, const std::vector<Bytes>& token_hashes, int64_t now, uint64_t quota_bytes) {

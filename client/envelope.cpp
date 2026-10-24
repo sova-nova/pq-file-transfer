@@ -11,11 +11,13 @@ namespace chat {
 
 namespace {
 
-constexpr uint32_t ENVELOPE_VERSION = 1;
+constexpr uint32_t ENVELOPE_VERSION = 1;     // long-term key only
+constexpr uint32_t ENVELOPE_VERSION_2 = 2;   // with a one-time prekey and X25519
 constexpr uint32_t INNER_VERSION = 3;      // the newest understood; encode_inner writes 2 unless there are attachment grants
 constexpr uint32_t MIN_INNER_VERSION = 1;  // the oldest still read
 const char ENVELOPE_AAD_LABEL[] = "pq-suite v3 envelope";
 const char ENVELOPE_KEY_INFO[] = "pq-suite v3 envelope key";
+const char ENVELOPE_KEY_INFO_2[] = "pq-suite v3 envelope key v2";
 const size_t BUCKETS[] = {1024, 4096, 16384, 65536};
 
 Bytes header_bytes(const Bytes& kem_ciphertext, const Bytes& nonce) {
@@ -31,6 +33,28 @@ Bytes aad_for(const Bytes& header) {
     write_string(a, ENVELOPE_AAD_LABEL);
     write_bytes(a, header.data(), header.size());
     return a;
+}
+
+// Version 2: the prekey's ID, its ML-KEM ciphertext, and the sender's one-time X25519 public key are all in the header, which is
+// authenticated and also feeds the key, so none of them can be changed.
+Bytes header_bytes_2(const Bytes& kem_ciphertext, const Bytes& prekey_id, const Bytes& prekey_ciphertext, const Bytes& ephemeral_public, const Bytes& nonce) {
+    Bytes h;
+    write_u32(h, ENVELOPE_VERSION_2);
+    write_blob(h, kem_ciphertext);
+    write_blob(h, prekey_id);
+    write_blob(h, prekey_ciphertext);
+    write_blob(h, ephemeral_public);
+    write_blob(h, nonce);
+    return h;
+}
+
+Bytes derive_key_2(const Bytes& long_term, const Bytes& prekey_secret, const Bytes& x25519_secret, const Bytes& header) {
+    Bytes ikm = long_term;
+    ikm.insert(ikm.end(), prekey_secret.begin(), prekey_secret.end());
+    ikm.insert(ikm.end(), x25519_secret.begin(), x25519_secret.end());
+    Bytes key = CryptoEngine::hkdf_sha256(ikm, CryptoEngine::sha256(header), ENVELOPE_KEY_INFO_2, 32);
+    CryptoEngine::secure_wipe(ikm);
+    return key;
 }
 
 Bytes derive_key(const Bytes& shared_secret, const Bytes& header) {
@@ -111,7 +135,7 @@ std::optional<Inner> decode_inner(const Bytes& b) {
     return inner;
 }
 
-Bytes seal_envelope(const Inner& inner, const Bytes& recipient_public_key) {
+Bytes seal_envelope(const Inner& inner, const Bytes& recipient_public_key, const prekey::Prekey* prekey) {
     Bytes encoded = encode_inner(inner);
     const size_t needed = 4 + encoded.size();
     size_t bucket = 0;
@@ -127,8 +151,22 @@ Bytes seal_envelope(const Inner& inner, const Bytes& recipient_public_key) {
 
     auto encap = CryptoEngine::encapsulate(recipient_public_key);
     Bytes nonce = CryptoEngine::random_bytes(12);
-    Bytes header = header_bytes(encap.ciphertext, nonce);
-    Bytes key = derive_key(encap.shared_secret, header);
+    Bytes header, key;
+    if (prekey) {
+        if (prekey->id.size() != prekey::ID_BYTES || prekey->kem_public.size() != CryptoEngine::kem_public_key_size() || prekey->x25519_public.size() != prekey::X25519_BYTES)
+            throw std::runtime_error("That prekey is not valid");
+        auto one_time = CryptoEngine::encapsulate(prekey->kem_public);
+        auto ephemeral = CryptoEngine::generate_x25519();
+        Bytes x = CryptoEngine::x25519_shared(ephemeral.private_key, prekey->x25519_public);
+        header = header_bytes_2(encap.ciphertext, prekey->id, one_time.ciphertext, ephemeral.public_key, nonce);
+        key = derive_key_2(encap.shared_secret, one_time.shared_secret, x, header);
+        CryptoEngine::secure_wipe(one_time.shared_secret);
+        CryptoEngine::secure_wipe(x);
+        CryptoEngine::secure_wipe(ephemeral.private_key);  // the sender can't open it again either: that is the point
+    } else {
+        header = header_bytes(encap.ciphertext, nonce);
+        key = derive_key(encap.shared_secret, header);
+    }
     CryptoEngine::secure_wipe(encap.shared_secret);
     Bytes ciphertext = CryptoEngine::encrypt(key, nonce, plaintext, aad_for(header));
     CryptoEngine::secure_wipe(key);
@@ -139,26 +177,59 @@ Bytes seal_envelope(const Inner& inner, const Bytes& recipient_public_key) {
     return envelope;
 }
 
-std::optional<Inner> open_envelope(const Bytes& envelope, const Bytes& my_private_key) {
+std::optional<Bytes> envelope_prekey_id(const Bytes& envelope) {
     size_t off = 0;
     auto version = read_u32(envelope.data(), envelope.size(), off);
+    if (!version || *version != ENVELOPE_VERSION_2) return std::nullopt;
     auto kem_ct = read_blob(envelope.data(), envelope.size(), off, 4096);
+    auto id = read_blob(envelope.data(), envelope.size(), off, prekey::ID_BYTES);
+    if (!kem_ct || !id || id->size() != prekey::ID_BYTES) return std::nullopt;
+    return id;
+}
+
+std::optional<Inner> open_envelope(const Bytes& envelope, const Bytes& my_private_key, const PrekeyLookup& lookup, Bytes* used_prekey_id) {
+    size_t off = 0;
+    auto version = read_u32(envelope.data(), envelope.size(), off);
+    if (!version || (*version != ENVELOPE_VERSION && *version != ENVELOPE_VERSION_2)) return std::nullopt;
+    auto kem_ct = read_blob(envelope.data(), envelope.size(), off, 4096);
+    if (!kem_ct || kem_ct->size() != CryptoEngine::kem_ciphertext_size()) return std::nullopt;
+    std::optional<Bytes> prekey_id, prekey_ct, ephemeral;
+    if (*version == ENVELOPE_VERSION_2) {
+        prekey_id = read_blob(envelope.data(), envelope.size(), off, prekey::ID_BYTES);
+        prekey_ct = read_blob(envelope.data(), envelope.size(), off, 4096);
+        ephemeral = read_blob(envelope.data(), envelope.size(), off, prekey::X25519_BYTES);
+        if (!prekey_id || prekey_id->size() != prekey::ID_BYTES || !prekey_ct || prekey_ct->size() != CryptoEngine::kem_ciphertext_size() || !ephemeral ||
+            ephemeral->size() != prekey::X25519_BYTES)
+            return std::nullopt;
+    }
     auto nonce = read_blob(envelope.data(), envelope.size(), off, 12);
-    if (!version || *version != ENVELOPE_VERSION || !kem_ct || !nonce || nonce->size() != 12 ||
-        kem_ct->size() != CryptoEngine::kem_ciphertext_size())
-        return std::nullopt;
+    if (!nonce || nonce->size() != 12) return std::nullopt;
     const Bytes header(envelope.begin(), envelope.begin() + static_cast<std::ptrdiff_t>(off));
     auto ciphertext = read_blob(envelope.data(), envelope.size(), off, relay::MAX_ENVELOPE_BYTES);
     if (!ciphertext || off != envelope.size()) return std::nullopt;
 
-    Bytes shared;
+    Bytes key;
     try {
-        shared = CryptoEngine::decapsulate(*kem_ct, my_private_key);
+        Bytes shared = CryptoEngine::decapsulate(*kem_ct, my_private_key);
+        if (*version == ENVELOPE_VERSION_2) {
+            // The one-time half: without the prekey's private key (deleted after use) there is no way in.
+            auto secret = lookup ? lookup(*prekey_id) : std::nullopt;
+            if (!secret) {
+                CryptoEngine::secure_wipe(shared);
+                return std::nullopt;
+            }
+            Bytes one_time = CryptoEngine::decapsulate(*prekey_ct, secret->kem_private);
+            Bytes x = CryptoEngine::x25519_shared(secret->x25519_private, *ephemeral);
+            key = derive_key_2(shared, one_time, x, header);
+            CryptoEngine::secure_wipe(one_time);
+            CryptoEngine::secure_wipe(x);
+        } else {
+            key = derive_key(shared, header);
+        }
+        CryptoEngine::secure_wipe(shared);
     } catch (const std::exception&) {
         return std::nullopt;
     }
-    Bytes key = derive_key(shared, header);
-    CryptoEngine::secure_wipe(shared);
     std::optional<Bytes> plaintext;
     try {
         plaintext = CryptoEngine::decrypt(key, *nonce, *ciphertext, aad_for(header));
@@ -167,6 +238,7 @@ std::optional<Inner> open_envelope(const Bytes& envelope, const Bytes& my_privat
     }
     CryptoEngine::secure_wipe(key);
     if (!plaintext) return std::nullopt;
+    if (used_prekey_id && prekey_id) *used_prekey_id = *prekey_id;
 
     const Bytes& p = *plaintext;
     if (std::find(std::begin(BUCKETS), std::end(BUCKETS), p.size()) == std::end(BUCKETS)) return std::nullopt;

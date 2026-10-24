@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
+#include "prekey.h"
 #include <vector>
 
 // The sealed envelope: what the relay stores and forwards. It is encrypted to exactly one
@@ -58,10 +60,21 @@ Bytes encode_inner(const Inner& inner);
 std::optional<Inner> decode_inner(const Bytes& encoded);
 
 // Throws std::runtime_error if the contents don't fit in the largest size bucket.
-Bytes seal_envelope(const Inner& inner, const Bytes& recipient_encryption_public_key);
+// With a prekey (one the sender took from the recipient's relay and checked with prekey::verify), the envelope is version 2:
+// its key is made from three secrets together, the recipient's long-term ML-KEM key, the prekey's ML-KEM key and an X25519
+// exchange with the prekey's X25519 key, so it can't be opened once the prekey's private half has been deleted, even by
+// someone holding the long-term key. Without one it is version 1, as before (long-term key only: no forward secrecy).
+Bytes seal_envelope(const Inner& inner, const Bytes& recipient_encryption_public_key, const prekey::Prekey* prekey = nullptr);
+// Finds the private half of a prekey by its ID; nothing if it is unknown or already deleted.
+using PrekeyLookup = std::function<std::optional<prekey::Secret>(const Bytes& prekey_id)>;
+// Which prekey a version 2 envelope names (nothing for version 1 or anything unreadable), without opening it.
+std::optional<Bytes> envelope_prekey_id(const Bytes& envelope);
 
 // std::nullopt for anything that doesn't open: wrong recipient, damage, tampering. These are
 // deliberately indistinguishable.
-std::optional<Inner> open_envelope(const Bytes& envelope, const Bytes& my_encryption_private_key);
+// For a version 2 envelope `lookup` must supply the named prekey's private half; the call fails if it can't, which is what
+// forward secrecy means. `used_prekey_id`, if given, is set to the prekey that was used.
+std::optional<Inner> open_envelope(const Bytes& envelope, const Bytes& my_encryption_private_key, const PrekeyLookup& lookup = nullptr,
+                                   Bytes* used_prekey_id = nullptr);
 
 }  // namespace chat

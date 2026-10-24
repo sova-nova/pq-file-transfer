@@ -33,6 +33,9 @@ struct RelayLimits {
     size_t archive_quota_bytes = 512ull * 1024 * 1024;   // of ciphertext, per archive
     int64_t archive_join_window_seconds = 30ll * 24 * 3600;  // members must register their keys within this
     size_t keyring_max_bytes = 4ull * 1024 * 1024;       // one mailbox's keyring (each chat's key alone is about 4 KB)
+    // Prekeys (M6).
+    uint32_t max_prekeys = 200;          // one-time prekeys one mailbox may have on the relay
+    uint32_t prekey_takes_per_hour = 60; // prekeys one send token may take in an hour, so a contact can't drain the pool
     // Attachments (M5).
     uint64_t max_attachment_bytes = 1024ull * 1024 * 1024;     // one file
     uint64_t attachment_quota_bytes = 4096ull * 1024 * 1024;   // all of one mailbox's stored files together
